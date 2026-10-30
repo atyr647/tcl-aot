@@ -46,7 +46,9 @@ proc maxok_rel {p wrap} {
     if {$::phase eq "A"} { set ::depthref($p,$wrap) $m; return ok }
     set d [expr {$m - $::depthref($p,$wrap)}]; return [expr {$d == 0 || $d == -1 ? "ok" : $d}]
 }
-foreach p {t_rec_sum t_even} { foreach wrap {{} eval dw0 dw1 {uplevel #0}} { lappend calls [list maxok $p $wrap] } }
+# (a forced hand-over, see tests/run.sh, enters a body from the interpreter in the middle of a chain: the edge is then the one of the other procs)
+set depthcmd [expr {[info exists ::env(TBC_FORCE_RATE)] ? "maxok_rel" : "maxok"}]
+foreach p {t_rec_sum t_even} { foreach wrap {{} eval dw0 dw1 {uplevel #0}} { lappend calls [list $depthcmd $p $wrap] } }
 foreach p {ta_rec_imp ta_imp_even} { foreach wrap {{} eval dw0 dw1 {uplevel #0}} { lappend calls [list maxok_rel $p $wrap] } }
 # foreach
 foreach l {{} {1} {1 2 3} {1 2 3 4 5 6 7} {a b c} "1 {2 3} 4" {1 x 3} "\{a b" {5 0 2} {1 2 3 4}} {
@@ -138,6 +140,26 @@ foreach p {th_frame th_frame2 th_frame_cmd th_frame_proc th_uplevel th_eval th_e
     lappend calls "catch {rename thc {}}; set r \[coroutine thc $p\]; catch {rename thc {}}; set r"
 }
 
+# procs that cannot yield run compiled inside a coroutine; the results, errors and error info must be the interpreter's
+foreach spec {
+    {tr_basic 7} {tr_order 9} {tr_grow 20} {tr_pair 5} {tr_rec 6} {tr_catch 1} {tr_catch x} {tr_missing_elem 3} {tr_incr_text abc} {tr_exists_order 11 4294967296}
+    {tf_sum {1 2 3}} {tf_after {1 2}} {tf_err {1 0}} {tfe_calls 10} {tfe_err {1 0 2}} {tq_sq 12} {t_rec_sum 50} {t_rec_sum 100000} {tfx_eff abc}
+} {
+    lappend calls "catch {rename tcy {}}; coroutine tcy apply {{p args} { yield \[catch {\$p {*}\$args} m\]; return \$m }} $spec; set a \[tcy\]; catch {rename tcy {}}; set a"
+    lappend calls "catch {rename tcy {}}; set r \[catch {coroutine tcy {*}{$spec}} m\]; catch {rename tcy {}}; list \$r \$m"
+    lappend calls "catch {rename tcy {}}; coroutine tcy apply {{p args} { yield 1; set r \[catch {\$p {*}\$args} m\]; list \$r \$m }} $spec; tcy; set a \[tcy\]; catch {rename tcy {}}; set a"
+}
+lappend calls {catch {rename tcy {}}; set a [coroutine tcy apply {{} { yield [ty_mid 1]; return end }}]; set b [tcy]; catch {rename tcy {}}; list $a $b}
+lappend calls {rename ty_leaf ty_leaf_orig; proc ty_leaf {x} { yield $x; return 5 }; catch {rename tcy {}}; set a [coroutine tcy apply {{} { yield [ty_mid 1]; return end }}]; set b [tcy]; set c [catch {tcy} m]; catch {rename tcy {}}; rename ty_leaf {}; rename ty_leaf_orig ty_leaf; list $a $b $c $m}
+lappend calls {catch {rename tcy {}}; set a [coroutine tcy apply {{} { yield [ty_mid 1]; return end }}]; catch {rename tcy {}}; set a}
+# built-ins replaced after the procs were compiled against them
+lappend calls {tb_rev {1 2 3}} {tbns::rev2 {1 2 3}} {tb_ins {a b}}
+lappend calls {rename linsert linsert_orig; proc linsert {l i v} { uplevel 1 {set x 66}; return LI }; set a [tb_ins {a b}]; rename linsert {}; rename linsert_orig linsert; set a}
+lappend calls {tb_ins {a b}}
+lappend calls {namespace eval tbns { proc lreverse {l} { uplevel 1 {set x 55}; return NS } }; set a [tbns::rev2 {1 2}]; set b [tb_rev {1 2}]; namespace eval tbns { rename lreverse {} }; list $a $b}
+lappend calls {tbns::rev2 {1 2}} {tb_rev {1 2}}
+lappend calls {rename lreverse lrv_orig; proc lreverse {l} { uplevel 1 {set x 77}; return RL }; set a [list [tb_rev {1 2}] [tbns::rev2 {1 2}]]; rename lreverse {}; rename lrv_orig lreverse; set a}
+lappend calls {tb_rev {1 2}} {tbns::rev2 {1 2}}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}

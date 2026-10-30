@@ -4,6 +4,7 @@
 #
 #   fuzz/run.sh typed <seed> [-O flags]   arithmetic, integer vectors, integer maps, arrays and links: the typed code and its fall-backs
 #   fuzz/run.sh boxed <seed> [-O flags]   strings, lists, dicts, arrays, flow control, named variables, bit operators: the boxed code
+#   TBC_FORCE_RATE=<n> fuzz/run.sh typed <seed>   the same with forced hand-overs to the boxed code
 set -u
 cd "$(dirname "$0")/.." || exit 1
 . tools/env.sh || exit 1
@@ -12,6 +13,8 @@ kind=${1:?usage: fuzz/run.sh typed|boxed <seed>}
 seed=${2:?usage: fuzz/run.sh typed|boxed <seed>}
 shift 2
 cflags=${*:--O1}
+# TBC_FORCE_RATE=<n> in the environment: the module hands over to boxed code at about one typed instruction in n (see tests/run.sh)
+[ -n "${TBC_FORCE_RATE:-}" ] && export TBC_FORCE_DEOPT=1
 fuzz=$PWD/fuzz
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

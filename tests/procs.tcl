@@ -1252,3 +1252,12 @@ proc tr_exists_order2 {n a} {
     }
     return [array get m]
 }
+
+# a proc that cannot yield calls one that is replaced, inside a coroutine, by one that does
+proc ty_leaf {x} { expr {$x + 1} }
+proc ty_mid {x} { return [expr {[ty_leaf $x] * 2}] }
+
+# a built-in that a proc was compiled against is replaced: by a proc that changes the caller's variable, in the global namespace and in the proc's own
+proc tb_rev {l} { set x 1; set r [lreverse $l]; return [list $r $x] }
+namespace eval tbns { proc rev2 {l} { set x 1; set r [lreverse $l]; return [list $r $x] } }
+proc tb_ins {l} { set x 1; set r [linsert $l 0 z]; return [list $r $x] }

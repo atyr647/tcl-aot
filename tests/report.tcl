@@ -126,5 +126,17 @@ rename t_cmp t_cmp_renamed
 check "renamed proc computes" [t_cmp_renamed 1 2] $want
 if {$mode eq "lazy"} { check "renamed before its first call: attached under the new name" [expr {"::t_cmp_renamed" in [tbc::attached]}] 1 }
 check "renamed proc, second call" [t_cmp_renamed 1 2] $want
+# ---- coroutines: a proc that cannot yield runs compiled inside one; a proc with a yield below it runs the interpreter's version
+tq_sq 2; catch {tg_outer 1}
+set r0 [tbc::report]
+coroutine rcy1 apply {{} { yield [tq_sq 5]; return 0 }}
+set r1 [tbc::report]
+check "yield-safe proc inside a coroutine runs compiled" [expr {[dict get $r1 compiled_calls] - [dict get $r0 compiled_calls]}] 1
+check "yield-safe proc inside a coroutine: no call handed to the interpreter" [expr {[dict get $r1 coroutine_calls] - [dict get $r0 coroutine_calls]}] 0
+rename rcy1 {}
+coroutine rcy2 tg_outer 1
+set r2 [tbc::report]
+check "proc with a yield below it inside a coroutine: interpreter's version" [expr {[dict get $r2 coroutine_calls] - [dict get $r1 coroutine_calls] >= 1}] 1
+rename rcy2 {}
 puts [expr {$fails ? "$fails FAILED" : "all report checks passed"}]
 exit [expr {$fails ? 1 : 0}]
