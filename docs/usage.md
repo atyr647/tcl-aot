@@ -89,4 +89,4 @@ The module adds commands in the `::tbc` namespace:
   that name variables, and calls of commands not known to leave the caller's variables alone (`TBC_DEADOPS=1` lists them for your procs).  Boxed code
   is about as fast as the interpreter.
 * Redefining a command a compiled proc depends on (a callee, or a core command the compiler inlined) is handled: calls fall back or the proc is demoted.
-  A built-in a proc was compiled against that is shadowed, aliased, imported, hidden or replaced is noticed when the proc is next entered (decisions 19); a replacement made by the proc itself while it runs is not.
+  A built-in a proc was compiled against that is shadowed, aliased, imported, hidden or replaced is noticed when the proc is next entered (decisions 19); a replacement made by the proc itself while it runs is checked only by the tests listed in decisions 19.

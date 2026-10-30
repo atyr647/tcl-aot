@@ -262,10 +262,10 @@ Tcl's own `::tcl::binary::format`, `::tcl::clock::format`, `::tcl::file::join`, 
 Resolving from the proc's namespace, as above, fixes it: the same workloads run 6-11% fewer instructions, and the report check `tb_fmt`/`tb_spl` fails when they
 fall back again.
 
-What the check does not do: it is made when a compiled proc is entered, not while it runs.  A proc that replaces a built-in it is itself using, between two of
-its own instructions, finishes the call with the old one.  The interpreter resolves the name again at every call.  This is not closed; it needs the check at
-every call of such a command, which would cost more than the commands it protects.  Measured cost of the entry check is not yet separated from the
-differential run, so no figure is claimed.
+What the check does not do: it is made when a compiled proc is entered, not while it runs.  The interpreter resolves a name at every call.  Two procs that rename
+and redefine a built-in they use between two calls of it (`tb_self`, `tb_self2`: the second also has the new command write the caller's variable) give the
+interpreter's results in the differential test; that is all that has been shown.  There is no argument that it holds for every shape of body, so it is not
+claimed.
 
 The first forced-hand-over fuzz run crashed.  The cause was in the test instrumentation: the coverage counters of a `-DTBC_COV` build (a fixed table of 8192 sites, no bound
 check) overflowed once every instruction had a hand-over site, and wrote over `tbcOne`.  The table is larger now and the sites beyond it share the last slot.

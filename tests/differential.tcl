@@ -206,6 +206,8 @@ lappend calls {tbal::rev {1 2 3}} {tbim::rev {1 2 3}} {tb_hide {1 2 3}} {tb_fmt 
 lappend calls {proc ::tb_alias_target {l} { uplevel 1 {set x 44}; return AL }; interp alias {} ::tbal::lreverse {} ::tb_alias_target; set a [tbal::rev {1 2}]; interp alias {} ::tbal::lreverse {}; list $a [tbal::rev {1 2}]}
 lappend calls {namespace eval tbexp { proc lreverse {l} { uplevel 1 {set x 33}; return IM }; namespace export lreverse }; namespace eval tbim { namespace import ::tbexp::lreverse }; set a [tbim::rev {1 2}]; namespace eval tbim { namespace forget ::tbexp::lreverse }; list $a [tbim::rev {1 2}]}
 lappend calls {interp hide {} lreverse; set a [catch {tb_hide {1 2}} m]; interp expose {} lreverse; list $a $m [tb_hide {1 2}]}
+lappend calls {set r [tb_self {1 2}]; rename lreverse {}; rename tb_self_orig lreverse; set r}
+lappend calls {set r [tb_self2 5]; rename lreverse {}; rename tb_self2_orig lreverse; set r}
 lappend calls {tb_hide {1 2}} {tbal::rev {1 2}} {tbim::rev {1 2}} {tb_fmt {x y}} {tb_spl x,y}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }

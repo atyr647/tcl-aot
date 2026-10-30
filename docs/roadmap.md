@@ -33,7 +33,8 @@ An item moves out of this file when it is measured, tested and written up there.
 
 ## Replaced commands
 
-Done at proc entry (decisions 19).  Open: a replacement made by a proc while it is itself running and using the built-in.
+Checked at proc entry (decisions 19).  Not shown for every case: a replacement made by a proc while it is itself running and using the built-in
+(two shapes tested, no difference found).
 
 ## Instructions typed code still hands over at
 

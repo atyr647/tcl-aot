@@ -1420,6 +1420,21 @@ proc ty2_yto {n} {
 # built-ins replaced through `interp alias`, `namespace import` and `interp hide`, and procs that use built-ins nobody has replaced
 namespace eval tbal { proc rev {l} { set x 1; set r [lreverse $l]; return [list $r $x] } }
 namespace eval tbim { proc rev {l} { set x 1; set r [lreverse $l]; return [list $r $x] } }
+proc tb_self {l} {
+    set a [lreverse $l]
+    rename lreverse tb_self_orig
+    proc lreverse {l} { return REPLACED }
+    set b [lreverse $l]
+    list $a $b
+}
+proc tb_self2 {n} {
+    set x $n
+    set a [lreverse {1 2}]
+    rename lreverse tb_self2_orig
+    proc lreverse {l} { uplevel 1 {set x 77}; return R }
+    set b [lreverse {1 2}]
+    list $a $b $x
+}
 proc tb_hide {l} { set x 1; set r [lreverse $l]; return [list $r $x] }
 proc tb_fmt {l} { return [format "%d:%s" [llength $l] [join $l ,]] }
 proc tb_spl {s} { set r [split $s ,]; return [list [llength $r] [puts_free $r]] }
