@@ -147,5 +147,11 @@ rcy3; rcy3; rcy3
 set r4 [tbc::report]
 check "proc that yields: runs compiled in a coroutine" [expr {[dict get $r4 compiled_calls] - [dict get $r3 compiled_calls] >= 3}] 1
 check "proc that yields: no call handed to the interpreter" [expr {[dict get $r4 coroutine_calls] - [dict get $r3 coroutine_calls]}] 0
+# built-ins that only Tcl's own namespaces have another command of the name of (format, join, split: ::tcl::binary::format, ::tcl::file::join ...) are not withdrawn
+tb_fmt {a b}; tb_spl a,b
+set r5 [tbc::report]
+tb_fmt {a b c}; tb_fmt {d e}; tb_spl x,y,z
+set r6 [tbc::report]
+check "built-ins with look-alikes in Tcl's own namespaces: procs stay compiled" [expr {[dict get $r6 compiled_calls] - [dict get $r5 compiled_calls]}] 3
 puts [expr {$fails ? "$fails FAILED" : "all report checks passed"}]
 exit [expr {$fails ? 1 : 0}]

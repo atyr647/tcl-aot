@@ -28,17 +28,12 @@ An item moves out of this file when it is measured, tested and written up there.
 
 ## Coroutines
 
-* **Procs that contain `yield` / `yieldto`** run the interpreter's version.  Compiled boxed code can suspend through the interpreter's callbacks (save the pc and
-  the operand stack, push a resume callback and `TclNRCoroutineActivateCallback`), but then everything it calls that might yield must be called without
-  recursing into the interpreter.  Typed code is worth having only if it can be re-entered after a yield (the locals come back from the frame, checked against the
-  kinds the typed code assumes), which is an on-stack-replacement entry per yield point.  Without that the gain over the interpreter is small.
 * **Hand-over at every instruction, for the callee side**: the forced hand-over test covers typed to boxed; the other direction (boxed to typed at a loop head) does
   not exist yet and is the same entry point as above.
 
 ## Replaced commands
 
-A command created in another namespace by `interp alias`, `namespace import` or C code that shadows a built-in a proc was compiled against is not seen
-(decisions 19).  Re-resolving the built-ins from the proc's namespace when a command table changes would close it; Tcl has no notification for that.
+Done at proc entry (decisions 19).  Open: a replacement made by a proc while it is itself running and using the built-in.
 
 ## Instructions typed code still hands over at
 

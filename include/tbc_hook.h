@@ -31,7 +31,9 @@ typedef struct TbcEntry {
     struct TbcEntry *sameName;		/* the entry registered before this one under the same name (a module can hold several definitions of a name) */
     int ysafe;				/* nothing it runs can yield: it may run compiled inside a coroutine, as long as the procs it calls are still the compiled ones */
     int **ydeps;			/* the valid flags of every proc it calls, directly or not (NULL-terminated; NULL if none) */
-    int **bdeps;			/* the "withdrawn" flags of the built-in commands it, or a proc it calls, was analysed against (NULL-terminated; NULL if none) */
+    const unsigned short *gdeps;	/* the built-ins it, or a proc it calls, was analysed against: indexes into guard->deps */
+    int ngd;
+    struct TbcGuard *guard;
     int yres;				/* it yields itself, and everything else it runs is yield-safe: its boxed code can suspend a coroutine */
 } TbcEntry;
 
@@ -1068,55 +1070,75 @@ static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
  * cleared when one of them is renamed or deleted (traces set up by tbc_mf_setup), and when a proc is defined under a name that contains
  * ::tcl::mathfunc:: (the compiler emits the relative name tcl::mathfunc::sqrt, so ::ns::tcl::mathfunc::sqrt would be found first). */
 TBC_SHARED int tbc_mf_ok;
-/* Built-in commands the analysis relied on (that they run no script and leave the caller's variables alone).  A module registers its names and one flag
- * per name; the flag is set, and the module's direct calls to the procs that depend on the command are withdrawn, when the command is renamed or
- * deleted (traces) or when a proc is defined under its name in any namespace (the proc wrapper).  An entry whose built-ins are withdrawn runs the
- * interpreter's version. */
-static void tbc_trace(Tcl_Interp *interp, const char *action, const char *kind, const char *name, const char *ops, const char *handler, int withName);
-typedef struct { const char *const *names; int *off; int n; void (*withdraw)(int); } TbcBuiltins;
-#define TBC_MAX_BREG 16
-TBC_SHARED TbcBuiltins tbc_breg[TBC_MAX_BREG];
-TBC_SHARED int tbc_nbreg;
-static int tbc_bshadow(Namespace *ns, const char *tail, int top) {
-    Tcl_HashSearch search;
-    Tcl_HashEntry *h;
-    if (!top && Tcl_FindHashEntry(&ns->cmdTable, tail)) return 1;
-    for (h = Tcl_FirstHashEntry(&ns->childTable, &search); h; h = Tcl_NextHashEntry(&search)) {
-        if (tbc_bshadow((Namespace *) Tcl_GetHashValue(h), tail, 0)) return 1;
-    }
-    return 0;
-}
-static const char *tbc_tail(const char *name) { const char *t = strrchr(name, ':'); return t ? t + 1 : name; }
-static void tbc_bwithdraw(TbcBuiltins *b, int i) { if (!b->off[i]) { b->off[i] = 1; b->withdraw(i); } }
-static void tbc_builtins_register(Tcl_Interp *interp, const char *const *names, int *off, int n, void (*withdraw)(int)) {
-    TbcBuiltins *b;
+/* Built-in commands the analysis relied on (that they run no script and leave the caller's variables alone).  The module names them, with the namespaces
+ * they are looked up from.  Tcl itself keeps a cached command name valid only while the command's epoch, the namespace and the namespace's command epoch are
+ * unchanged (Tcl_GetCommandFromObj); the same three tell here that a lookup from the namespace still finds the built-in:
+ *   - the built-in as it was when the module was loaded (pinned) has not been renamed, deleted or hidden (its cmdEpoch, CMD_IS_DELETED);
+ *   - the namespace has not had a command created that may shadow a global one, an import, a path or a resolver change (nsId, cmdRefEpoch, resolverEpoch).
+ * When any of these differs the name is looked up again from the namespace (Tcl_FindCommand), and the dependency is withdrawn for good if it does not give the
+ * built-in (or an import of it).  An entry with a withdrawn dependency runs the interpreter's version. */
+typedef struct { unsigned short name, ns; } TbcGDep;
+typedef struct TbcGuard {
+    const char *const *names; int nnames;
+    const char *const *nss; int nnss;
+    const TbcGDep *deps; int ndeps;
+    Command **exp; int *expEp;			/* per name: the global command at load time, and its epoch */
+    Namespace **nsp; long *nsid; int *cre, *rse;	/* per namespace: the namespace once it exists, and its epochs when last verified */
+    unsigned char *bad;				/* per dependency: withdrawn */
+} TbcGuard;
+static void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
     int i;
-    if (tbc_nbreg >= TBC_MAX_BREG) { for (i = 0; i < n; i++) off[i] = 1; withdraw(-1); return; }
-    b = &tbc_breg[tbc_nbreg++];
-    b->names = names; b->off = off; b->n = n; b->withdraw = withdraw;
-    for (i = 0; i < n; i++) {
-        Tcl_CmdInfo ci;
-        const char *nm = names[i];
-        /* (a plain global name is shadowed by a command of that name in any namespace; an implementation name such as ::tcl::string::reverse only by itself) */
-        int plain = strchr(nm + 2, ':') == NULL;
-        if (!Tcl_GetCommandInfo(interp, nm, &ci) || ci.objProc == TclObjInterpProc || (plain && tbc_bshadow(((Interp *) interp)->globalNsPtr, nm + 2, 1))) tbc_bwithdraw(b, i);
-        else tbc_trace(interp, "add", "command", nm, "rename delete", "::tbc::invalidate", 1);
+    g->exp = (Command **) ckalloc((size_t) g->nnames * sizeof(Command *)); g->expEp = (int *) ckalloc((size_t) g->nnames * sizeof(int));
+    g->nsp = (Namespace **) ckalloc((size_t) g->nnss * sizeof(Namespace *)); g->nsid = (long *) ckalloc((size_t) g->nnss * sizeof(long));
+    g->cre = (int *) ckalloc((size_t) g->nnss * sizeof(int)); g->rse = (int *) ckalloc((size_t) g->nnss * sizeof(int));
+    g->bad = (unsigned char *) ckalloc((size_t) g->ndeps);
+    memset(g->bad, 0, (size_t) g->ndeps); memset(g->nsp, 0, (size_t) g->nnss * sizeof(Namespace *));
+    for (i = 0; i < g->nnames; i++) {
+        Command *c = (Command *) Tcl_FindCommand(interp, g->names[i], NULL, TCL_GLOBAL_ONLY);
+        if (c && c->objProc == TclObjInterpProc) c = NULL;	/* (already a proc of the program: not the built-in) */
+        if (c) c->refCount++;					/* (kept alive, as Tcl does for the commands it caches) */
+        g->exp[i] = c; g->expEp[i] = c ? c->cmdEpoch : 0;
     }
 }
-static void tbc_builtins_changed(const char *name) {
-    int k, i;
-    for (k = 0; k < tbc_nbreg; k++) {
-        TbcBuiltins *b = &tbc_breg[k];
-        for (i = 0; i < b->n; i++) {
-            const char *nm = b->names[i];
-            int plain = strchr(nm + 2, ':') == NULL;
-            if (strcmp(nm, name) == 0 || (plain && strcmp(nm + 2, tbc_tail(name)) == 0)) tbc_bwithdraw(b, i);
-        }
+/* look up every dependency that is looked up from namespace k again; withdraw those that no longer give the built-in */
+static void tbc_guard_verify(Tcl_Interp *interp, TbcGuard *g, int k) {
+    Namespace *ns = g->nsp[k];
+    int d;
+    if (!ns) {
+        ns = (Namespace *) Tcl_FindNamespace(interp, g->nss[k], NULL, 0);
+        if (ns) { ns->refCount++; g->nsp[k] = ns; }
     }
+    for (d = 0; d < g->ndeps; d++) {
+        const TbcGDep *dp = &g->deps[d];
+        Command *c, *f;
+        if (dp->ns != k || g->bad[d]) continue;
+        c = g->exp[dp->name];
+        if (!ns || (ns->flags & NS_DEAD) || !c || (c->flags & CMD_IS_DELETED)) { g->bad[d] = 1; continue; }
+        f = (Command *) Tcl_FindCommand(interp, g->names[dp->name], (Tcl_Namespace *) ns, 0);
+        if (!f || (f != c && (Command *) TclGetOriginalCommand((Tcl_Command) f) != c)) { g->bad[d] = 1; continue; }
+        g->expEp[dp->name] = c->cmdEpoch;
+    }
+    if (ns) { g->nsid[k] = ns->nsId; g->cre[k] = ns->cmdRefEpoch; g->rse[k] = ns->resolverEpoch; }
 }
-static int tbc_bok(const TbcEntry *e) {
-    int **d;
-    for (d = e->bdeps; d && *d; d++) if (**d) return 0;
+static int tbc_guard_slow(Tcl_Interp *interp, const TbcEntry *e) {
+    TbcGuard *g = e->guard;
+    int k, ok = 1;
+    for (k = 0; k < e->ngd; k++) tbc_guard_verify(interp, g, g->deps[e->gdeps[k]].ns);
+    for (k = 0; k < e->ngd; k++) if (g->bad[e->gdeps[k]]) ok = 0;
+    return ok;
+}
+/* do the built-ins this body, and the procs it calls, were analysed against still resolve to themselves?  A few compares when nothing has changed. */
+static int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
+    TbcGuard *g = e->guard;
+    int k;
+    for (k = 0; k < e->ngd; k++) {
+        int di = e->gdeps[k];
+        const TbcGDep *dp = &g->deps[di];
+        Namespace *ns = g->nsp[dp->ns];
+        Command *c = g->exp[dp->name];
+        if (TBC_UNLIKELY(g->bad[di] || !ns || !c || ns->nsId != g->nsid[dp->ns] || ns->cmdRefEpoch != g->cre[dp->ns] || ns->resolverEpoch != g->rse[dp->ns]
+                || c->cmdEpoch != g->expEp[dp->name] || (c->flags & CMD_IS_DELETED))) return tbc_guard_slow(interp, e);
+    }
     return 1;
 }
 
@@ -1124,7 +1146,6 @@ static void tbc_invalidate_name(const char *name) {
     Tcl_HashEntry *h;
     TbcEntry *e;
     if (strstr(name, "::tcl::mathfunc::")) tbc_mf_ok = 0;
-    tbc_builtins_changed(name);
     h = Tcl_FindHashEntry(&tbc_by_name, name);
     if (!h) return;
     for (e = (TbcEntry *) Tcl_GetHashValue(h); e; e = e->sameName) if (e->valid) *e->valid = 0;
@@ -1485,7 +1506,7 @@ static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *co
         r->epoch = iPtr->compileEpoch;
         if (tbc_probe(interp, p, r->e->body, r->name) != r->e->fp) { r->demoted = 1; if (r->e->valid) *r->e->valid = 0; }
     }
-    if (r->demoted || !tbc_bok(r->e) || (iPtr->execEnvPtr->corPtr && !tbc_ysafe_now(r->e)) || (TBC_NEST_CAP && tbc_nest >= TBC_NEST_CAP)) { r->fallbacks++; return tbc_fallback(interp, r); }
+    if (r->demoted || (r->e->ngd && !tbc_guard_ok(interp, r->e)) || (iPtr->execEnvPtr->corPtr && !tbc_ysafe_now(r->e)) || (TBC_NEST_CAP && tbc_nest >= TBC_NEST_CAP)) { r->fallbacks++; return tbc_fallback(interp, r); }
     r->calls++;
     if (r->fresh) { r->fresh = 0; iPtr->errorLine = 1; }
     {   /* the interpreter reports the frame of a body that came from the program as source, not as "precompiled" (the stub's flag) */

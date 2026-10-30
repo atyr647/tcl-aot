@@ -480,9 +480,9 @@ proc prepare {P} {
                     set bn [string trimleft $nm :]
                     if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins} {
                         # (stays in its own frame, runs no script)
-                        if {![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]} { lappend bins ::$bn }
+                        if {![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]} { lappend bins $nm }
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
-                        lappend bins ::$bn
+                        lappend bins $nm
                     } else {
                         set csafe 0; set yres 0
                     }
@@ -717,18 +717,20 @@ proc ydeps {P} {
     }
     return [lsort $seen]
 }
-# the built-in commands a proc depends on, with those of every proc it calls
-proc bdeps {P} {
+# the built-in commands a proc depends on, with those of every proc it calls, as {name namespace} pairs (a name is looked up from the namespace of the proc that
+# uses it)
+proc gdeps {P} {
     global PI
-    set seen {}; set todo [list $P]; set bins {}
+    set seen {}; set todo [list $P]; set r {}
     while {[llength $todo]} {
         set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
         if {$c in $seen || ![info exists PI($c,bins)]} continue
         lappend seen $c
-        lappend bins {*}$PI($c,bins)
+        set ns [namespace qualifiers $c]; if {$ns eq ""} { set ns :: }
+        foreach b $PI($c,bins) { lappend r [list $b $ns] }
         set todo [concat $todo $PI($c,callees)]
     }
-    return [lsort -unique $bins]
+    return [lsort -unique $r]
 }
 proc flushSet {P pc} { global PI; expr {$PI($P,pure) ? $PI($P,live,$pc) : $PI($P,may,$pc)} }
 # A proc that can be asked about its variables by name (not pure) must write every variable that was assigned on some path into the frame when it leaves
@@ -3158,30 +3160,32 @@ proc canonArgs {P} {
     foreach a [info args $P] { if {[info default $P $a d]} { lappend r "$a\003$d" } else { lappend r $a } }
     join $r "\002"
 }
-# the built-ins the compiled code was analysed against: a table of names, a flag per name that the runtime sets when the command is renamed, deleted or
-# shadowed, and the function that then withdraws the direct calls to the procs that depend on it
-set allBins {}
-foreach P $translatable { foreach b [bdeps $P] { if {$b ni $allBins} { lappend allBins $b } } }
-set allBins [lsort $allBins]
-if {[llength $allBins]} {
-    append out "static const char *const tbc_bnames_$initName\[\] = { [join [lmap b $allBins {cstring $b}] {, }] };\nstatic int tbc_boff_$initName\[[llength $allBins]\];\n"
-    append out "static void tbc_binval_${initName}(int i)\n\{\n    switch (i) \{\n"
-    set bi 0
-    foreach b $allBins {
-        append out "    case $bi:"
-        foreach P $translatable { if {$b in [bdeps $P]} { append out " tbc_valid_[cident $P] = 0;" } }
-        append out " break;\n"
-        incr bi
+# The built-ins the compiled code was analysed against.  The module lists the distinct names, the distinct namespaces they are looked up from and the pairs;
+# each entry lists its pairs (those of the procs it calls included).  The runtime checks them when the proc is entered (see tbc_guard_ok).
+set gnames {}; set gnss {}; set gall {}
+foreach P $translatable {
+    foreach d [gdeps $P] {
+        lassign $d n sp
+        if {$n ni $gnames} { lappend gnames $n }
+        if {$sp ni $gnss} { lappend gnss $sp }
+        if {$d ni $gall} { lappend gall $d }
     }
-    append out "    \}\n\}\n"
+}
+set gall [lsort $gall]
+if {[llength $gall]} {
+    append out "static const char *const tbc_gn_${initName}\[\] = { [join [lmap n $gnames {cstring $n}] {, }] };\n"
+    append out "static const char *const tbc_gs_${initName}\[\] = { [join [lmap n $gnss {cstring $n}] {, }] };\n"
+    append out "static const TbcGDep tbc_gd_${initName}\[\] = { [join [lmap d $gall {format "{%d, %d}" [lsearch -exact $gnames [lindex $d 0]] [lsearch -exact $gnss [lindex $d 1]]}] {, }] };\n"
+    append out "static TbcGuard tbc_guard_${initName} = { tbc_gn_${initName}, [llength $gnames], tbc_gs_${initName}, [llength $gnss], tbc_gd_${initName}, [llength $gall] };\n"
 }
 foreach P $translatable {
     set cid [cident $P]
     set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
     set fp [tbc::fingerprint $P]
-    if {[llength [bdeps $P]]} { append out "static int *tbc_bd_$cid\[\] = { [join [lmap b [bdeps $P] {string cat &tbc_boff_$initName\[[lsearch -exact $allBins $b]\]}] {, }], NULL };\n" }
+    set gx [lmap d [gdeps $P] {lsearch -exact $gall $d}]
+    if {[llength $gx]} { append out "static const unsigned short tbc_gx_$cid\[\] = { [join $gx {, }] };\n" }
     if {[llength [ydeps $P]]} { append out "static int *tbc_yd_$cid\[\] = { [join [lmap c [ydeps $P] {string cat &tbc_valid_[cident $c]}] {, }], NULL };\n" }
-    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength [bdeps $P]] ? "tbc_bd_$cid" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}] \};\n"
+    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}] \};\n"
 }
 # the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled
 if {[llength $refusedProcs]} {
@@ -3195,7 +3199,7 @@ if {[llength $refusedProcs]} {
 }
 set regId 0
 append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_build(interp) != TCL_OK) return TCL_ERROR;\n    tbc_rt_init();\n    tbc_capture_builtins(interp);\n    tbc_install(interp);\n"
-if {[llength $allBins]} { append out "    tbc_builtins_register(interp, tbc_bnames_$initName, tbc_boff_$initName, [llength $allBins], tbc_binval_$initName);\n" }
+if {[llength $gall]} { append out "    tbc_guard_register(interp, &tbc_guard_$initName);\n" }
 foreach P $translatable {
     set i 0
     foreach l $PI($P,lits) {

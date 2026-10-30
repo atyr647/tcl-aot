@@ -201,6 +201,12 @@ foreach n {0 1 2 3 5} {
 foreach n {0 2 4} { lappend calls "tco tyc {set r \[coroutine tyc ty2_inner_yield $n\]; while {\[llength \[info commands tyc\]\]} { lappend r \[tyc\] }; set r}" }
 foreach n {0 2} { lappend calls "tco tyc {set r \[coroutine tyc ty2_lit $n\]; lappend r \[tyc X\]}" }
 foreach {a b} {1 2 -3 4 9223372036854775800 5 abc 2 1 abc} { lappend calls "tco tyc {set r \[catch {coroutine tyc ty2_args $a $b} m\]; if {\$r == 0} { lappend r \$m; lappend r \[catch {tyc} m2\] \$m2 }; set r}" }
+# built-ins replaced by an alias in the proc's namespace, by an import, by hiding; and procs using built-ins that only Tcl's own namespaces have a command of the same name
+lappend calls {tbal::rev {1 2 3}} {tbim::rev {1 2 3}} {tb_hide {1 2 3}} {tb_fmt {a b c}} {tb_spl a,b,c}
+lappend calls {proc ::tb_alias_target {l} { uplevel 1 {set x 44}; return AL }; interp alias {} ::tbal::lreverse {} ::tb_alias_target; set a [tbal::rev {1 2}]; interp alias {} ::tbal::lreverse {}; list $a [tbal::rev {1 2}]}
+lappend calls {namespace eval tbexp { proc lreverse {l} { uplevel 1 {set x 33}; return IM }; namespace export lreverse }; namespace eval tbim { namespace import ::tbexp::lreverse }; set a [tbim::rev {1 2}]; namespace eval tbim { namespace forget ::tbexp::lreverse }; list $a [tbim::rev {1 2}]}
+lappend calls {interp hide {} lreverse; set a [catch {tb_hide {1 2}} m]; interp expose {} lreverse; list $a $m [tb_hide {1 2}]}
+lappend calls {tb_hide {1 2}} {tbal::rev {1 2}} {tbim::rev {1 2}} {tb_fmt {x y}} {tb_spl x,y}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}

@@ -246,15 +246,26 @@ variables in C locals across a call of it.  A program can break that after the m
 made the compiled proc answer with a stale `x` where the interpreter answers 77 (found by looking for divergences by hand; the tests had never replaced a built-in).
 Math functions had a guard for this (`tbc_mf_ok`); the other built-ins had none.
 
-Now the translator lists, for every proc, the built-ins it relied on (with those of every proc it calls), and the module registers them: a flag per name, set when
-the command is renamed or deleted (command traces), when a proc of that name is defined in any namespace (the proc wrapper), or when the module is loaded
-while the name is already a proc or shadowed in some namespace.  Setting the flag withdraws the direct calls to the procs that depend on it, and an entry
-whose built-ins are withdrawn runs the interpreter's version.  A plain name (`lreverse`) is withdrawn by a command of that name anywhere, an implementation
-name (`::tcl::string::reverse`) only by itself.  `tb_*` in the differential test (global and namespace shadowing, replaced and put back); the checks fail
-without the guard.
+The translator lists, for every proc, the built-ins it relied on, with the namespace each is looked up from (and those of every proc it calls).  The module
+registers them.  The check is Tcl's own: a cached command name stays valid only while the command's epoch, the namespace and the namespace's `cmdRefEpoch`
+(and `resolverEpoch`) are unchanged.  At load the global built-in is pinned (reference held, epoch noted).  At each entry of a proc with such dependencies the
+module compares the namespace's `nsId`, `cmdRefEpoch` and `resolverEpoch` and the pinned command's `cmdEpoch` and `CMD_IS_DELETED` with what was last verified;
+a few compares, and nothing else, while nothing has changed.  When one differs the names are looked up again from the namespace (`Tcl_FindCommand`), and a
+dependency that no longer gives the pinned command (or an import of it) is withdrawn for good; an entry with a withdrawn dependency runs the interpreter's
+version.  Withdrawal is for good because the program may have put the original back and the epoch gives no way to tell a command that was replaced from one
+that was replaced twice.  Covered, each with a check in `tb_*` / `tbal` / `tbim` that fails without the guard: rename, delete, `proc` in the global or a nested
+namespace, `interp alias` into a nested namespace, `namespace import`, `interp hide`, and putting the original back.
 
-What this does not cover: a command of the same name created in a namespace by `interp alias`, `namespace import` or C code rather than `proc` (the delete
-trace covers replacing the global built-in itself).  That needs Tcl to tell us about command creation, which it does not.
+The first design of this guard (a flag per name, withdrawn when any command *ending* in that name existed in any namespace) was wrong in the other direction:
+Tcl's own `::tcl::binary::format`, `::tcl::clock::format`, `::tcl::file::join`, `::tcl::file::split` and `::tcl::chan::puts` made it withdraw `format`, `join`,
+`split` and `puts`, so procs that used them ran interpreted (found profiling eleven tcllib-style workloads: 172 of 183 calls of the sha1 proc ran interpreted).
+Resolving from the proc's namespace, as above, fixes it: the same workloads run 6-11% fewer instructions, and the report check `tb_fmt`/`tb_spl` fails when they
+fall back again.
+
+What the check does not do: it is made when a compiled proc is entered, not while it runs.  A proc that replaces a built-in it is itself using, between two of
+its own instructions, finishes the call with the old one.  The interpreter resolves the name again at every call.  This is not closed; it needs the check at
+every call of such a command, which would cost more than the commands it protects.  Measured cost of the entry check is not yet separated from the
+differential run, so no figure is claimed.
 
 The first forced-hand-over fuzz run crashed.  The cause was in the test instrumentation: the coverage counters of a `-DTBC_COV` build (a fixed table of 8192 sites, no bound
 check) overflowed once every instruction had a hand-over site, and wrote over `tbcOne`.  The table is larger now and the sites beyond it share the last slot.

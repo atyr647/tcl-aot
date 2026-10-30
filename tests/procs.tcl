@@ -1416,3 +1416,11 @@ proc ty2_yto {n} {
     for {set i 0} {$i < $n} {incr i} { incr s $i }
     return $s
 }
+
+# built-ins replaced through `interp alias`, `namespace import` and `interp hide`, and procs that use built-ins nobody has replaced
+namespace eval tbal { proc rev {l} { set x 1; set r [lreverse $l]; return [list $r $x] } }
+namespace eval tbim { proc rev {l} { set x 1; set r [lreverse $l]; return [list $r $x] } }
+proc tb_hide {l} { set x 1; set r [lreverse $l]; return [list $r $x] }
+proc tb_fmt {l} { return [format "%d:%s" [llength $l] [join $l ,]] }
+proc tb_spl {s} { set r [split $s ,]; return [list [llength $r] [puts_free $r]] }
+proc puts_free {r} { return [lindex $r 0] }
