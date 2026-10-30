@@ -17,7 +17,7 @@ proc runall {} {
 set A [runall]
 load {} Fuzzprocs
 source [file join [file dirname [info script]] fuzz_procs.tcl]
-set fzp [concat [info commands fz_*] [info commands fl_*] [info commands fv_*] [info commands fm_*]]
+set fzp [concat [info commands fz_*] [info commands fl_*] [info commands fv_*] [info commands fm_*] [info commands fr_*]]
 set translated [llength [tbc::attached]]
 puts "translated: $translated of [llength $fzp] procs; [llength $calls] calls"
 set B [runall]
@@ -40,7 +40,7 @@ if {[llength [info commands tbc_coverage]]} {
     foreach {k v} [array get cov] { if {[string match V:* $k]} { incr ents } elseif {[string match D:* $k]} { incr dp; incr dn $v } }
     puts "coverage: $ents variants entered; $dp distinct deopt points taken ($dn deopts)"
     # the programs that mix constructs: how many ran typed, and how often they left typed mode
-    foreach pre {fa_ fx_} {
+    foreach pre {fa_ fx_ fr_} {
         set fv 0; set fvn 0; set fd 0; set fdn 0; set fr 0
         foreach {k v} [array get cov] {
             if {[string match V:::${pre}* $k]} { incr fv; incr fvn $v } elseif {[string match D:::${pre}* $k]} { incr fd; incr fdn $v } elseif {[string match R:::${pre}* $k]} { incr fr $v }

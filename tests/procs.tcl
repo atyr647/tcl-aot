@@ -1232,3 +1232,23 @@ proc tr_callee {x} { set t($x) $x; return $t($x) }
 proc tr_caller {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [tr_callee $i] }; return $s }
 proc tr_deopt_late {x} { set a(1) 1; set a(2) $x; set r [string index abc $x]; return [list $r [lsort [array names a]]] }
 proc tr_err_after {x} { set a(1) 1; set b [expr {$x + 1}]; set a(2) $b; return [array get a] }
+
+# `info exists` on an element that is not there must not leave an entry behind: the order in which the array lists its elements shows it
+proc tr_exists_order {n a} {
+    for {set i 0} {$i < $n} {incr i} {
+        incr m(-1)
+        set m([expr {$i * 3 - $a}]) 1
+        incr m(5) $i
+        if {[info exists m($i)]} { }
+    }
+    return [array names m]
+}
+proc tr_exists_order2 {n a} {
+    for {set i 0} {$i < $n} {incr i} {
+        incr m(-1)
+        set m([expr {$i * 3 - $a}]) 1
+        incr m(5) $i
+        if {[info exists m($i)]} { incr s }
+    }
+    return [array get m]
+}

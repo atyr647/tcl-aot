@@ -192,3 +192,29 @@ Census of the instructions at which typed code still gives up, over 694 procs fr
 Not taken yet, and listed with `TBC_DEADOPS=1`: `dict for`, `lmap`, `unset`, `info exists` of a plain local, `array exists`, `append`/`lappend` on a frame
 variable, `lsort`, commands that name variables (`array names`, `uplevel`, `upvar` as a command, `regexp` with variable names), and commands that are not
 known to leave the caller's variables alone.
+
+## 17. Local arrays held natively, and two fixes found on the way
+
+An array that is a compiled local, is not an argument, and is touched only by element loads, stores, increments and `info exists` (nothing else names it in the
+bytecode: no `unset`, `append`, `lappend`, `array exists`, `upvar`, ...) cannot be seen by anything else while typed code runs: the callees typed code calls
+are caller-safe, and every command that could reach it by name is one at which typed code hands over anyway.  Typed code therefore keeps such an array (kind R)
+in a table of its own: elements are `Tcl_Obj` values keyed by their text, in the order they were made.  When typed code hands over, the elements are written
+into the frame in that order, so the hash table the boxed code goes on with is the one the interpreter would have built (the order `array names` lists them in
+depends on it).  A read of an element that is not there, an increment of a value that is not an integer or that overflows, and any other failure hand over
+the same way, so the boxed code raises the interpreter's error.  Such procs no longer need a frame, so a typed caller calls them directly.
+
+Measured as instruction counts, interpreter / compiled: array sieve 2.1x to 4.5x, array histogram 5.2x to 7.4x, array Fibonacci 1.8x to 3.3x, a loop calling a
+tiny proc that uses an array of its own 0.8x to 2.4x.  The matrix product over `$i,$j` keys moved from 1.7x to 1.8x only: its time is in building the key.
+
+What bounds it: a proc call that needs a frame costs the interpreter's own call (frame, argument binding, the stub bytecode and its second dispatch, about 900
+instructions more than the interpreter); the array in that benchmark was most of the rest.  With the array gone the call is direct.
+
+Found by checking this against the interpreter:
+
+* A proc with no frame variables that called a proc with effects (one that needs a frame) could, on a later failure, start the whole call over in the boxed code,
+  and so repeat the callee's effects (a counter incremented twice).  Such procs now resume at the failing instruction, as procs with frame variables do.
+  `tfx_eff` in the differential test.
+* The boxed code's `info exists a(k)` looked the element up the way the interpreter does when a read trace has to run (make an entry, then remove it again).
+  The interpreter takes a shortcut that makes no entry unless a trace is involved.  The entry made and removed again changes when the hash table grows and so the
+  order in which `array names` lists the elements.  Fixed; `tr_exists_order` in the differential test, and a `fr_` family in the typed fuzzer (random programs
+  over local arrays, including ones that fail halfway and write the table out, 64000 calls per seed, seeds 1 to 8 clean).

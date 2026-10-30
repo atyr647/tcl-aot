@@ -57,6 +57,7 @@ direct call.  A fixpoint over the control-flow graph gives every stack slot a ki
 | `L` | a literal string, boxed on demand |
 | `A`, `M` | a local list of integers / a local dict with integer values, held as a C vector / hash map (when it does not escape) |
 | `F` | a variable that lives in the interpreter's frame (below) |
+| `R` | a local array touched only by element loads, stores, increments and tests: a native table in element-creation order, written into the frame when typed code hands over (decisions 17) |
 | `U` | not known yet (during the fixpoint) |
 
 Typed code never changes anything observable before it knows it will not fall back.  When an assumption fails (integer overflow, an operand that is not

@@ -47,15 +47,15 @@ Wall-clock times vary; `bench/run.sh count` counts instructions instead:
 | counter through `global` | 10.2x |
 | counter in a namespace variable | 8.6x |
 | `lindex` over a list in a loop | 7.4x |
+| array histogram | 7.4x |
 | counter through `upvar` | 6.6x |
 | `foreach` over a list | 5.5x |
-| array histogram | 5.2x |
-| array sieve | 2.1x |
+| array sieve | 4.5x |
+| array Fibonacci | 3.3x |
+| loop calling a proc that uses an array of its own | 2.4x |
 | namespace array fill | 2.1x |
-| array Fibonacci | 1.8x |
-| matrix product over a 2-D array | 1.7x |
+| matrix product over a 2-D array | 1.8x |
 | `string length` / `string first` in a loop | 1.4x |
-| loop calling a proc that uses an array (tiny callee) | 0.8x |
 
 On thirteen tcllib-based workloads (sha1, md5, regexp-heavy text splitting, JSON and CSV parsing, `struct::list`, ...) compiled code is between 0.7x and 1.2x
 of the interpreter: the time is in Tcl's library.  `docs/decisions.md` has the numbers and what was tried.
@@ -98,7 +98,7 @@ make test              # adds the build guard, recursion caps, capture loop, unm
 src/translate.tcl   the translator            include/    runtime headers the generated C includes
 tools/              environment, shells, module build script      tests/    differential tests and checks
 fuzz/               random programs against the interpreter       bench/    benchmark procs and runner
-examples/           a small program, translated and run            docs/     design, usage, decisions
+examples/           a small program, translated and run            docs/     design, usage, decisions, roadmap
 ```
 
 ## License

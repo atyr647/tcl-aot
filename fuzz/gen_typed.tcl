@@ -119,6 +119,42 @@ for {set k 0} {$k < $nfa} {incr k} {
     puts $p "proc fa_$k {n a} {\n    $head\n    $head2\n    set s 0\n    for {set i 0} {\$i < \$n} {incr i} {\n[join $body \n]\n    }\n    $ret\n}"
     puts $h "fa_$k II ID"
 }
+# programs with arrays that are compiled locals (m, p): element stores, increments, reads and tests that typed code does on a native table, mixed with
+# commands that make it write the table into the frame (array names/get/size, unset, a failing read inside catch) and with a call of a proc that has
+# such an array of its own (fr_)
+set nfr [expr {$argc > 6 ? [lindex $argv 6] : 50}]
+puts $p {proc frh_leaf {x} { set t($x) $x; incr t($x) 2; return $t($x) }}
+proc rstmt {} {
+    switch [expr {int(rand() * 22)}] {
+        0 { return "set m([akey]) [aval]" }
+        1 - 2 { return "incr m([akey])" }
+        3 { return "incr m([akey]) [pick {1 -1 5 {$i} {$a} 9223372036854775807}]" }
+        4 - 5 { return "set s \[expr {\$s + \$m([akey])}\]" }
+        6 { return "if {\[info exists m([akey])\]} { incr s }" }
+        7 { return "set s \[expr {\$s + \[info exists p([akey])\]}\]" }
+        8 { return "set p([akey]) [aval]" }
+        9 { return "incr p([akey]) [pick {1 2 {$i}}]" }
+        10 { return "set s \[expr {\$s * 3 + \$i}\]" }
+        11 { return "set t \$m([akey])" }
+        12 { return "if {\[catch {set t \$p([akey])} e\]} { incr s 100 }" }
+        13 { return "lappend l \[array names m\]" }
+        14 { return "incr s \[array size p\]" }
+        15 { return "set s \[expr {\$s + \[frh_leaf \$i\]}\]" }
+        16 { return "unset -nocomplain p([akey])" }
+        17 { return "set m([akey]) \[expr {\$i * \$a}\]" }
+        18 { return "set s \[expr {\$s + \$a}\]" }
+        19 { return "lappend l \[array get p\]" }
+        20 { return "set m(\$s) \$i" }
+        21 { return "set s \[string length \$m([akey])\]" }
+    }
+}
+for {set k 0} {$k < $nfr} {incr k} {
+    set body {}
+    for {set j 0} {$j < 2 + int(rand() * 6)} {incr j} { lappend body "        [rstmt]" }
+    set ret [pick {{return $s} {return [list $s $l]} {return [list $s [array get m]]} {return [list $s [lsort [array names m]] [array size p]]} {return [list $s [array names p]]}}]
+    puts $p "proc fr_$k {n a} {\n    set s 0\n    set l {}\n    for {set i 0} {\$i < \$n} {incr i} {\n[join $body \n]\n    }\n    $ret\n}"
+    puts $h "fr_$k II ID"
+}
 # programs that mix foreach, catch, math functions, calls with omitted default arguments and calls into procs that need a frame (fx_)
 set nfx [expr {$argc > 6 ? [lindex $argv 6] : 50}]
 puts $p {proc fxh_sq {x} { expr {$x * $x} }}
@@ -189,5 +225,8 @@ for {set k 0} {$k < $nfx} {incr k} {
 }
 for {set k 0} {$k < $nfa} {incr k} {
     for {set j 0} {$j < $ncalls} {incr j} { puts $c "lappend calls {fa_reset; fa_$k [expr {int(rand()*12)}] [arg]}" }
+}
+for {set k 0} {$k < $nfr} {incr k} {
+    for {set j 0} {$j < $ncalls} {incr j} { puts $c "lappend calls {fr_$k [expr {int(rand()*12)}] [arg]}" }
 }
 close $c

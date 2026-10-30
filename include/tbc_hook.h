@@ -732,6 +732,12 @@ static int tbc_vexist(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, Tcl_
         }
     } else if (idx >= 0) {
         ap = &loc[idx]; TBC_FOLLOW(ap);
+        if (TclIsVarArray(ap) && !TBC_READ_TRACED(ap)) {
+            /* (the interpreter looks the element up without making an entry for it, unless a read trace has to run: an entry made and removed again
+             * would change the order in which the array lists its elements) */
+            vp = tbc_arrfind(ap, key);
+            if (!vp || !TBC_READ_TRACED(vp)) return vp && !TclIsVarUndefined(vp);
+        }
         vp = TclLookupArrayElement(interp, NULL, key, 0, "access", 0, 1, ap, idx);
         if (vp) {
             if (TBC_READ_TRACED(vp) || (ap && TBC_READ_TRACED(ap))) TclObjCallVarTraces(iPtr, ap, vp, NULL, key, TCL_TRACE_READS, 0, idx);

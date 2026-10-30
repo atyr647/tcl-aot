@@ -293,6 +293,7 @@ foreach n {0 1 5 40 300} { lappend calls [list tr_basic $n] [list tr_order $n] [
 foreach k {1 2 x {} 07 -1} { lappend calls [list tr_missing_elem $k] [list tr_missing_array $k] [list tr_incr_new $k] [list tr_exists $k] [list tr_catch $k] }
 foreach v {1 -3 abc {} 0x10 1.5 { 7 } 9223372036854775807 12345678901234567890} { lappend calls [list tr_incr_text $v] [list tr_shared $v] [list tr_deopt_late $v] [list tr_err_after $v] [list tr_double $v] }
 foreach k {1 x} { foreach d {1 -5 0 abc 3.0 9223372036854775807} { lappend calls [list tr_incr_var $k $d] } }
+foreach a {0 4294967296 -7} { foreach n {3 11 40} { lappend calls [list tr_exists_order $n $a] [list tr_exists_order2 $n $a] } }
 lappend calls tr_incr_overflow tr_overwrite tr_keys tr_trace tr_unset tr_scalar_clash {tr_rec 6}
 proc tfx_eff {s} { set ::tfx_g 0; set rc [catch {tfx_eff_caller $s} m]; list $rc $m $::tfx_g }
 # traces on the variables typed code works on
