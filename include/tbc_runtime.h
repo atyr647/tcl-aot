@@ -242,6 +242,24 @@ TBC_INLINE void tbc_setpc(Tcl_Interp *interp, int pc) {
 /* the log of an error in the boxed code: the live stack slots are the words of the command that failed */
 #define TBC_XLOG(pc, so, sl, d, ...) do { if (rcg_ == TCL_ERROR) { Tcl_Obj *t_[(d) + 1] = { NULL, ##__VA_ARGS__ }; tbc_logerr(interp, pc, so, sl, &t_[d]); } } while (0)
 TBC_SHARED unsigned tbc_ticks;
+/* Forced hand-over, for testing: a module translated with TBC_FORCE_DEOPT=1 asks here at every typed instruction, and hands over to boxed code when the answer
+ * is yes, about once in TBC_FORCE_RATE instructions (a pseudo-random countdown from TBC_FORCE_SEED).  Without TBC_FORCE_RATE it never does. */
+TBC_SHARED long tbc_force_n, tbc_force_rate;
+TBC_SHARED unsigned long tbc_force_rng;
+TBC_SHARED int tbc_force_ready;
+static int tbc_force_due(void) {
+    if (!tbc_force_ready) {
+        const char *r = getenv("TBC_FORCE_RATE"), *sd = getenv("TBC_FORCE_SEED");
+        tbc_force_ready = 1;
+        tbc_force_rate = r ? atol(r) : 0;
+        tbc_force_rng = sd ? (unsigned long) atol(sd) * 2654435761UL + 88172645463325252UL : 88172645463325252UL;
+        tbc_force_n = tbc_force_rate;
+    }
+    if (tbc_force_rate <= 0 || --tbc_force_n > 0) return 0;
+    tbc_force_rng ^= tbc_force_rng << 13; tbc_force_rng ^= tbc_force_rng >> 7; tbc_force_rng ^= tbc_force_rng << 17;
+    tbc_force_n = 1 + (long) (tbc_force_rng % (unsigned long) (2 * tbc_force_rate));
+    return 1;
+}
 TBC_INLINE int tbc_tick_due(Tcl_Interp *interp) {
     Interp *iPtr = (Interp *) interp;
     return ((++tbc_ticks & 63) == 0) && (TclAsyncReady(iPtr) || TclCanceled(iPtr) || TclLimitReady(iPtr->limit));
@@ -1073,14 +1091,16 @@ static int tbc_is_lrepeat(Tcl_Interp *interp) {
 
 /* Coverage counters (compile with -DTBC_COV): how often each typed variant is entered and each deoptimisation point is taken. */
 #ifdef TBC_COV
-static struct { const char *name; long hits; } tbc_cov[8192];
+#define TBC_COV_MAX 131072
+static struct { const char *name; long hits; } tbc_cov[TBC_COV_MAX];
 TBC_SHARED int tbc_cov_n;
-#define TBC_HIT(nm) do { static int idx_ = -1; if (idx_ < 0) { idx_ = tbc_cov_n++; tbc_cov[idx_].name = (nm); } tbc_cov[idx_].hits++; } while (0)
+/* (the last slot takes the sites beyond the table: a module built for forced hand-over has a site at every instruction) */
+#define TBC_HIT(nm) do { static int idx_ = -1; if (idx_ < 0) { idx_ = tbc_cov_n < TBC_COV_MAX - 1 ? tbc_cov_n++ : TBC_COV_MAX - 1; tbc_cov[idx_].name = (nm); } tbc_cov[idx_].hits++; } while (0)
 static int tbc_cov_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Tcl_Obj *r = Tcl_NewObj();
     int i;
     (void) cd; (void) objc; (void) objv;
-    for (i = 0; i < tbc_cov_n; i++) {
+    for (i = 0; i < tbc_cov_n && i < TBC_COV_MAX; i++) {
         Tcl_ListObjAppendElement(NULL, r, Tcl_NewStringObj(tbc_cov[i].name, -1));
         Tcl_ListObjAppendElement(NULL, r, Tcl_NewWideIntObj(tbc_cov[i].hits));
     }

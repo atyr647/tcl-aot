@@ -29,6 +29,9 @@ typedef struct TbcEntry {
     int *valid;				/* flag read by direct calls from other compiled procs (may be NULL) */
     int id;				/* number in the name of the command that runs it */
     struct TbcEntry *sameName;		/* the entry registered before this one under the same name (a module can hold several definitions of a name) */
+    int ysafe;				/* nothing it runs can yield: it may run compiled inside a coroutine, as long as the procs it calls are still the compiled ones */
+    int **ydeps;			/* the valid flags of every proc it calls, directly or not (NULL-terminated; NULL if none) */
+    int **bdeps;			/* the "withdrawn" flags of the built-in commands it, or a proc it calls, was analysed against (NULL-terminated; NULL if none) */
 } TbcEntry;
 
 typedef struct TbcRec {			/* one attached proc */
@@ -1060,11 +1063,63 @@ static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
  * cleared when one of them is renamed or deleted (traces set up by tbc_mf_setup), and when a proc is defined under a name that contains
  * ::tcl::mathfunc:: (the compiler emits the relative name tcl::mathfunc::sqrt, so ::ns::tcl::mathfunc::sqrt would be found first). */
 TBC_SHARED int tbc_mf_ok;
+/* Built-in commands the analysis relied on (that they run no script and leave the caller's variables alone).  A module registers its names and one flag
+ * per name; the flag is set, and the module's direct calls to the procs that depend on the command are withdrawn, when the command is renamed or
+ * deleted (traces) or when a proc is defined under its name in any namespace (the proc wrapper).  An entry whose built-ins are withdrawn runs the
+ * interpreter's version. */
+static void tbc_trace(Tcl_Interp *interp, const char *action, const char *kind, const char *name, const char *ops, const char *handler, int withName);
+typedef struct { const char *const *names; int *off; int n; void (*withdraw)(int); } TbcBuiltins;
+#define TBC_MAX_BREG 16
+TBC_SHARED TbcBuiltins tbc_breg[TBC_MAX_BREG];
+TBC_SHARED int tbc_nbreg;
+static int tbc_bshadow(Namespace *ns, const char *tail, int top) {
+    Tcl_HashSearch search;
+    Tcl_HashEntry *h;
+    if (!top && Tcl_FindHashEntry(&ns->cmdTable, tail)) return 1;
+    for (h = Tcl_FirstHashEntry(&ns->childTable, &search); h; h = Tcl_NextHashEntry(&search)) {
+        if (tbc_bshadow((Namespace *) Tcl_GetHashValue(h), tail, 0)) return 1;
+    }
+    return 0;
+}
+static const char *tbc_tail(const char *name) { const char *t = strrchr(name, ':'); return t ? t + 1 : name; }
+static void tbc_bwithdraw(TbcBuiltins *b, int i) { if (!b->off[i]) { b->off[i] = 1; b->withdraw(i); } }
+static void tbc_builtins_register(Tcl_Interp *interp, const char *const *names, int *off, int n, void (*withdraw)(int)) {
+    TbcBuiltins *b;
+    int i;
+    if (tbc_nbreg >= TBC_MAX_BREG) { for (i = 0; i < n; i++) off[i] = 1; withdraw(-1); return; }
+    b = &tbc_breg[tbc_nbreg++];
+    b->names = names; b->off = off; b->n = n; b->withdraw = withdraw;
+    for (i = 0; i < n; i++) {
+        Tcl_CmdInfo ci;
+        const char *nm = names[i];
+        /* (a plain global name is shadowed by a command of that name in any namespace; an implementation name such as ::tcl::string::reverse only by itself) */
+        int plain = strchr(nm + 2, ':') == NULL;
+        if (!Tcl_GetCommandInfo(interp, nm, &ci) || ci.objProc == TclObjInterpProc || (plain && tbc_bshadow(((Interp *) interp)->globalNsPtr, nm + 2, 1))) tbc_bwithdraw(b, i);
+        else tbc_trace(interp, "add", "command", nm, "rename delete", "::tbc::invalidate", 1);
+    }
+}
+static void tbc_builtins_changed(const char *name) {
+    int k, i;
+    for (k = 0; k < tbc_nbreg; k++) {
+        TbcBuiltins *b = &tbc_breg[k];
+        for (i = 0; i < b->n; i++) {
+            const char *nm = b->names[i];
+            int plain = strchr(nm + 2, ':') == NULL;
+            if (strcmp(nm, name) == 0 || (plain && strcmp(nm + 2, tbc_tail(name)) == 0)) tbc_bwithdraw(b, i);
+        }
+    }
+}
+static int tbc_bok(const TbcEntry *e) {
+    int **d;
+    for (d = e->bdeps; d && *d; d++) if (**d) return 0;
+    return 1;
+}
 
 static void tbc_invalidate_name(const char *name) {
     Tcl_HashEntry *h;
     TbcEntry *e;
     if (strstr(name, "::tcl::mathfunc::")) tbc_mf_ok = 0;
+    tbc_builtins_changed(name);
     h = Tcl_FindHashEntry(&tbc_by_name, name);
     if (!h) return;
     for (e = (TbcEntry *) Tcl_GetHashValue(h); e; e = e->sameName) if (e->valid) *e->valid = 0;
@@ -1389,6 +1444,13 @@ static int tbc_enter_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *c
     return Tcl_NRCallObjProc(interp, tbc_enter_nr, cd, objc, objv);
 }
 
+/* may this body run compiled inside a coroutine?  It cannot yield, and nothing it calls has been replaced by a proc that might */
+static int tbc_ysafe_now(const TbcEntry *e) {
+    int **d;
+    if (!e->ysafe) return 0;
+    for (d = e->ydeps; d && *d; d++) if (!**d) return 0;
+    return 1;
+}
 static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Interp *iPtr = (Interp *) interp;
     Proc *p = iPtr->varFramePtr->procPtr;
@@ -1403,7 +1465,7 @@ static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *co
         r->epoch = iPtr->compileEpoch;
         if (tbc_probe(interp, p, r->e->body, r->name) != r->e->fp) { r->demoted = 1; if (r->e->valid) *r->e->valid = 0; }
     }
-    if (r->demoted || iPtr->execEnvPtr->corPtr || (TBC_NEST_CAP && tbc_nest >= TBC_NEST_CAP)) { r->fallbacks++; return tbc_fallback(interp, r); }
+    if (r->demoted || !tbc_bok(r->e) || (iPtr->execEnvPtr->corPtr && !tbc_ysafe_now(r->e)) || (TBC_NEST_CAP && tbc_nest >= TBC_NEST_CAP)) { r->fallbacks++; return tbc_fallback(interp, r); }
     r->calls++;
     if (r->fresh) { r->fresh = 0; iPtr->errorLine = 1; }
     {   /* the interpreter reports the frame of a body that came from the program as source, not as "precompiled" (the stub's flag) */

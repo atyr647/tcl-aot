@@ -22,7 +22,7 @@
 #   -split N      write the module as several files instead of one: <out>.h (shared declarations), <out>_v1.c .. <out>_vN.c (typed code),
 #                 <out>_g1.c .. <out>_gN.c (boxed code) and <out>.c (tables and Init); build them with tools/build-module.sh
 #
-# Environment: TBC_CENSUS=1 lists which procs can be translated and exits; TBC_DEADOPS=1 logs, to stderr, every instruction at which typed code gives
+# Environment: TBC_FORCE_DEOPT=1 adds a forced hand-over point at every typed instruction (see tests/run.sh); TBC_CENSUS=1 lists which procs can be translated and exits; TBC_DEADOPS=1 logs, to stderr, every instruction at which typed code gives
 # up; TBC_TIMING=1 logs procs that take long to analyse.
 
 if {$argc < 3} { puts stderr "usage: translate.tcl procs.tcl out.c InitName \[-hints file\] \[-untyped\] \[-split N\]"; exit 2 }
@@ -227,7 +227,12 @@ proc usedef {op a} {
         incrScalar1Imm - incrScalar1 - appendScalar1 - appendScalar4 - lappendScalar1 - lappendScalar4 { set v [operand [lindex $a 0]]; return [list $v $v] }
         dictIncrImm { set v [operand [lindex $a 1]]; return [list $v $v] }
         variable - upvar - nsupvar { return [list {} [operand [lindex $a 0]]] }
-        foreach_step { return [list {} [lsort -integer -unique [concat {*}[lindex $a 3]]]] }
+        foreach_step {
+            # (assigns only while there are elements left: when the loop ends the variables keep their values, which a later instruction may read, so
+            # this is not a definition that kills them)
+            set vs [lsort -integer -unique [concat {*}[lindex $a 3]]]
+            return [list $vs $vs]
+        }
         existScalar { return [list [operand [lindex $a 0]] {}] }
         dictUpdateStart - dictUpdateEnd { set vs [concat [list [operand [lindex $a 0]]] [lindex $a 2]]; return [list $vs $vs] }
         dictRecombineImm { set v [operand [lindex $a 0]]; return [list $v $v] }
@@ -432,6 +437,11 @@ proc prepare {P} {
     # built-ins that stay in their own frame, only callees that are themselves caller-safe).  A typed caller can call such a proc through the
     # interpreter and keep its variables in C locals.
     set csafe 1
+    # "yield-safe": nothing this proc runs can reach a `yield` (no script is evaluated, no command whose identity is unknown is called, every proc it calls is
+    # itself yield-safe).  Such a proc can run compiled inside a coroutine: a yield below compiled code would have to cross a C frame.
+    set ysafe 1
+    # the built-in commands whose identity the analysis relies on (that they run no script and leave the caller's variables alone)
+    set bins {}
     set pst(0) {}; set pwork {0}
     while {[llength $pwork]} {
         set pc [lindex $pwork end]; set pwork [lrange $pwork 0 end-1]
@@ -445,6 +455,7 @@ proc prepare {P} {
             default { set out [list {*}[lrange $st 0 [expr {[llength $st] - $pops - 1}]] {*}[lrepeat $pushes -]] }
         }
         if {$op in {evalStk exprStk tailcall invokeReplace invokeExpanded}} { set csafe 0 }
+        if {$op in {evalStk exprStk invokeReplace invokeExpanded}} { set ysafe 0 }
         if {$op eq "upvar"} {
             set lv [lindex $st end-1]
             if {$lv eq "-" || [lindex [dict get $bc literals] $lv] ni {0 #0}} { set csafe 0 }
@@ -455,7 +466,7 @@ proc prepare {P} {
             set n [lindex $a 0]; set q [expr {[llength $st] - $n}]
             set c [lindex $st $q]
             if {$c eq "-"} {
-                set pure 0; set csafe 0
+                set pure 0; set csafe 0; set ysafe 0
             } else {
                 set nm [lindex [dict get $bc literals] $c]
                 set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
@@ -466,9 +477,11 @@ proc prepare {P} {
                     set bn [string trimleft $nm :]
                     if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins} {
                         # (stays in its own frame, runs no script)
+                        if {![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]} { lappend bins ::$bn }
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
+                        lappend bins ::$bn
                     } else {
-                        set csafe 0
+                        set csafe 0; set ysafe 0
                     }
                     set w2 [expr {$n > 1 ? [lindex $st [expr {$q+1}]] : "-"}]
                     set sub [expr {$w2 eq "-" ? "-" : [lindex [dict get $bc literals] $w2]}]
@@ -593,7 +606,7 @@ proc prepare {P} {
     set fv [lmap v $fv {expr {$v in $rv ? [continue] : $v}}]
     set PI($P,fvars) [lsort -integer -unique $fv]
     if {[llength $fv]} { set pure 0 }
-    set PI($P,csafe) $csafe
+    set PI($P,csafe) $csafe; set PI($P,ysafe) $ysafe; set PI($P,bins) [lsort -unique $bins]
     set PI($P,callees) [lsort -unique $callees]; set PI($P,pure) $pure; set PI($P,mustBoxNamed) [lsort -unique $mustBoxNamed]
     set PI($P,args) $args; set PI($P,nargs) $nargs; set PI($P,vnames) $vnames; set PI($P,lits) [dict get $bc literals]
     # a literal the compiler folded is a double object with no string yet (or one whose printed form is not exact: Tcl prints 2^64 as
@@ -667,6 +680,43 @@ while {$pruned} {
             if {$c ni $csafeProcs} { set csafeProcs [lsearch -all -inline -not -exact $csafeProcs $P]; set pruned 1; break }
         }
     }
+}
+# yield-safe procs: yield-safe themselves, and every proc they call is translated and yield-safe
+set ysafeProcs [lmap P $translatable {expr {$PI($P,ysafe) ? $P : [continue]}}]
+set pruned 1
+while {$pruned} {
+    set pruned 0
+    foreach P $ysafeProcs {
+        foreach c $PI($P,callees) {
+            if {$c ni $ysafeProcs} { set ysafeProcs [lsearch -all -inline -not -exact $ysafeProcs $P]; set pruned 1; break }
+        }
+    }
+}
+# every proc a yield-safe proc calls, directly or through others
+proc ydeps {P} {
+    global PI ysafeProcs
+    if {$P ni $ysafeProcs} { return {} }
+    set seen {}; set todo $PI($P,callees)
+    while {[llength $todo]} {
+        set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {$c in $seen} continue
+        lappend seen $c
+        set todo [concat $todo $PI($c,callees)]
+    }
+    return [lsort $seen]
+}
+# the built-in commands a proc depends on, with those of every proc it calls
+proc bdeps {P} {
+    global PI
+    set seen {}; set todo [list $P]; set bins {}
+    while {[llength $todo]} {
+        set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {$c in $seen || ![info exists PI($c,bins)]} continue
+        lappend seen $c
+        lappend bins {*}$PI($c,bins)
+        set todo [concat $todo $PI($c,callees)]
+    }
+    return [lsort -unique $bins]
 }
 proc flushSet {P pc} { global PI; expr {$PI($P,pure) ? $PI($P,live,$pc) : $PI($P,may,$pc)} }
 # A proc that can be asked about its variables by name (not pure) must write every variable that was assigned on some path into the frame when it leaves
@@ -2680,6 +2730,7 @@ proc emitVariant {key recursive} {
         if {$flow eq "dead" && [info exists ::env(TBC_DEADOPS)]} { set cmdn ""; if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4}} { set nn [lindex $PI($P,ins,$pc) 1]; set ce [lindex $in [expr {[llength $in] - $nn}]]; if {[kd $ce] eq "L"} { set cmdn [lindex $PI($P,lits) [lt $ce]] } else { set cmdn "<dynamic>" } }; puts stderr "DEADOP [lindex $PI($P,ins,$pc) 0] $cmdn :: $key $pc [lindex $in end]" }
         append fn "T$pc: ;  /* $PI($P,ins,$pc) */\n"
         if {$pc in $PI($P,loopheads)} { append fn "    if (TBC_UNLIKELY(tbc_tick_due(interp))) goto D$pc;\n" }
+        if {[info exists ::env(TBC_FORCE_DEOPT)]} { append fn "    if (TBC_UNLIKELY(tbc_force_due())) goto D$pc;\n" }
         switch $flow {
             fall {
                 set nx $PI($P,next,$pc)
@@ -2892,11 +2943,30 @@ proc canonArgs {P} {
     foreach a [info args $P] { if {[info default $P $a d]} { lappend r "$a\003$d" } else { lappend r $a } }
     join $r "\002"
 }
+# the built-ins the compiled code was analysed against: a table of names, a flag per name that the runtime sets when the command is renamed, deleted or
+# shadowed, and the function that then withdraws the direct calls to the procs that depend on it
+set allBins {}
+foreach P $translatable { foreach b [bdeps $P] { if {$b ni $allBins} { lappend allBins $b } } }
+set allBins [lsort $allBins]
+if {[llength $allBins]} {
+    append out "static const char *const tbc_bnames_$initName\[\] = { [join [lmap b $allBins {cstring $b}] {, }] };\nstatic int tbc_boff_$initName\[[llength $allBins]\];\n"
+    append out "static void tbc_binval_${initName}(int i)\n\{\n    switch (i) \{\n"
+    set bi 0
+    foreach b $allBins {
+        append out "    case $bi:"
+        foreach P $translatable { if {$b in [bdeps $P]} { append out " tbc_valid_[cident $P] = 0;" } }
+        append out " break;\n"
+        incr bi
+    }
+    append out "    \}\n\}\n"
+}
 foreach P $translatable {
     set cid [cident $P]
     set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
     set fp [tbc::fingerprint $P]
-    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0 \};\n"
+    if {[llength [bdeps $P]]} { append out "static int *tbc_bd_$cid\[\] = { [join [lmap b [bdeps $P] {string cat &tbc_boff_$initName\[[lsearch -exact $allBins $b]\]}] {, }], NULL };\n" }
+    if {[llength [ydeps $P]]} { append out "static int *tbc_yd_$cid\[\] = { [join [lmap c [ydeps $P] {string cat &tbc_valid_[cident $c]}] {, }], NULL };\n" }
+    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength [bdeps $P]] ? "tbc_bd_$cid" : "NULL"}] \};\n"
 }
 # the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled
 if {[llength $refusedProcs]} {
@@ -2910,6 +2980,7 @@ if {[llength $refusedProcs]} {
 }
 set regId 0
 append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_build(interp) != TCL_OK) return TCL_ERROR;\n    tbc_rt_init();\n    tbc_capture_builtins(interp);\n    tbc_install(interp);\n"
+if {[llength $allBins]} { append out "    tbc_builtins_register(interp, tbc_bnames_$initName, tbc_boff_$initName, [llength $allBins], tbc_binval_$initName);\n" }
 foreach P $translatable {
     set i 0
     foreach l $PI($P,lits) {
