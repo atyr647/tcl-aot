@@ -77,9 +77,11 @@ The module adds commands in the `::tbc` namespace:
 ## Limits
 
 * One Tcl release (8.6.14).  Porting to another 8.6.x release means running the test suite against it and relaxing the patch-level check in `tbc_check_build`.
-* Procs whose own code contains `yield` or `yieldto` stay with the interpreter, as do procs whose bytecode is shorter than the entry stub (a
-  body of one or two instructions runs faster interpreted).  `tailcall` is compiled.  Inside a coroutine, a proc that cannot yield runs compiled (it calls
-  only built-in commands that run no script, and procs of that kind that are still the compiled ones); any other proc runs the interpreter's version.
+* Procs whose bytecode is shorter than the entry stub stay with the interpreter (a body of one or two instructions runs faster interpreted).  `tailcall` is
+  compiled.  Inside a coroutine, a proc that cannot yield runs compiled (it calls only built-in commands that run no script, and procs of that kind that are still
+  the compiled ones), and so does a proc that yields itself when everything else it runs is of that kind: its boxed code suspends the coroutine through the
+  interpreter's callbacks and, where a loop without a yield can follow, typed code is entered again after the yield.  A proc that yields inside a `dict for`
+  or an argument expansion stays interpreted, as does any other proc inside a coroutine.
 * A proc is compiled only if the program defines it with exactly the namespace, argument list and body the translator saw.
 * Compiled code recurses on the C stack. `TBC_NEST_CAP` (a macro to define when compiling the module; default off natively and 200 when compiling for WebAssembly)
   hands calls past that many live compiled entries to the interpreter, which has its own stack. A WebAssembly guest has 512 KiB of call stack by default.

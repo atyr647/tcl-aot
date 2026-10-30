@@ -50,10 +50,9 @@ rename and delete traces clear, so a callee replaced by a proc that yields sends
 fails without the check).
 
 `tailcall` is compiled (the boxed code stores the tailcall list in the frame and returns `TCL_RETURN`, as the bytecode does; the interpreter's frame pop
-then schedules it).  Procs that contain `yield` or `yieldto` stay interpreted (about 1 % of procs in the packages measured).  Compiling them would need the
-boxed code to suspend through the interpreter's callbacks (save the pc and the operand stack, push the resume callback and `TclNRCoroutineActivateCallback`)
-and every call from it to something that might yield to be made non-recursively; typed code would have to be re-entered after each yield to be worth it.
-Planned, see `roadmap.md`.
+then schedules it).
+
+Procs that yield themselves are compiled too (decision 20).
 
 ## 6. Command frames and error info are the interpreter's
 
@@ -259,3 +258,30 @@ trace covers replacing the global built-in itself).  That needs Tcl to tell us a
 
 The first forced-hand-over fuzz run crashed.  The cause was in the test instrumentation: the coverage counters of a `-DTBC_COV` build (a fixed table of 8192 sites, no bound
 check) overflowed once every instruction had a hand-over site, and wrote over `tbcOne`.  The table is larger now and the sites beyond it share the last slot.
+
+## 20. Procs that yield
+
+A coroutine is suspended by unwinding the interpreter's non-recursive stack, which cannot cross a C frame; Tcl answers a `yield` below one with "cannot yield: C
+stack busy".  The boxed code of a proc is a function that can be entered at any instruction with the operand stack in an array, so it can suspend the way the
+bytecode executor does it: at a `yield` it keeps the stack below the yielded value in a heap record, pushes a resume callback and Tcl's own
+`TclNRCoroutineActivateCallback` on the interpreter's stack, and returns up to the interpreter's trampoline, which does the switch.  When the coroutine is
+resumed the callback gets the record back and goes on in the boxed code at the next instruction with the resumer's value as the result of the `yield`.
+A coroutine deleted while suspended rewinds: the callback releases the record and returns an error.  `yieldto` does the same after installing its tailcall.
+
+* The proc must be entered by the interpreter, not by compiled code (a C frame of compiled code above it would prevent the switch), and everything else it runs
+  must be yield-safe (decision 5); otherwise, inside a coroutine, the interpreter's version runs.
+* A yield inside a `dict for` (the iteration state is in C variables) or inside a `{*}` expansion is refused (such procs stay interpreted).  Native arrays,
+  lists and maps are not used in a proc that yields (they cannot be rebuilt from the frame).
+* Typed code is entered again after a yield where it pays: the typed analysis keeps the state after each yield (`seed`), and the generic variant has a copy
+  (`V_<proc>_RE`) that starts there.  It reads the locals that may have been assigned from the frame and checks them (an integer for an integer variable, no
+  trace, no link, no array: the boxed code has run since the typed code handed over, so nothing can be assumed) and the stack slots; if anything is not as
+  expected the boxed code goes on instead.  The copy is made only where a loop that contains no yield can be reached before the next one: the transition costs
+  about 200 instructions, so a generator whose loop body is just the yield stays boxed.
+
+Measured as instruction counts, interpreter / compiled: a generator that does nothing but yield 20000 times 1.03x (Tcl's own switch is about 4300 instructions
+per yield and resume); one that computes in a loop of its own between yields 9x in total (20x without the start-up); one that computes in a helper proc 9x.
+
+Found on the way, by the forced hand-over test: the table of boxed-code entry points was built the first time it was asked, in a function whose loop variable had
+the name of its argument.  The first lookup of a translation therefore asked about the wrong instruction, and a hand-over at that instruction ran the `default`
+of the entry switch: success with an empty result.  Fixed, the `default` is now an error, and the translator checks, after generating, that every entry the
+generated code makes has a case.
