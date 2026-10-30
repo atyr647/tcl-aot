@@ -329,3 +329,13 @@ What is left in these three, and why it was not changed:
 * **md5** runs its transform in boxed code: `variable $token` and `upvar 0 $token state` name variables by a run-time string, and the state is an array.  It is as
   fast as the interpreter.
 * The attribution of the rest is Tcl's own work: regexp/regsub 30-50% of the text workloads, object allocation 18-48%, with the thread-data lookup of a threaded Tcl build (`pthread_getspecific`) 10-28% of all instructions, and about 350 instructions to dispatch a command implemented in C.
+
+Two defects of this change were found by the test stages that exist for this purpose, and fixed before it was released:
+* The inlined `binary scan` writes its variable by name; the analysis that decides which locals a hand-over must write to the frame did not know that, so a
+  hand-over right after the scan lost the list (`can't read "v": no such variable`).  Found by the forced hand-over stage (`tbs_sum_*`).  The instruction now counts as
+  a use and a definition of the local, and keeps it from being held as a native array.
+* `string is wideinteger` accepts integers beyond 64 bits.  A constant folded by Tcl's compiler (`9223372036854775807 + 2147483648`) was read as an int64 operand and
+  gave a wrong answer.  Found by fuzz typed seed 3 with forced hand-over (`fz_11`).  The range is now checked; `tl_lit_fold` and `tl_lit_big2` fail without it.
+
+Checked: the full `tests/run.sh` passes on this tree (differential 13460 calls in four modes, forced hand-over 6 configurations, fuzz typed seeds 1-3 and boxed seeds
+1-2, valgrind 13431 calls, 0 mismatches).
