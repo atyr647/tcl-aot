@@ -160,6 +160,47 @@ lappend calls {namespace eval tbns { proc lreverse {l} { uplevel 1 {set x 55}; r
 lappend calls {tbns::rev2 {1 2}} {tb_rev {1 2}}
 lappend calls {rename lreverse lrv_orig; proc lreverse {l} { uplevel 1 {set x 77}; return RL }; set a [list [tb_rev {1 2}] [tbns::rev2 {1 2}]]; rename lreverse {}; rename lrv_orig lreverse; set a}
 lappend calls {tb_rev {1 2}} {tbns::rev2 {1 2}}
+# procs that yield, run as coroutines: every value that goes in and out, errors, deletion while suspended
+proc tco {name body} { catch {rename $name {}}; set r [uplevel 1 $body]; catch {rename $name {}}; return $r }
+foreach n {0 1 3} { lappend calls [list tco tyc "set r \[coroutine tyc ty_gen $n\]; while {\[llength \[info commands tyc\]\]} { lappend r \[tyc\] }; set r"] }
+lappend calls {tco tyc {set r [coroutine tyc ty_echo]; lappend r [tyc a] [tyc b c] [tyc stop]; set r}}
+lappend calls {tco tyc {set r [coroutine tyc ty_genw 3]; lappend r [tyc] [tyc] [tyc]; set r}}
+lappend calls {tco tyc {set r [coroutine tyc ty_yerr]; lappend r [catch {tyc} m] $m [info commands tyc]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ycatch]; lappend r [tyc x] [tyc y] [tyc z]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ylist {a b c}]; lappend r [tyc] [tyc] [tyc]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_yfe2 {1 2 3}]; lappend r [tyc 10] [tyc 20] [tyc 30]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_yvars]; lappend r [tyc] [tyc]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_yto 1 2]; lappend r [tyc a b]}}
+lappend calls {tco tyc {coroutine tyc ty_ytocmd}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ylevel]; lappend r [tyc]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_yret]; lappend r [catch {tyc} m o] $m [dict get $o -errorcode]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ytail]; lappend r [tyc]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ynested]; lappend r [tyc 1] [tyc 2]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_yarr 2]; lappend r [tyc u] [tyc v]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ydict]; lappend r [tyc] [tyc]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ydictfor]; lappend r [tyc] [tyc]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_yexpand]; lappend r [tyc {p q}]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ytwice]; lappend r [tyc 3] [tyc 4]}}
+lappend calls {tco tyc {set r [coroutine tyc ty_ycoro]; lappend r [tyc]}}
+lappend calls {tco tyc {coroutine tyc ty_gen 3; tyc; rename tyc {}; info commands tyc}}
+lappend calls {tco tyc {coroutine tyc ty_gen 3; tyc; set r [catch {tyc 1 2} m]; list $r $m}}
+lappend calls {catch {ty_gen 2} m; set m}
+lappend calls {catch {ty_yfe2 {1 2}} m; set m}
+lappend calls {tco tyc {coroutine tyc ty_gen 2; coroutine tyd ty_gen 2; set r [list [tyc] [tyd] [tyc] [tyd]]; catch {rename tyd {}}; set r}}
+lappend calls {tco tyc {coroutine tyc apply {{} { set r {}; coroutine tyd ty_gen 2; lappend r [tyd] [tyd]; yield $r; return end }}}}
+lappend calls {tco tyc {coroutine tyc apply {{} { yield [ty_work 20]; yield [ty_gen 1]; return end }}}}
+# the same with typed code entered again after the yield
+foreach {n k} {0 3 1 1 3 7 6 20} { lappend calls "tco tyc {set r \[coroutine tyc ty2_heavy $n $k\]; while {\[llength \[info commands tyc\]\]} { lappend r \[tyc\] }; set r}" }
+foreach n {0 1 3 5} { lappend calls "tco tyc {set r \[coroutine tyc ty2_dbl $n\]; while {\[llength \[info commands tyc\]\]} { lappend r \[tyc\] }; set r}" }
+foreach l {{} {1} {1 2 3} {a b}} { lappend calls "tco tyc {set r \[coroutine tyc ty2_fe {$l}\]; set i 0; while {\[llength \[info commands tyc\]\]} { lappend r \[tyc v\[incr i\]\] }; set r}" }
+foreach n {0 1 2 3 5} {
+    foreach p {ty2_flag ty2_nonint ty2_unset ty2_ret ty2_retd ty2_catch ty2_while ty2_errloop ty2_list ty2_arr ty2_yto ty2_twice} {
+        lappend calls "tco tyc {set r \[coroutine tyc $p $n\]; set i 0; while {\[llength \[info commands tyc\]\]} { if {\[catch {tyc w\[incr i\]} m\]} { lappend r E:\$m } else { lappend r \$m } }; set r}"
+    }
+}
+foreach n {0 2 4} { lappend calls "tco tyc {set r \[coroutine tyc ty2_inner_yield $n\]; while {\[llength \[info commands tyc\]\]} { lappend r \[tyc\] }; set r}" }
+foreach n {0 2} { lappend calls "tco tyc {set r \[coroutine tyc ty2_lit $n\]; lappend r \[tyc X\]}" }
+foreach {a b} {1 2 -3 4 9223372036854775800 5 abc 2 1 abc} { lappend calls "tco tyc {set r \[catch {coroutine tyc ty2_args $a $b} m\]; if {\$r == 0} { lappend r \$m; lappend r \[catch {tyc} m2\] \$m2 }; set r}" }
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}

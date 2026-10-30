@@ -1261,3 +1261,158 @@ proc ty_mid {x} { return [expr {[ty_leaf $x] * 2}] }
 proc tb_rev {l} { set x 1; set r [lreverse $l]; return [list $r $x] }
 namespace eval tbns { proc rev2 {l} { set x 1; set r [lreverse $l]; return [list $r $x] } }
 proc tb_ins {l} { set x 1; set r [linsert $l 0 z]; return [list $r $x] }
+
+# ---- procs that yield: the boxed code suspends the coroutine through the interpreter's callbacks
+proc ty_gen {n} { for {set i 0} {$i < $n} {incr i} { yield [expr {$i * $i}] }; return done }
+proc ty_echo {} { set r [yield start]; while {$r ne "stop"} { set r [yield "got $r"] }; return bye }
+proc ty_work {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [expr {$i * $i % 7}] }; return $s }
+proc ty_genw {n} { for {set i 0} {$i < $n} {incr i} { yield [ty_work 30] }; return done }
+proc ty_yerr {} { yield 1; error "after the yield" }
+proc ty_ycatch {} { set r {}; for {set i 0} {$i < 3} {incr i} { if {[catch {yield $i} v]} { lappend r E:$v } else { lappend r $v } }; return $r }
+proc ty_ylist {l} { foreach x $l { yield $x }; return [llength $l] }
+proc ty_yfe2 {l} { set s 0; foreach x $l { set s [expr {$s + [yield $x]}] }; return $s }
+proc ty_yvars {} { set a 5; set b abc; set c [list 1 2]; yield; incr a; lappend c $a; yield [list $a $b $c]; return [list $a $b $c] }
+proc ty_yto {args} { set r [yieldto list {*}$args]; return [list got $r] }
+proc ty_ytocmd {} { yieldto string length hello }
+proc ty_ylevel {} { set l0 [info level]; yield $l0; return [list $l0 [info level] [info frame]] }
+proc ty_yret {} { yield 1; return -code error -errorcode {A B} "boom" }
+proc ty_ytail {} { yield 1; tailcall ty_work 10 }
+proc ty_ynested {} { set r {}; lappend r [yield a]; lappend r [ty_yinner]; return $r }
+proc ty_yinner {} { return [yield b] }
+proc ty_yarr {n} { for {set i 0} {$i < $n} {incr i} { set a($i) [yield $i] }; return [array get a] }
+proc ty_ydict {} { set d [dict create a 1]; yield [dict get $d a]; dict set d b 2; yield [dict size $d]; return $d }
+proc ty_ydictfor {} { set d {a 1 b 2}; dict for {k v} $d { yield $k }; return ok }
+proc ty_yexpand {} { return [list {*}[yield x] z] }
+proc ty_ytwice {} { set a [yield 1]; set b [yield 2]; return [expr {$a + $b}] }
+proc ty_ycoro {} { yield [info coroutine]; return [info coroutine] }
+
+# ---- procs that yield and then compute in a loop of their own (typed code is entered again after the yield)
+proc ty2_heavy {n k} {
+    set acc 0
+    for {set i 0} {$i < $n} {incr i} {
+        for {set j 0} {$j < $k} {incr j} { set acc [expr {($acc * 31 + $j * $i) % 1000003}] }
+        yield $acc
+    }
+    return $acc
+}
+proc ty2_dbl {n} {
+    set s 0.5
+    for {set i 1} {$i <= $n} {incr i} {
+        for {set j 1} {$j <= 4} {incr j} { set s [expr {$s + sqrt($i * $j) / 3.0}] }
+        yield $s
+    }
+    return [expr {$s * 2}]
+}
+proc ty2_fe {l} {
+    set t 0
+    foreach x $l {
+        for {set j 0} {$j < 5} {incr j} { incr t [expr {$j * 2}] }
+        set got [yield $x]
+        for {set j 0} {$j < 3} {incr j} { incr t 1 }
+        lappend res $got
+    }
+    return [list $t $res]
+}
+proc ty2_flag {n} {
+    if {$n > 2} { set late [expr {$n * 2}] }
+    set s 0
+    yield start
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    if {[info exists late]} { incr s $late }
+    return $s
+}
+proc ty2_nonint {n} {
+    set acc 1
+    yield first
+    set v acc
+    set $v abc
+    for {set i 0} {$i < $n} {incr i} { catch {set acc [expr {$acc + 1}]} m }
+    return [list $acc $m]
+}
+proc ty2_unset {n} {
+    set acc 1
+    yield first
+    set v acc
+    unset $v
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    return [list $s [info exists acc]]
+}
+proc ty2_ret {n} {
+    set s 0
+    yield start
+    for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $i * $i}] }
+    return $s
+}
+proc ty2_retd {n} {
+    set s 0.0
+    yield start
+    for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $i * 0.5}] }
+    return $s
+}
+proc ty2_args {a b} {
+    incr a 5
+    set b [expr {$b * 2}]
+    yield [list $a $b]
+    for {set i 0} {$i < 4} {incr i} { incr a $b }
+    return [list $a $b]
+}
+proc ty2_lit {n} {
+    set r [list lit [yield L1] more]
+    for {set i 0} {$i < $n} {incr i} { lappend r $i }
+    return $r
+}
+proc ty2_list {n} {
+    set l {}
+    for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 3}] }
+    yield [llength $l]
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [lindex $l $i] }
+    return $s
+}
+proc ty2_arr {n} {
+    for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i * i_sq($i)}] }
+    yield [array size a]
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $a($i) }
+    return $s
+}
+proc i_sq {x} { expr {$x * $x} }
+proc ty2_catch {n} {
+    set s 0
+    yield start
+    for {set i 0} {$i < $n} {incr i} { if {[catch {incr s [expr {10 / ($i - 2)}]} m]} { incr s 100 } }
+    return $s
+}
+proc ty2_twice {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    yield $s
+    for {set i 0} {$i < $n} {incr i} { incr s [expr {$i * 2}] }
+    yield $s
+    for {set i 0} {$i < $n} {incr i} { incr s 3 }
+    return $s
+}
+proc ty2_while {n} {
+    set s 0; set i 0
+    yield go
+    while 1 { incr i; if {$i > $n} break; incr s $i }
+    return $s
+}
+proc ty2_errloop {n} {
+    set s 0
+    yield go
+    for {set i 0} {$i < $n} {incr i} { incr s [expr {$i * 2}] }
+    error "after the loop: $s"
+}
+proc ty2_inner_yield {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {incr j} { incr s [expr {$i * $j}]; if {$j == 1} { yield $s } } }
+    return $s
+}
+proc ty2_yto {n} {
+    set s 0
+    yieldto list a b
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    return $s
+}

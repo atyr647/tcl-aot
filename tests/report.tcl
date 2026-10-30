@@ -41,10 +41,11 @@ check "unknown proc: state" [lindex [dict get $byName ::brand_new] 1] no-code
 check "unknown proc: reason" [lindex [dict get $byName ::brand_new] 2] "not in the module"
 check "changed proc: state" [lindex [dict get $byName ::t_two] 1] changed
 check "changed proc is not counted as compiled" [expr {[lsearch [tbc::attached] ::t_two] < 0}] 1
-# the translator's refusals come with its reason (procs.tcl has procs with yield: docs/decisions.md, decision 3)
+# the translator's refusals come with its reason (procs.tcl has procs that yield inside a dictionary iteration or an expansion, which stay interpreted: decision 5)
 set refused [lmap e [dict get $r procs] {expr {[lindex $e 1] eq "refused" ? $e : [continue]}}]
 check "refused procs are listed" [expr {[llength $refused] > 0}] 1
-check "refused reason is the translator's" [expr {[string match "opcode *" [lindex [lindex $refused 0] 2]]}] 1
+check "refused reason is the translator's" [expr {[regexp {^(opcode|yield) } [lindex [lindex $refused 0] 2]]}] 1
+check "yield in a dictionary iteration is refused, with its reason" [lindex [dict get $byName ::ty_ydictfor] 2] "yield in a proc with a dictionary iteration"
 
 # calls: compiled ones counted by the module, interpreted ones while profiling
 set ref [t_arith 3 4]
@@ -138,5 +139,13 @@ coroutine rcy2 tg_outer 1
 set r2 [tbc::report]
 check "proc with a yield below it inside a coroutine: interpreter's version" [expr {[dict get $r2 coroutine_calls] - [dict get $r1 coroutine_calls] >= 1}] 1
 rename rcy2 {}
+# a proc that yields runs compiled inside a coroutine too, and every resumption goes on in the compiled code
+ty_work 3; catch {ty_gen 1}
+set r3 [tbc::report]
+coroutine rcy3 ty_genw 3
+rcy3; rcy3; rcy3
+set r4 [tbc::report]
+check "proc that yields: runs compiled in a coroutine" [expr {[dict get $r4 compiled_calls] - [dict get $r3 compiled_calls] >= 3}] 1
+check "proc that yields: no call handed to the interpreter" [expr {[dict get $r4 coroutine_calls] - [dict get $r3 coroutine_calls]}] 0
 puts [expr {$fails ? "$fails FAILED" : "all report checks passed"}]
 exit [expr {$fails ? 1 : 0}]
