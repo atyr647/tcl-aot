@@ -919,9 +919,16 @@ static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
 }
 
 /* a proc of this name is being (re)defined or removed: no direct call to any compiled definition of the name may go on */
+/* Typed code computes the common math functions itself, which is right only while tcl::mathfunc::* are Tcl's own commands.  tbc_mf_ok says so.  It is
+ * cleared when one of them is renamed or deleted (traces set up by tbc_mf_setup), and when a proc is defined under a name that contains
+ * ::tcl::mathfunc:: (the compiler emits the relative name tcl::mathfunc::sqrt, so ::ns::tcl::mathfunc::sqrt would be found first). */
+TBC_SHARED int tbc_mf_ok;
+
 static void tbc_invalidate_name(const char *name) {
-    Tcl_HashEntry *h = Tcl_FindHashEntry(&tbc_by_name, name);
+    Tcl_HashEntry *h;
     TbcEntry *e;
+    if (strstr(name, "::tcl::mathfunc::")) tbc_mf_ok = 0;
+    h = Tcl_FindHashEntry(&tbc_by_name, name);
     if (!h) return;
     for (e = (TbcEntry *) Tcl_GetHashValue(h); e; e = e->sameName) if (e->valid) *e->valid = 0;
 }
@@ -1648,6 +1655,39 @@ static int tbc_check_build(Tcl_Interp *interp) {
 }
 
 /* called from a module's Init: the helper commands and the trace that notices new procs (once per interpreter) */
+/* is there a namespace other than the global one with a tcl::mathfunc child that holds commands? */
+static int tbc_mf_shadowed(Namespace *ns, int top) {
+    Tcl_HashSearch search;
+    Tcl_HashEntry *h;
+    if (!top) {
+        Tcl_HashEntry *t = Tcl_FindHashEntry(&ns->childTable, "tcl");
+        if (t) {
+            Tcl_HashEntry *m = Tcl_FindHashEntry(&((Namespace *) Tcl_GetHashValue(t))->childTable, "mathfunc");
+            if (m && ((Namespace *) Tcl_GetHashValue(m))->cmdTable.numEntries > 0) return 1;
+        }
+    }
+    for (h = Tcl_FirstHashEntry(&ns->childTable, &search); h; h = Tcl_NextHashEntry(&search)) {
+        if (tbc_mf_shadowed((Namespace *) Tcl_GetHashValue(h), 0)) return 1;
+    }
+    return 0;
+}
+
+static void tbc_mf_setup(Tcl_Interp *interp) {
+    static const char *const names[] = { "abs", "acos", "asin", "atan", "atan2", "bool", "ceil", "cos", "cosh", "double", "entier", "exp", "floor", "fmod",
+        "hypot", "int", "isqrt", "log", "log10", "pow", "rand", "round", "sin", "sinh", "sqrt", "srand", "tan", "tanh", "wide", NULL };
+    int i, ok = 1;
+    for (i = 0; names[i]; i++) {
+        Tcl_CmdInfo ci;
+        Tcl_Obj *full = Tcl_ObjPrintf("::tcl::mathfunc::%s", names[i]);
+        Tcl_IncrRefCount(full);
+        if (!Tcl_GetCommandInfo(interp, Tcl_GetString(full), &ci) || !ci.isNativeObjectProc || ci.objProc == TclObjInterpProc) ok = 0;
+        else tbc_trace(interp, "add", "command", Tcl_GetString(full), "rename delete", "::tbc::invalidate", 1);
+        Tcl_DecrRefCount(full);
+    }
+    if (ok && tbc_mf_shadowed(((Interp *) interp)->globalNsPtr, 1)) ok = 0;
+    tbc_mf_ok = ok;
+}
+
 static void tbc_install(Tcl_Interp *interp) {
     static int done;
     tbc_reg_init();
@@ -1661,6 +1701,7 @@ static void tbc_install(Tcl_Interp *interp) {
     Tcl_CreateObjCommand(interp, "::tbc::capture", tbc_capture_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::lazy", tbc_lazy_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::attach", tbc_attach_cmd, NULL, NULL);
+    tbc_mf_setup(interp);
     if (getenv("TBC_EAGER") && getenv("TBC_EAGER")[0] == '1') tbc_eager = 1;
     {
         Tcl_CmdInfo ci;

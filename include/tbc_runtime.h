@@ -16,6 +16,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
 
 extern Tcl_Obj *TclLsetList(Tcl_Interp *, Tcl_Obj *listPtr, Tcl_Obj *indexArgPtr, Tcl_Obj *valuePtr);
 extern Tcl_Obj *TclLindexList(Tcl_Interp *, Tcl_Obj *listPtr, Tcl_Obj *argPtr);
@@ -107,6 +110,50 @@ TBC_INLINE int tbc_num(Tcl_Obj *o, Tcl_WideInt *w, double *d) {
     return tbc_num_text(o, w, d);
 }
 
+/* ---- math functions (tcl::mathfunc::*) in typed code ---- */
+
+/* an object that holds a finite number, as a double: 1 and *d set, or 0 (text that is not a number, a bignum, NaN) */
+TBC_INLINE int tbc_getdbl(Tcl_Obj *o, double *d) {
+    Tcl_WideInt w;
+    double x;
+    int k = tbc_num(o, &w, &x);
+    if (k == 1) { *d = (double) w; return 1; }
+    if (k == 2 && x == x) { *d = x; return 1; }
+    return 0;
+}
+/* the same, but an integer must be one a double holds exactly (|n| <= 2^53) */
+TBC_INLINE int tbc_getdbl_exact(Tcl_Obj *o, double *d) {
+    Tcl_WideInt w;
+    double x;
+    int k = tbc_num(o, &w, &x);
+    if (k == 1) { if (w < -INT64_C(9007199254740992) || w > INT64_C(9007199254740992)) return 0; *d = (double) w; return 1; }
+    if (k == 2 && x == x) { *d = x; return 1; }
+    return 0;
+}
+/* A compiler may assume that a libm function returns no NaN when it can see that its argument is none (clang for wasm32 did so for asin of an integer, and
+ * folded the test below away).  A trip through a volatile object keeps the result opaque. */
+TBC_INLINE double tbc_opaque_dbl(double d) { volatile double v = d; return v; }
+/* the result of a libm function as expr accepts it (CheckDoubleResult in Tcl): not NaN, and either errno is clear or it is ERANGE with a result of 0 or infinity */
+#define TBC_MF_OK(r, e) ((r) == (r) && ((e) == 0 || ((e) == ERANGE && ((r) == 0.0 || isinf(r)))))
+/* int() and wide() of a double, for a result that fits a long; 0 if the boxed code has to do it (Tcl makes a bignum and wraps it; and where long is not 64 bits wide() differs from int()) */
+TBC_INLINE int tbc_dbl_to_int(double d, int64_t *out) {
+    if (sizeof(long) != 8 || !(d < (double) LONG_MAX && d > (double) LONG_MIN)) return 0;
+    *out = (int64_t) (long) d;
+    return 1;
+}
+/* round() of a double, as ExprRoundFunc does it; 0 if the result is a bignum */
+TBC_INLINE int tbc_dbl_round(double d, int64_t *out) {
+    double intPart, fractPart = modf(d, &intPart);
+    long max = LONG_MAX, min = LONG_MIN, result;
+    if (sizeof(long) != 8) return 0;
+    if (fractPart <= -0.5) min++; else if (fractPart >= 0.5) max--;
+    if (intPart >= (double) max || intPart <= (double) min) return 0;
+    result = (long) intPart;
+    if (fractPart <= -0.5) result--; else if (fractPart >= 0.5) result++;
+    *out = (int64_t) result;
+    return 1;
+}
+
 /* Result of a binary operation replaces *pa (the stack slot holding the left operand); the right operand's reference is
  * released.  A temporary (unshared) left operand is overwritten in place, like the interpreter does. */
 /* an integer value in an object, as the interpreter's TclSetLongObj / TclNewLongObj macros do it (Tcl_SetWideIntObj is a call and tests the range) */
@@ -124,6 +171,24 @@ TBC_INLINE Tcl_Obj *tbc_mkint(Tcl_WideInt r) {
     else { o->internalRep.wideValue = r; o->typePtr = tbcWide; }
     return o;
 }
+/* incr of a local held as an object: *po is the variable's value (an object it owns); the new value is in *out.  0 if the boxed code has to do it (not a
+ * machine integer, overflow).  An unshared object is changed in place, as the executor does it. */
+TBC_INLINE int tbc_incr_local(Tcl_Obj **po, int64_t imm, int64_t *out) {
+    Tcl_Obj *o = *po;
+    int64_t sum;
+    if (!tbc_isint(o) || __builtin_add_overflow((int64_t) tbc_wide(o), imm, &sum)) return 0;
+    if (Tcl_IsShared(o)) {
+        Tcl_Obj *n = tbc_mkint(sum);
+        Tcl_IncrRefCount(n);
+        Tcl_DecrRefCount(o);
+        *po = n;
+    } else {
+        tbc_setint(o, sum);
+    }
+    *out = sum;
+    return 1;
+}
+
 TBC_INLINE void tbc_putint(Tcl_Obj **pa, Tcl_Obj *a, Tcl_Obj *b, Tcl_WideInt r) {
     if (!Tcl_IsShared(a)) {
         tbc_setint(a, r);
