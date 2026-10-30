@@ -135,6 +135,60 @@ the sieve).  Consequences worked out with it:
   test that fails with a deliberately leaked key object (11.7 MB), and fifty random programs per fuzz seed mixing typed arithmetic with arrays and the
   three kinds of link.
 
-Not taken yet, and listed with `TBC_DEADOPS=1`: `unset`, `info exists` of a plain local, `array exists`, `append`/`lappend` on a frame variable, commands that
-name variables (`array names`, `uplevel`), `foreach`, `lmap`, `switch`, `catch`/`try`, and math functions: calls of `tcl::mathfunc::*` (`sqrt`, `int`, `double`,
-`abs`...) end typed code today.
+## 14. Calls from typed code
+
+Calls between translated procs were slower than the interpreter (0.89x, 3000 instructions per call) in any single long call, because the flag that
+guards a direct call is set when the callee is attached, and the callee is attached at its *first call* (decision 3): the first guard failed, typed code
+handed over, and the rest of the caller ran boxed with ordinary calls.  A failed guard now takes the stub that makes the ordinary call with boxed
+arguments, and typed code continues with the result when it has the kind the callee's typed code returns (otherwise it hands over as before).  The
+same continuation applies when a callee falls back to its boxed code.  Instructions per call: 3036 to 48 (56x the interpreter).
+
+Calls that leave trailing arguments out are direct calls too when the omitted defaults are numbers (0.89x to 57.6x).  A call to a translated proc that needs a
+frame (arrays, `global`, `variable`) cannot be a direct call; if the callee is *caller-safe* the interpreter makes the call and typed code goes on.  Caller-safe
+means: no `upvar` to a level other than 0 or #0, no `uplevel`, `eval`, `expr` of a dynamic string, `tailcall` or `{*}` call, only built-ins that stay in
+their own frame, only callees that are caller-safe themselves.  Such a callee cannot reach the caller's variables, so they can stay in C variables.
+Known limit: a variable trace handler of a variable the callee touches that itself reaches two frames up (`uplevel 2`) would see stale caller variables;
+nothing else can.  A call to a tiny callee of this kind costs the interpreter's call plus the entry into compiled code (about 850 instructions) and measures
+0.82x; its value is that the caller's loop stays typed.
+
+## 15. Math functions
+
+Calls of `tcl::mathfunc::*` (`sqrt`, `int`, `double`, `abs`, `round`, `floor`, `ceil`, `pow`, `sin`, ...) ended typed code, so any numeric loop using one ran
+boxed after it: 1.2x the interpreter.  They are computed in C now, with the conversions and result checks of Tcl's own implementations (NaN, and `errno`
+other than a range error with a zero or infinite result, make the step start again in the boxed code, which raises Tcl's error).  `floor` and `ceil` of an
+integer above 2^53 differ between a C cast (rounds) and Tcl's bignum path (truncates), so those are left to Tcl; found by the differential test.  The
+rest (`bool`, `entier`, `isqrt`, `rand`, `srand`) are ordinary calls of a built-in that runs in typed code; `max` and `min` are procs of the Tcl library
+and stay as they were.  Loops: 332 M to 5.3 M instructions (62x) and 221 M to 3.1 M (70x).
+
+A compiler can also get in the way: clang for wasm32 turned `asin` of an integer into an intrinsic and, knowing the argument was no NaN, folded the
+`r == r` test away, so `asin(2)` came back as a NaN result instead of an error.  The wasm32 guest run of the differential test found it (30 calls).  The
+results of the libm calls now go through a volatile object before they are tested (`tbc_opaque_dbl`).  The suite also passes with clang as the native compiler.
+
+This is right only while the commands are Tcl's own.  A flag says so; it is cleared when one of them is renamed or deleted (command traces), when a
+proc is defined under a name that contains `::tcl::mathfunc::`, and it starts out cleared if a namespace other than the global one already has a
+`tcl::mathfunc` child with commands.  When it is clear, typed code hands over to boxed code at the call.  It is never set again in that process.
+
+## 16. More of the instruction set in typed code
+
+* The instructions the executor implements by calling a command that uses no variable (`string index/first/last/range/replace/trim*/match/toupper/...`,
+  `regexp`, `lrange` and `lindex` with indices, `in`/`ni`) are done with boxed operands in typed code (the table is shared with boxed code).
+  `eq`, `ne` and `string compare` do the comparison directly (two integers: a machine comparison), `**` calls the runtime's boxed operator, `concat`
+  and the stack-copying `over` are taken.  A `string length` / `string first` loop: 0.88x to 1.40x.
+* `foreach`: the lists are held as objects, the iteration state in two C variables; when typed code hands over, the interpreter's iteration object is rebuilt from
+  them.  Loop variables are objects (or frame variables).  5.5x the interpreter on a loop summing 1000 elements.
+* `catch`: `beginCatch` and `endCatch` change nothing in typed code.  A failure inside the body hands over to boxed code at that instruction, and the
+  boxed code dispatches to the handler.  1.56x to 14.3x on a loop with a catch.
+* `switch` with a jump table: an integer key is a C `switch` over the keys written as canonical integers (the key's text is the integer's canonical
+  form, so no other key can match it); any other key is compared with the literal keys as the boxed code does.  1.36x to 33x.
+* `incr` of a local that holds an object (a loop variable, a list element), `llength` of a number, `string map` and the concatenation of two lists.
+* The hint file (`-hints`) matched bare proc names against the translator's fully qualified ones and so never took effect; the signatures it lists
+  (`D`, `DD`, ...) were not generated.  Fixed; the differential test now enters those variants as well.
+
+Census of the instructions at which typed code still gives up, over 694 procs from tcllib packages: before these changes 1603 sites (`invokeStk` 704,
+`foreach_start` 205, `returnImm` 199, ...), now 1545 of which `foreach_start` and `jumpTable` are gone and `invokeStk` is 530: calls of `upvar` as a command (76),
+`package` (36), `lsort` (27), `array names` (18), `rename` (16), `regsub` (16), `binary scan` (14), `uplevel` (13), `regexp`, file and channel commands.  `returnImm` is
+`return -code`, which ends the proc anyway.
+
+Not taken yet, and listed with `TBC_DEADOPS=1`: `dict for`, `lmap`, `unset`, `info exists` of a plain local, `array exists`, `append`/`lappend` on a frame
+variable, `lsort`, commands that name variables (`array names`, `uplevel`, `upvar` as a command, `regexp` with variable names), and commands that are not
+known to leave the caller's variables alone.

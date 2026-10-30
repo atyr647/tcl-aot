@@ -35,17 +35,27 @@ procs run compiled: 2 (30000 calls; ...)
 
 Wall-clock times vary; `bench/run.sh count` counts instructions instead:
 
-| benchmark | interpreter / compiled (instructions) |
+| benchmark (`bench/procs.tcl`) | interpreter / compiled (instructions) |
 |---|---|
+| loop with `int()`, `double()` | 70x |
+| loop with `sqrt()` and `%` | 63x |
+| loop calling a proc with an omitted default argument | 58x |
+| loop calling a small proc | 56x |
 | integer loop with arithmetic | 33.9x |
+| `switch` in a loop | 33x |
+| loop with `catch` | 14x |
 | counter through `global` | 10.2x |
 | counter in a namespace variable | 8.6x |
+| `lindex` over a list in a loop | 7.4x |
 | counter through `upvar` | 6.6x |
+| `foreach` over a list | 5.5x |
 | array histogram | 5.2x |
 | array sieve | 2.1x |
 | namespace array fill | 2.1x |
 | array Fibonacci | 1.8x |
 | matrix product over a 2-D array | 1.7x |
+| `string length` / `string first` in a loop | 1.4x |
+| loop calling a proc that uses an array (tiny callee) | 0.8x |
 
 On thirteen tcllib-based workloads (sha1, md5, regexp-heavy text splitting, JSON and CSV parsing, `struct::list`, ...) compiled code is between 0.7x and 1.2x
 of the interpreter: the time is in Tcl's library.  `docs/decisions.md` has the numbers and what was tried.
@@ -72,8 +82,8 @@ code is attached to a proc only while the bytecode the interpreter would run for
 
 * Valid for one Tcl release (8.6.14); a module refuses to load into another.  It uses Tcl's internal headers, so Tcl must be built as a static library.
 * Procs containing `yield`, `yieldto` or `tailcall`, and procs shorter than the entry stub, stay interpreted; calls inside a coroutine use the interpreter.
-* Typed code stops, and boxed code (about interpreter speed) continues, at `foreach`, `lmap`, `switch`, `catch`, `try`, `unset`, math functions such as
-  `sqrt` and `int`, and commands that name variables.  `TBC_DEADOPS=1` lists the places for your procs.
+* Typed code stops, and boxed code (about interpreter speed) continues, at `dict for`, `lmap`, `unset`, `lsort`, and commands that
+  name variables or are not known to leave the caller's variables alone.  `TBC_DEADOPS=1` lists the places for your procs.
 
 ## Tests
 

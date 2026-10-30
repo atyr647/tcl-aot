@@ -82,7 +82,8 @@ The module adds commands in the `::tbc` namespace:
 * A proc is compiled only if the program defines it with exactly the namespace, argument list and body the translator saw.
 * Compiled code recurses on the C stack. `TBC_NEST_CAP` (a macro to define when compiling the module; default off natively and 200 when compiling for WebAssembly)
   hands calls past that many live compiled entries to the interpreter, which has its own stack. A WebAssembly guest has 512 KiB of call stack by default.
-* Typed code stops at instructions it does not implement and continues in boxed code: `foreach`/`lmap`, `switch`, `catch`/`try`, `unset`, math functions
-  (`sqrt`, `int`, ...), commands that name variables, and others (`TBC_DEADOPS=1` lists them for your procs).  Boxed code is about as fast as the interpreter.
+* Typed code stops at instructions it does not implement and continues in boxed code: `dict for`, `lmap`, `unset`, `lsort`, commands
+  that name variables, and calls of commands not known to leave the caller's variables alone (`TBC_DEADOPS=1` lists them for your procs).  Boxed code
+  is about as fast as the interpreter.
 * Redefining a command a compiled proc depends on (a callee, or a core command the compiler inlined) is handled: calls fall back or the proc is demoted.
   Creating a command that *shadows* a callee in a nested namespace through anything other than `proc` is not noticed.
