@@ -4,3 +4,35 @@ t_double DD ID DI
 t_mixed ID DI DD
 t_neg D
 t_dblloop I
+tm_sin I D B
+tm_cos I D B
+tm_tan I D B
+tm_asin I D B
+tm_acos I D B
+tm_atan I D B
+tm_sinh I D B
+tm_cosh I D B
+tm_tanh I D B
+tm_exp I D B
+tm_log I D B
+tm_log10 I D B
+tm_sqrt I D B
+tm_floor I D B
+tm_ceil I D B
+tm_double I D B
+tm_int I D B
+tm_wide I D B
+tm_round I D B
+tm_abs I D B
+tm_bool I D B
+tm_entier I D B
+tm_isqrt I D B
+tm2_pow II ID DI DD BB
+tm2_atan2 II ID DI DD BB
+tm2_fmod II ID DI DD BB
+tm2_hypot II ID DI DD BB
+tm_mix I D
+tm_loop I
+tm_loop_d DI ID
+tm_int_loop I
+tm_not_math I D

@@ -6,6 +6,7 @@ proc runall {} {
     global calls
     set out {}
     foreach c $calls {
+        if {[info exists ::env(TBC_TRACE)]} { puts stderr "CALL $c" }
         set rc [catch [string reverse [string reverse $c]] r opts]
         lappend out [list $rc $r [expr {$rc == 1 ? [list [dict get $opts -errorcode] [dict get $opts -errorinfo] [dict get $opts -errorline]] : "-"}]]
     }

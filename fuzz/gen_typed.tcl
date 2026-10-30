@@ -2,8 +2,9 @@
 #
 #   tcl-aot-sh gen_typed.tcl seed nexpr nloop ncalls nvec nmap
 #
-# Arithmetic over integers and doubles (fz_), loops (fl_), integer vectors (fv_), integer maps (fm_), and programs that mix typed arithmetic with
-# arrays and with links made by upvar, global and namespace upvar (fa_).  Driven by fuzz/run.sh.
+# Arithmetic over integers and doubles (fz_), loops (fl_), integer vectors (fv_), integer maps (fm_), programs that mix typed arithmetic with arrays and
+# with links made by upvar, global and namespace upvar (fa_), and programs that mix foreach, catch, math functions, calls with omitted default arguments
+# and calls into procs that need a frame (fx_).  Driven by fuzz/run.sh.
 set seed [expr {$argc > 0 ? [lindex $argv 0] : 7}]
 set nexpr [expr {$argc > 1 ? [lindex $argv 1] : 200}]
 set nloop [expr {$argc > 2 ? [lindex $argv 2] : 100}]
@@ -118,6 +119,48 @@ for {set k 0} {$k < $nfa} {incr k} {
     puts $p "proc fa_$k {n a} {\n    $head\n    $head2\n    set s 0\n    for {set i 0} {\$i < \$n} {incr i} {\n[join $body \n]\n    }\n    $ret\n}"
     puts $h "fa_$k II ID"
 }
+# programs that mix foreach, catch, math functions, calls with omitted default arguments and calls into procs that need a frame (fx_)
+set nfx [expr {$argc > 6 ? [lindex $argv 6] : 50}]
+puts $p {proc fxh_sq {x} { expr {$x * $x} }}
+puts $p {proc fxh_dflt {a {b 3} {c 0.5}} { expr {$a + $b + $c} }}
+puts $p {proc fxh_arr {k} { set t($k) $k; return $t($k) }}
+puts $p {proc fxh_glob {k} { global fxg; incr fxg $k; return $fxg }}
+puts $p {proc fxh_err {x} { if {$x % 4 == 3} { error boom }; return $x }}
+proc fxarg {} { pick {{$i} {$a} {$i} {2} {-1} {$a} {0}} }
+proc fxstmt {} {
+    switch [expr {int(rand() * 24)}] {
+        0 { return "incr s \[fxh_sq [fxarg]\]" }
+        1 { return "set d \[expr {\$d + \[fxh_dflt [fxarg]\]}\]" }
+        2 { return "set d \[expr {\$d + \[fxh_dflt [fxarg] [fxarg]\]}\]" }
+        3 { return "set d \[expr {\$d + \[fxh_dflt [fxarg] [fxarg] 2.5\]}\]" }
+        4 { return "incr s \[fxh_arr [fxarg]\]" }
+        5 { return "incr s \[fxh_glob 1\]" }
+        6 { return "if {\[catch {fxh_err [fxarg]} v\]} { incr s 7 } else { incr s \$v }" }
+        7 { return "catch {incr s \[expr {100 / ([fxarg] - [fxarg])}\]}" }
+        8 { return "set l \[list \$i \$a 3 -1\]; foreach x \$l { incr s \[expr {\$x * \$i}\] }" }
+        9 { return "set l \[list \$i \$a 3 -1 7\]; foreach {x y} \$l { catch {incr s \[expr {\$x - \$y}\]} }" }
+        10 { return "set d \[expr {\$d + sqrt(abs([fxarg] + 0.5))}\]" }
+        11 { return "catch {set d \[expr {\$d + log([fxarg])}\]}" }
+        12 { return "catch {set d \[expr {\$d + acos(\$d)}\]}" }
+        13 { return "set d \[expr {\$d + sin(\$d) + pow(abs(\$d), 0.5) + floor(\$d)}\]" }
+        14 { return "incr s \[expr {int(\$d) % 7}\]" }
+        15 { return "incr s \[expr {round(\$d) + wide(\$d / 3)}\]" }
+        16 { return "set d \[expr {\$d + double(\[fxarg\]) + hypot(\$i, \$a) + atan2(\$i, \$a + 1)}\]" }
+        17 { return "set d \[expr {\$d + fmod(\$i, \$a)}\]" }
+        18 { return "set s \[expr {\$s + \[string length \[string repeat x \[expr {\$i % 4}\]\]\]}\]" }
+        19 { return "if {\$d > 1e6} { set d 0.5 }" }
+        20 { return "incr s \[expr {abs(\$s) % 1000}\]" }
+        21 { return "foreach x {1 2 3} { incr s \$x }" }
+        22 { return "catch {error x}; incr s" }
+        23 { return "set d \[expr {\$d * 0.5 + \[fxh_sq \$i\]}\]" }
+    }
+}
+for {set k 0} {$k < $nfx} {incr k} {
+    set body {}
+    for {set j 0} {$j < 2 + int(rand() * 5)} {incr j} { lappend body "        [fxstmt]" }
+    puts $p "proc fx_$k {n a} {\n    set s 0\n    set d 0.5\n    for {set i 0} {\$i < \$n} {incr i} {\n[join $body \n]\n    }\n    return \[list \$s \$d\]\n}"
+    puts $h "fx_$k II ID"
+}
 close $p; close $h
 set ivals {0 1 -1 2 -2 3 7 -7 10 -100 255 2147483647 2147483648 -2147483648 4294967296 9007199254740991 9007199254740992 9007199254740993 -9007199254740993 4611686018427387904 9223372036854775807 -9223372036854775807 -9223372036854775808}
 set dvals {0.5 -0.5 1.5 2.0 -3.25 1e10 1e15 9007199254740992.0 1e-5 0.1 1e308 -1e308 0.0}
@@ -136,10 +179,13 @@ for {set k 0} {$k < $nloop} {incr k} {
     for {set j 0} {$j < [expr {$ncalls/3}]} {incr j} { puts $c "lappend calls {fl_$k [expr {int(rand()*14)}] [arg]}" }
 }
 for {set k 0} {$k < $nvec} {incr k} {
-    for {set j 0} {$j < $ncalls} {incr j} { puts $c "lappend calls {fv_$k [expr {int(rand()*30)}] [arg]}" }
+    for {set j 0} {$j < $ncalls} {incr j} { puts $c "lappend calls {fv_$k [expr {int(rand()*19)}] [arg]}" }
 }
 for {set k 0} {$k < $nmap} {incr k} {
     for {set j 0} {$j < $ncalls} {incr j} { puts $c "lappend calls {fm_$k [expr {int(rand()*25)}] [arg]}" }
+}
+for {set k 0} {$k < $nfx} {incr k} {
+    for {set j 0} {$j < $ncalls} {incr j} { puts $c "lappend calls {unset -nocomplain ::fxg; set ::fxg 0; fx_$k [expr {int(rand()*12)}] [arg]}" }
 }
 for {set k 0} {$k < $nfa} {incr k} {
     for {set j 0} {$j < $ncalls} {incr j} { puts $c "lappend calls {fa_reset; fa_$k [expr {int(rand()*12)}] [arg]}" }

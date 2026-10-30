@@ -307,6 +307,72 @@ lappend calls {unset -nocomplain ::tfg; list [tf_global_hist 12] [tf_global_hist
 
 set calls [concat [lrange $calls 0 [expr {$tfstart - 1}]] [lmap c [lrange $calls $tfstart end] {list tfx_call $c}]]
 
+# calls from typed code
+foreach n {0 1 2 5 100} {
+    foreach p {tq_call_loop tq_call_defaults tq_call_defaults_i tq_call_dflt_str tq_call_dflt_odd tq_call_big tq_call_mixed tq_call_sum_mixed tq_call_missing tq_call_up tq_call_uplevel} { lappend calls [list $p $n] }
+}
+foreach n {0 1 4 5 9} { lappend calls [list tq_call_err $n] }
+foreach n {0 3 50} { lappend calls "set ::tq_counter 0; tq_call_frame $n" "set ::tq_counter 0; catch {tq_call_err_frame $n} m; list \$m \$::tq_counter" }
+# the callee redefined, renamed, deleted between and during calls
+lappend calls {tq_call_loop 6} {proc tq_sq {x} { expr {$x + 1} }; tq_call_loop 6} {tq_call_loop 6} {proc tq_sq {x} { expr {$x * $x} }; tq_call_loop 6}
+lappend calls {rename tq_sq tq_sq_gone; set r [catch {tq_call_loop 3} m]; rename tq_sq_gone tq_sq; list $r $m [tq_call_loop 4]}
+lappend calls {rename tq_sq {}; set r [catch {tq_call_loop 3} m]; proc tq_sq {x} { expr {$x * $x} }; list $r $m [tq_call_loop 4]}
+lappend calls {proc tq_add {a {b 10} {c 2.5}} { expr {$a * 100 + $b + $c} }; set r [tq_call_defaults 4]; proc tq_add {a {b 10} {c 2.5}} { expr {$a + $b + $c} }; list $r [tq_call_defaults 4]}
+lappend calls {proc tq_add_i {a {b 99} {c -3}} { expr {$a + $b + $c} }; set r [tq_call_defaults_i 4]; proc tq_add_i {a {b 10} {c -3}} { expr {$a + $b + $c} }; list $r [tq_call_defaults_i 4]}
+lappend calls {proc tq_arr {k} { return [expr {$k * 7}] }; set r [tq_call_frame 3]; proc tq_arr {k} { set t($k) $k; incr t($k) 5; return $t($k) }; list $r}
+
+# math functions in typed code: every function on integers, doubles, numbers kept as text, bignums, values that make a domain or range error
+set mvals {0 1 -1 2 3 7 -7 100 4611686018427387904 9223372036854775807 -9223372036854775808 9223372036854775808 0.5 -0.5 1.5 -1.5 2.5 -2.5 0.0 -0.0 1e300 -1e300 1e-300
+    1e19 9.223372036854775807e18 -9.223372036854775808e18 1e400 -1e400 0x10 " 7" 1e3 007 abc {} 100000000000000000000 1.0 3.0 0.1 -0.0000001 709 710 -745 -746 36 -2147483648 2147483648}
+foreach f {sin cos tan asin acos atan sinh cosh tanh exp log log10 sqrt floor ceil double int wide round abs bool entier isqrt} {
+    foreach v $mvals { lappend calls [list tm_$f $v] }
+}
+foreach f {pow atan2 fmod hypot} {
+    foreach a {0 1 -1 2 0.5 -0.5 -8 1e300 1e-300 9223372036854775807 0x10 abc 1.5 -0.0} { foreach b {0 1 -1 2 0.5 -0.5 0.3333333333333333 -2 1e300 -1e300 1e-300 3 abc 0x10 1.5 -0.0} { lappend calls [list tm2_$f $a $b] } }
+}
+# (arguments made by expr have no string form, so the procs are entered with a double: the typed variants for D)
+set dvals {0.5 -0.5 1.5 -1.5 2.5 -2.5 0.0 -0.0 1e300 -1e300 1e-300 1e19 9.223372036854775807e18 -9.223372036854775808e18 0.1 -0.0000001 709.0 710.0 -745.0 -746.0 36.0 3.0 1e15 9007199254740993.0}
+foreach f {sin cos tan asin acos atan sinh cosh tanh exp log log10 sqrt floor ceil double int wide round abs bool entier isqrt} {
+    foreach v $dvals { lappend calls "tm_$f \[expr {double($v)}\]" }
+}
+foreach f {pow atan2 fmod hypot} {
+    foreach a {0.5 -0.5 2.0 -8.0 1e300 0.0} { foreach b {0.5 -0.5 2.0 0.3333333333333333 -1e300 0.0 3.0} { lappend calls "tm2_$f \[expr {double($a)}\] \[expr {double($b)}\]" "tm2_$f $a \[expr {double($b)}\]" } }
+}
+foreach v $mvals { lappend calls [list tm_mix $v] [list tm_not_math $v] }
+foreach n {0 1 2 10 100 1000} { lappend calls [list tm_loop $n] [list tm_loop_d 0.5 $n] [list tm_loop_d -3 $n] [list tm_int_loop $n] }
+lappend calls {tm_loop_d abc 5} {tm_loop_d 1e300 50}
+# the math functions redefined: typed code stops computing them itself (this block comes last: the flag is not set again)
+lappend calls {tm_sqrt 16} {rename ::tcl::mathfunc::sqrt ::tcl::mathfunc::sqrt_orig; proc ::tcl::mathfunc::sqrt {x} {return [expr {$x + 100}]}; list [tm_sqrt 16] [tm_loop 5] [tm_mix 3]}
+lappend calls {rename ::tcl::mathfunc::sqrt {}; rename ::tcl::mathfunc::sqrt_orig ::tcl::mathfunc::sqrt; list [tm_sqrt 16] [tm_loop 5] [tm_mix 3]}
+lappend calls {namespace eval ::mfns {proc tcl::mathfunc::floor {x} {return -1}}; set r [list [tm_floor 2.5] [tm_loop 4]]; namespace delete ::mfns; set r}
+
+# foreach in typed code
+set flists [list {} {1} {1 2 3} {1 2 3 4 5 6 7 8} {1 2 x} {6 1 7} {1 {2 3} 4} " 5 6" 0x10 {3} {1 2 3 4 3 5} \{ {a b} {-1 0 1 2} {1.5 2.5} {9223372036854775807 1}]
+foreach l $flists {
+    foreach p {tfe_sum tfe_pairs tfe_break tfe_continue tfe_after tfe_float tfe_arr tfe_err tfe_return tfe_notlist tfe_str} { lappend calls [list $p $l] }
+    lappend calls "catch {unset ::tfe_last}; [list tfe_global $l]"
+    lappend calls [list tfe_two $l {10 20}] [list tfe_two {1 2 3} $l] [list tfe_three $l {a b c}] [list tfe_three {x y z w} $l] [list tfe_up tfv $l]
+}
+foreach n {0 1 3 20} { lappend calls [list tfe_nested $n] [list tfe_modify $n] [list tfe_shared $n] [list tfe_calls $n] [list tfe_big $n] }
+
+# catch in typed code
+foreach n {0 1 2 3 4 5 6 10} {
+    foreach p {tcc_basic tcc_vars tcc_nested tcc_codes tcc_loop tcc_overflow tcc_opts tcc_callee tcc_undef tcc_after tcc_arr tcc_strict} { lappend calls [list $p $n] }
+}
+lappend calls {tcc_loop 1.5} {tcc_vars x}
+
+# switch in typed code
+foreach n {0 1 2 3 6 7 11} { lappend calls [list tsw_int $n] [list tsw_mod $n] [list tsw_nested $n] }
+foreach l [list {} a {a b c} {a {a b} {} d b} {c c c} {x}] { lappend calls [list tsw_str $l] }
+foreach x {1 01 1.0 abc 2 0x1 -1 {} " 1" 1e0 +1} { lappend calls [list tsw_val $x] [list tsw_nodefault $x] [list tsw_dbl $x] [list tsw_err $x] }
+
+# small instructions in typed code
+foreach l [list {} 5 {1 2 3} {9223372036854775806 1 2} {9223372036854775807 1} {a 1} {0x10 1 -3} {1.5 2} " 7 8" {1 {2 3}} \{] {
+    foreach p {tbx_incr_b tbx_incr_by tbx_incr_shared tbx_map} { lappend calls [list $p $l] }
+    lappend calls [list tbx_llen $l 4] [list tbx_concat $l {x y}] [list tbx_concat {p q} $l]
+}
+foreach n {0 1 5} { lappend calls [list tbx_concat_loop $n] }
+
 # TBC_SMALL=1: leave out the calls that loop long (for runs under valgrind)
 if {[info exists ::env(TBC_SMALL)]} { set calls [lmap c $calls { if {[regexp {(^|[ \{])(1000|3000|6000|10000|30000|100000|1000000|900|1500)($|[ \}])} $c]} { continue }; set c }] }
 proc runall {} {

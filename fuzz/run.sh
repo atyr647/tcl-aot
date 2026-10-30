@@ -38,5 +38,7 @@ esac
 timeout 1800 ./shell run.tcl >out.txt 2>&1
 status=$?
 echo "fuzz $kind seed $seed: $(grep -E 'compared' out.txt | tail -1)"
+grep -E '^coverage of' out.txt | sed 's/^/  /'
+
 grep -E 'NO COMPILED BODY|MISMATCH' out.txt | head -5
 exit $status

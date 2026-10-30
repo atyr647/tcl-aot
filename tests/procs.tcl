@@ -952,3 +952,205 @@ proc tf_leak_up {name n} {
     return $x
 }
 proc tf_leak_up2 {n} { set c 0; for {set i 0} {$i < $n} {incr i} { tf_leak_up c 3 }; return $c }
+
+# ---- calls from typed code: a callee that is not attached yet, omitted default arguments, callees that fall back to boxed code, callees that need a frame
+proc tq_sq {x} { expr {$x * $x} }
+proc tq_add {a {b 10} {c 2.5}} { expr {$a + $b + $c} }
+proc tq_add_i {a {b 10} {c -3}} { expr {$a + $b + $c} }
+proc tq_dflt_str {a {b abc}} { return $a$b }
+proc tq_dflt_odd {a {b 0x10} {c 1e3} {d 007}} { return [list $a $b $c $d] }
+proc tq_arr {k} { set t($k) $k; incr t($k) 5; return $t($k) }
+proc tq_glob {k} { global tq_counter; incr tq_counter $k; return $tq_counter }
+proc tq_up {name} { upvar 1 $name x; incr x; return $x }
+proc tq_uplevel {} { uplevel 1 {set tq_seen 1} }
+proc tq_err {x} { if {$x > 3} { error "too big: $x" }; return $x }
+proc tq_big {x} { return [expr {$x * 4611686018427387904}] }
+proc tq_str {x} { if {$x % 2} { return "odd" }; return $x }
+proc tq_dbl {x} { if {$x % 3 == 0} { return [expr {$x / 2.0}] }; return $x }
+proc tq_call_loop {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [tq_sq $i] }; return $s }
+proc tq_call_defaults {n} {
+    set s 0.0
+    for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [tq_add $i] + [tq_add $i 1] + [tq_add $i 1 2.0]}] }
+    return $s
+}
+proc tq_call_defaults_i {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [tq_add_i $i]; incr s [tq_add_i $i 5]; incr s [tq_add_i $i 5 7] }
+    return $s
+}
+proc tq_call_dflt_str {n} { set r {}; for {set i 0} {$i < $n} {incr i} { append r [tq_dflt_str $i] , }; return $r }
+proc tq_call_dflt_odd {n} { set r {}; for {set i 0} {$i < $n} {incr i} { lappend r [tq_dflt_odd $i] }; return $r }
+proc tq_call_frame {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [tq_arr $i]; incr s [tq_glob 1] }
+    return [list $s $::tq_counter]
+}
+proc tq_call_up {n} { set c 0; for {set i 0} {$i < $n} {incr i} { tq_up c }; return $c }
+proc tq_call_uplevel {n} { set tq_seen 0; for {set i 0} {$i < $n} {incr i} { tq_uplevel }; return [info exists tq_seen] }
+proc tq_call_err {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [tq_err $i] }; return $s }
+proc tq_call_err_frame {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [tq_err $i]; incr s [tq_glob 1] }; return [list $s $::tq_counter] }
+proc tq_call_big {n} { set s 0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [tq_big $i]}] }; return $s }
+proc tq_call_mixed {n} { set r {}; for {set i 0} {$i < $n} {incr i} { lappend r [tq_str $i] [tq_dbl $i] }; return $r }
+proc tq_call_sum_mixed {n} { set s 0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [tq_dbl $i]}] }; return $s }
+proc tq_call_missing {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [tq_nosuch $i] }; return $s }
+
+# ---- math functions (tcl::mathfunc::*) in typed code: one proc per function, entered with integer, double and object arguments (tests/hints.txt)
+foreach f {sin cos tan asin acos atan sinh cosh tanh exp log log10 sqrt floor ceil double int wide round abs bool entier isqrt} {
+    proc tm_$f {x} "expr {${f}(\$x)}"
+}
+foreach f {pow atan2 fmod hypot} {
+    proc tm2_$f {x y} "expr {${f}(\$x, \$y)}"
+}
+proc tm_mix {x} { expr {sqrt($x * $x + 1.0) + abs($x) + int($x) * 2 + round($x) - floor($x) + ceil($x)} }
+proc tm_loop {n} {
+    set s 0.0
+    for {set i 1} {$i < $n} {incr i} {
+        set s [expr {$s + sqrt($i) + double($i % 7) + floor($i / 3.0) + abs($i - 50) + round($i * 0.5) + int($i * 1.5)}]
+    }
+    return $s
+}
+proc tm_loop_d {x n} {
+    set s $x
+    for {set i 1} {$i < $n} {incr i} {
+        set s [expr {sin($s) + cos($i) + exp(-$i * 0.01) + log($i) + pow($s, 2) + atan2($s, $i) + hypot($s, $i) + fmod($i, 3.0) + abs($s) + sqrt(abs($s)) + floor($s) + ceil($s) + round($s / 1e10)}]
+    }
+    return $s
+}
+proc tm_int_loop {n} {
+    set s 0
+    for {set i -50} {$i < $n} {incr i} { incr s [expr {int($i * 0.37) + round($i * 0.5) + abs($i) + wide($i / 3.0)}] }
+    return $s
+}
+proc tm_not_math {x} { expr {max($x, 3) + min($x, 3)} }
+
+# ---- foreach in typed code
+proc tfe_sum {l} { set s 0; foreach x $l { incr s $x }; return $s }
+proc tfe_pairs {l} { set s 0; foreach {a b} $l { incr s [expr {$a * $b}] }; return $s }
+proc tfe_two {l m} { set s 0; foreach x $l y $m { incr s [expr {$x + $y}] }; return $s }
+proc tfe_three {l m} { set r {}; foreach {a b} $l c $m { lappend r "$a/$b/$c" }; return $r }
+proc tfe_nested {n} {
+    set s 0
+    set l {1 2 3}
+    for {set i 0} {$i < $n} {incr i} { foreach x $l { foreach y $l { incr s [expr {$x * $y + $i}] } } }
+    return $s
+}
+proc tfe_modify {n} { set l {1 2 3}; set s 0; foreach x $l { lappend l 9; incr s $x }; return [list $s $l] }
+proc tfe_shared {n} { set l [list 1 2 3]; set k $l; set s 0; foreach x $l { lset l 0 99; incr s $x }; return [list $s $l $k] }
+proc tfe_break {l} { set s 0; foreach x $l { if {$x > 5} break; incr s $x }; return $s }
+proc tfe_continue {l} { set s 0; foreach x $l { if {$x % 2} continue; incr s $x }; return $s }
+proc tfe_after {l} { foreach x $l {}; return [expr {[info exists x] ? $x : -1}] }
+proc tfe_float {l} { set s 0.0; foreach x $l { set s [expr {$s + sqrt($x)}] }; return $s }
+proc tfe_calls {n} {
+    set l {}
+    for {set i 0} {$i < $n} {incr i} { lappend l $i }
+    set s 0
+    foreach x $l { incr s [tq_sq $x] }
+    return $s
+}
+proc tfe_arr {l} { foreach x $l { incr cnt($x) }; return [lsort [array get cnt]] }
+proc tfe_up {name l} { upvar 1 $name v; foreach v $l { incr tfe_n }; return [list $v [info exists tfe_n]] }
+proc tfe_global {l} { global tfe_last; foreach tfe_last $l {}; return $tfe_last }
+proc tfe_err {l} { set s 0; foreach x $l { incr s [expr {10 / $x}] }; return $s }
+proc tfe_return {l} { foreach x $l { if {$x == 3} { return found } }; return none }
+proc tfe_notlist {x} { foreach a $x { }; return done }
+proc tfe_str {l} { set r ""; foreach w $l { append r [string length $w] , [string toupper $w] ; }; return $r }
+proc tfe_big {n} {
+    set l {}
+    for {set i 0} {$i < 1000} {incr i} { lappend l $i }
+    set s 0
+    for {set k 0} {$k < $n} {incr k} { foreach x $l { incr s $x } }
+    return $s
+}
+
+# ---- catch in typed code: the body runs typed, an error hands over to the boxed code at that instruction, which dispatches to the handler
+proc tcc_basic {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { if {[catch {expr {10 / ($i % 3)}} r]} { incr s 100 } else { incr s $r } }
+    return $s
+}
+proc tcc_vars {n} { catch { set a $n; set b [expr {$a * 2}]; set c [expr {$b / ($n - 3)}] } m; return [list $a $b [info exists c] $m] }
+proc tcc_nested {n} { catch { catch { error inner } m1; set x [expr {$n / 0}] } m2; return [list $m1 $m2 [info exists x]] }
+proc tcc_codes {n} {
+    set r {}
+    lappend r [catch { return $n } v] $v
+    lappend r [catch { expr {$n + 1} } v] $v
+    lappend r [catch { error "e$n" } v o] $v [dict get $o -code]
+    lappend r [catch { break } v] [catch { continue } v] [catch { return -code 7 x } v]
+    return $r
+}
+proc tcc_loop {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} {
+        catch { incr s [expr {100 / ($i - 5)}] }
+        incr s $i
+    }
+    return $s
+}
+proc tcc_overflow {n} { set s 0; for {set i 0} {$i < $n} {incr i} { catch { set big [expr {9223372036854775807 + $i}]; incr s } }; return [list $s [info exists big]] }
+proc tcc_opts {n} { catch { expr {$n / 0} } m o; return [list $m [dict get $o -errorcode]] }
+proc tcc_callee {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { if {[catch {tq_err $i} v]} { incr s 1000 } else { incr s $v } }
+    return $s
+}
+proc tcc_undef {n} { catch { expr {$nosuch + 1} } m; return $m }
+proc tcc_after {n} { set a 1; catch { set a [expr {$n / 0}] }; set b [expr {$a + 5}]; for {set i 0} {$i < 3} {incr i} { incr b $i }; return [list $a $b] }
+proc tcc_arr {n} { catch { set t(1) 5; set t(2) [expr {$t(1) / ($n - 1)}] } m; return [list $m [lsort [array get t]]] }
+proc tcc_strict {n} { catch { string index abc $n; lindex {a b} [expr {$n / ($n - 2)}] } m; return $m }
+
+# ---- switch in typed code (jump tables): integer and string keys, keys written in other forms, fall-through bodies, default
+proc tsw_int {n} {
+    set s 0
+    for {set i -3} {$i < $n} {incr i} {
+        switch -- $i {
+            -2 { incr s 1000 }
+            0 { incr s 1 }
+            1 - 2 { incr s 20 }
+            05 { incr s 500000 }
+            +3 { incr s 7000 }
+            -0 { incr s 90000 }
+            5 { incr s 300 }
+            9223372036854775807 { incr s 5 }
+            default { incr s 4000000 }
+        }
+    }
+    return $s
+}
+proc tsw_mod {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { switch -- [expr {$i % 4}] { 0 { incr s 1 } 1 { incr s 2 } 2 { incr s 3 } default { incr s 4 } } }
+    return $s
+}
+proc tsw_str {l} {
+    set s 0
+    foreach w $l { switch -- $w { a { incr s 1 } b - c { incr s 10 } {} { incr s 100 } "a b" { incr s 1000 } default { incr s 10000 } } }
+    return $s
+}
+proc tsw_val {x} { switch -- $x { 1 { return one } 01 { return zero-one } 1.0 { return float } abc { return text } default { return other } } }
+proc tsw_nodefault {x} { set r start; switch -- $x { 1 { set r one } 2 { set r two } }; return $r }
+proc tsw_nested {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} {
+        switch -- [expr {$i % 3}] {
+            0 { switch -- [expr {$i % 2}] { 0 { incr s 1 } default { incr s 2 } } }
+            1 { incr s 10 }
+            default { incr s 100 }
+        }
+    }
+    return $s
+}
+proc tsw_dbl {x} { switch -- [expr {$x * 1.0}] { 1.0 { return one } 2.5 { return twoandhalf } default { return other } } }
+proc tsw_err {x} { switch -- $x { 1 { return [expr {1 / 0}] } default { return $x } } }
+
+# ---- smaller instructions in typed code: incr of a local held as an object, llength of a number, string map, list concatenation
+proc tbx_incr_b {l} { set r {}; foreach x $l { incr x; incr x 5; lappend r $x }; return $r }
+proc tbx_incr_by {l} { set r {}; foreach x $l { foreach y $l { set z $x; incr z $y; lappend r $z } }; return $r }
+proc tbx_incr_shared {l} { set v [lindex $l 0]; set w $v; incr v; incr v [lindex $l 1]; return [list $v $w] }
+proc tbx_llen {x n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [llength $i]; incr s [llength [expr {$i * 0.5}]]; incr s [llength abc] }
+    return [list $s [llength $x]]
+}
+proc tbx_map {l} { set r {}; foreach w $l { lappend r [string map {a 1 b 22} $w] }; return $r }
+proc tbx_concat {a b} { return [list {*}$a {*}$b] }
+proc tbx_concat_loop {n} { set r {}; for {set i 0} {$i < $n} {incr i} { set r [list {*}$r $i {*}[list $i $i]] }; return $r }

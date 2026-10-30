@@ -8,6 +8,7 @@ proc runall {} {
     global calls
     set out {}
     foreach c $calls {
+        if {[info exists ::env(TBC_TRACE)]} { puts stderr "CALL $c" }
         set rc [catch $c r opts]
         lappend out [list $rc $r [expr {$rc == 1 && [dict exists $opts -errorcode] ? [dict get $opts -errorcode] : "-"}]]
     }
@@ -38,11 +39,13 @@ if {[llength [info commands tbc_coverage]]} {
     set ents 0; set dp 0; set dn 0
     foreach {k v} [array get cov] { if {[string match V:* $k]} { incr ents } elseif {[string match D:* $k]} { incr dp; incr dn $v } }
     puts "coverage: $ents variants entered; $dp distinct deopt points taken ($dn deopts)"
-    # the frame-variable programs: how many ran typed, and how often they left typed mode
-    set fv 0; set fvn 0; set fd 0; set fdn 0; set fr 0
-    foreach {k v} [array get cov] {
-        if {[string match V:::fa_* $k]} { incr fv; incr fvn $v } elseif {[string match D:::fa_* $k]} { incr fd; incr fdn $v } elseif {[string match R:::fa_* $k]} { incr fr $v }
+    # the programs that mix constructs: how many ran typed, and how often they left typed mode
+    foreach pre {fa_ fx_} {
+        set fv 0; set fvn 0; set fd 0; set fdn 0; set fr 0
+        foreach {k v} [array get cov] {
+            if {[string match V:::${pre}* $k]} { incr fv; incr fvn $v } elseif {[string match D:::${pre}* $k]} { incr fd; incr fdn $v } elseif {[string match R:::${pre}* $k]} { incr fr $v }
+        }
+        puts "coverage of the $pre programs: $fv variants entered $fvn times; $fd deopt points taken $fdn times; $fr resumes"
     }
-    puts "coverage of the frame-variable programs: $fv variants entered $fvn times; $fd deopt points taken $fdn times; $fr resumes"
 }
 exit [expr {$bad ? 1 : 0}]

@@ -89,3 +89,80 @@ proc int_loop {n} {
     for {set i 0} {$i < $n} {incr i} { set s [expr {($s + $i * 7) % 1000003}] }
     return $s
 }
+
+# calls between procs, math functions, foreach, string commands and the constructs typed code does not take yet
+
+proc sq {x} { expr {$x * $x} }
+proc addd {a {b 10}} { expr {$a + $b} }
+proc idx {a} { set t($a) $a; return $t($a) }
+
+proc call_small {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [sq $i] }
+    return $s
+}
+
+proc call_default {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [addd $i] }
+    return $s
+}
+
+proc call_frame {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [idx $i] }
+    return $s
+}
+
+proc math_funcs {n} {
+    set s 0.0
+    for {set i 1} {$i < $n} {incr i} { set s [expr {$s + sqrt($i) + double($i % 7)}] }
+    return $s
+}
+
+proc math_int {n} {
+    set s 0
+    for {set i 1} {$i < $n} {incr i} { incr s [expr {int($i * 0.5)}] }
+    return $s
+}
+
+proc list_foreach {n} {
+    set l {}
+    for {set i 0} {$i < 1000} {incr i} { lappend l $i }
+    set s 0
+    for {set k 0} {$k < $n} {incr k} { foreach x $l { incr s $x } }
+    return $s
+}
+
+proc list_index {n} {
+    set l {}
+    for {set i 0} {$i < 1000} {incr i} { lappend l $i }
+    set s 0
+    for {set k 0} {$k < $n} {incr k} {
+        for {set i 0} {$i < 1000} {incr i} { incr s [lindex $l $i] }
+    }
+    return $s
+}
+
+proc str_ops {n} {
+    set s 0
+    set str "hello world"
+    for {set i 0} {$i < $n} {incr i} { incr s [string length $str]; incr s [string first o $str] }
+    return $s
+}
+
+proc sw_loop {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} {
+        switch -- [expr {$i % 4}] { 0 { incr s 1 } 1 { incr s 2 } 2 { incr s 3 } default { incr s 4 } }
+    }
+    return $s
+}
+
+proc catch_loop {n} {
+    set s 0
+    for {set i 0} {$i < $n} {incr i} {
+        if {[catch {expr {$i % 5}} r]} { incr s } else { incr s $r }
+    }
+    return $s
+}
