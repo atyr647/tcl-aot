@@ -144,7 +144,7 @@ set tbcGops {nop startCommand beginCatch4 endCatch tryCvtToNumeric push1 push4 p
     over streq strneq strcmp strindex strmatch strfind strrfind strrange strrangeImm strreplace strmap strcaseUpper strcaseLower strcaseTitle strtrim strtrimLeft
     strtrimRight strclass regexp uminus uplus not bitnot bitand bitor bitxor lshift rshift expon listIn listNotIn listConcat lindexMulti lsetFlat listRangeImm
     concatStk jumpTable infoLevelNumber infoLevelArgs currentNamespace expandStart expandStkTop invokeExpanded expandDrop syntax
-    tailcall evalStk coroName dictExpand dictRecombineImm dictRecombineStk dictUpdateStart dictUpdateEnd invokeReplace dictSet dictUnset dictAppend dictLappend arrayMakeImm arrayMakeStk exprStk tryCvtToBoolean numericType clockRead resolveCmd originCmd
+    yield yieldToInvoke tailcall evalStk coroName dictExpand dictRecombineImm dictRecombineStk dictUpdateStart dictUpdateEnd invokeReplace dictSet dictUnset dictAppend dictLappend arrayMakeImm arrayMakeStk exprStk tryCvtToBoolean numericType clockRead resolveCmd originCmd
     loadArray1 loadArray4 loadArrayStk loadStk loadScalarStk storeArray1 storeArray4 storeArrayStk storeStk storeScalarStk
     appendArray1 appendArray4 appendArrayStk appendStk lappendArray1 lappendArray4 lappendArrayStk lappendStk
     incrArray1 incrArrayStk incrStk incrScalarStk incrArray1Imm incrArrayStkImm incrStkImm incrScalarStkImm lappendList lappendListArray lappendListStk lappendListArrayStk
@@ -438,8 +438,10 @@ proc prepare {P} {
     # interpreter and keep its variables in C locals.
     set csafe 1
     # "yield-safe": nothing this proc runs can reach a `yield` (no script is evaluated, no command whose identity is unknown is called, every proc it calls is
-    # itself yield-safe).  Such a proc can run compiled inside a coroutine: a yield below compiled code would have to cross a C frame.
-    set ysafe 1
+    # itself yield-safe).  Such a proc can run compiled inside a coroutine: a yield below compiled code would have to cross a C frame.  A proc that yields
+    # itself ("resumable", yres) can too, if everything else it runs is yield-safe: its boxed code suspends through the interpreter's callbacks.
+    set yres 1
+    set hasYield 0
     # the built-in commands whose identity the analysis relies on (that they run no script and leave the caller's variables alone)
     set bins {}
     set pst(0) {}; set pwork {0}
@@ -455,7 +457,8 @@ proc prepare {P} {
             default { set out [list {*}[lrange $st 0 [expr {[llength $st] - $pops - 1}]] {*}[lrepeat $pushes -]] }
         }
         if {$op in {evalStk exprStk tailcall invokeReplace invokeExpanded}} { set csafe 0 }
-        if {$op in {evalStk exprStk invokeReplace invokeExpanded}} { set ysafe 0 }
+        if {$op in {evalStk exprStk invokeReplace invokeExpanded}} { set yres 0 }
+        if {$op in {yield yieldToInvoke}} { set csafe 0; set pure 0; set hasYield 1 }
         if {$op eq "upvar"} {
             set lv [lindex $st end-1]
             if {$lv eq "-" || [lindex [dict get $bc literals] $lv] ni {0 #0}} { set csafe 0 }
@@ -466,7 +469,7 @@ proc prepare {P} {
             set n [lindex $a 0]; set q [expr {[llength $st] - $n}]
             set c [lindex $st $q]
             if {$c eq "-"} {
-                set pure 0; set csafe 0; set ysafe 0
+                set pure 0; set csafe 0; set yres 0
             } else {
                 set nm [lindex [dict get $bc literals] $c]
                 set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
@@ -481,7 +484,7 @@ proc prepare {P} {
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
                         lappend bins ::$bn
                     } else {
-                        set csafe 0; set ysafe 0
+                        set csafe 0; set yres 0
                     }
                     set w2 [expr {$n > 1 ? [lindex $st [expr {$q+1}]] : "-"}]
                     set sub [expr {$w2 eq "-" ? "-" : [lindex [dict get $bc literals] $w2]}]
@@ -602,11 +605,12 @@ proc prepare {P} {
         if {$op in $::tbcRops} continue
         foreach v [concat {*}[usedef $op $a]] { set rv [lsearch -all -inline -not -exact $rv $v] }
     }
+    if {$hasYield} { set rv {} }
     set PI($P,rvars) $rv
     set fv [lmap v $fv {expr {$v in $rv ? [continue] : $v}}]
     set PI($P,fvars) [lsort -integer -unique $fv]
     if {[llength $fv]} { set pure 0 }
-    set PI($P,csafe) $csafe; set PI($P,ysafe) $ysafe; set PI($P,bins) [lsort -unique $bins]
+    set PI($P,csafe) $csafe; set PI($P,ysafe) [expr {$yres && !$hasYield}]; set PI($P,yres) [expr {$yres && $hasYield}]; set PI($P,hasYield) $hasYield; set PI($P,bins) [lsort -unique $bins]
     set PI($P,callees) [lsort -unique $callees]; set PI($P,pure) $pure; set PI($P,mustBoxNamed) [lsort -unique $mustBoxNamed]
     set PI($P,args) $args; set PI($P,nargs) $nargs; set PI($P,vnames) $vnames; set PI($P,lits) [dict get $bc literals]
     # a literal the compiler folded is a double object with no string yet (or one whose printed form is not exact: Tcl prints 2^64 as
@@ -625,6 +629,11 @@ proc prepare {P} {
     set exl 0
     foreach pc $reach { set PI($P,mk,$pc) $mkAt($pc); set l [llength $mkAt($pc)]; if {[lindex $ins($pc) 0] eq "expandStart"} { incr l }; if {$l > $exl} { set exl $l } }
     set PI($P,exlevels) $exl
+    # a yield suspends the boxed code, which keeps only the operand stack: no dictionary iteration may be in progress, and no expansion
+    if {$hasYield} {
+        if {[llength $iters]} { refuse "yield in a proc with a dictionary iteration" }
+        foreach pc $reach { if {[lindex $ins($pc) 0] in {yield yieldToInvoke} && ([llength $mkAt($pc)] || [lindex $ins($pc) 0] eq "expandStart")} { refuse "yield inside an argument expansion" } }
+    }
     foreach pc $pcs { set PI($P,ins,$pc) $ins($pc) }
     foreach pc $reach { set PI($P,depth,$pc) $depth($pc); set PI($P,succ,$pc) $succ($pc); set PI($P,live,$pc) $liveIn($pc); set PI($P,may,$pc) $mayIn($pc) }
     # literal classes: canonical integers and doubles can be used as numbers; everything else stays a string
@@ -692,10 +701,13 @@ while {$pruned} {
         }
     }
 }
-# every proc a yield-safe proc calls, directly or through others
+# resumable procs (they yield themselves; everything else they run is yield-safe)
+set yresProcs [lmap P $translatable {expr {$PI($P,yres) ? $P : [continue]}}]
+set yresProcs [lmap P $yresProcs {expr {[llength [lmap c $PI($P,callees) {expr {$c in $ysafeProcs ? [continue] : $c}}]] ? [continue] : $P}}]
+# every proc a yield-safe or resumable proc calls, directly or through others
 proc ydeps {P} {
-    global PI ysafeProcs
-    if {$P ni $ysafeProcs} { return {} }
+    global PI ysafeProcs yresProcs
+    if {$P ni $ysafeProcs && $P ni $yresProcs} { return {} }
     set seen {}; set todo $PI($P,callees)
     while {[llength $todo]} {
         set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
@@ -1226,6 +1238,21 @@ proc stepT {key pc in} {
             set c "[boxc $P $top $e] \{ int n_; if (Tcl_DictObjSize(interp, s$top, &n_) != TCL_OK) goto [fl $key $st]; Tcl_DecrRefCount(s$top); \}"
             return [R fall [lrange $in 0 end-1] $c]
         }
+        yield - yieldToInvoke {
+            # (boxed code does it; the state after it is where the resumed coroutine goes on in typed code)
+            set below [lrange $in 0 end-1]
+            set seed {}
+            foreach e $below {
+                switch [kd $e] {
+                    I - D - B { lappend seed [kd $e] }
+                    L { lappend seed B }
+                    T { lappend seed $e }
+                    default { set seed {}; break }
+                }
+            }
+            if {[llength $seed] != [llength $below]} { return $dead }
+            return [R dead {} "goto D$pc;" seed [list $PI($P,next,$pc) [concat $seed B]]]
+        }
         dictFirst - dictNext - unsetScalar { return $dead }
         listIn - listNotIn - strindex - strfind - strrfind - strrange - strreplace - strcaseUpper - strcaseLower - strcaseTitle - strtrim - strtrimLeft -
         strtrimRight - strmatch - regexp - strrangeImm - listRangeImm - lindexMulti { return [stepCmdOp $key $pc $in $d $op $a] }
@@ -1643,7 +1670,7 @@ proc defaultConst {d} {
 # callee that is not pure.
 proc resumable {P} {
     global PI
-    if {[llength $PI($P,fvars)]} { return 1 }
+    if {[llength $PI($P,fvars)] || $PI($P,hasYield)} { return 1 }
     foreach c $PI($P,callees) { if {![info exists PI($c,pure)] || !$PI($c,pure)} { return 1 } }
     return 0
 }
@@ -1824,6 +1851,7 @@ proc enterG {key gpc slots pre flush} {
     set ::boxMode copy
     set arr {}; for {set p 0} {$p < $n} {incr p} { lappend arr s$p }
     append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] }; int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
+    if {$::PI($P,hasYield)} { append c " if (TBC_UNLIKELY(tbc_susp)) \{ tbc_st = 4; rc = TCL_OK; goto ret; \}" }
     append c " if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} goto ret; \}"
     return $c
 }
@@ -2067,6 +2095,14 @@ proc analyze {key} {
             set flow [dict get $r flow]
             set out [dict get $r out]
             set succs {}
+            # (a yield hands over to the boxed code and has no successor; the typed state after it, for the code that goes on when the coroutine is resumed, is a seed)
+            if {[dict exists $r seed]} {
+                lassign [dict get $r seed] sn sout
+                if {![info exists IN($sn)]} { set IN($sn) $sout; lappend work $sn } else {
+                    set j [jstate $IN($sn) $sout]
+                    if {$j ne $IN($sn)} { set IN($sn) $j; lappend work $sn }
+                }
+            }
             switch $flow {
                 fall { set succs [list $PI($P,next,$pc)] }
                 jump { set succs [list [dict get $r tgt]] }
@@ -2088,6 +2124,7 @@ proc analyze {key} {
         foreach s $stores { lassign $s v k; dict set nk $v [jk [dict get $nk $v] $k] }
         foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M}} { dict set nk $v B } }
         foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M}} { dict set nk $v B } }
+        if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M}} { dict set nk $v B } } }
         if {$nk eq $kap} {
             set pending 0
             dict for {v k} $nk { if {$k eq "-"} { dict set nk $v B; set pending 1 } }
@@ -2343,6 +2380,19 @@ proc genG {key pc d} {
             lassign $a var n vars
             return [string map [concat $X [list @N@ [operand $var] @NV@ [llength $vars] @VI@ [join $vars {, }]]] {{ static const int vi_[] = { @VI@ }; if (tbc_dupend(interp, loc_, @N@, vi_, @s1@)) goto @E@; Tcl_DecrRefCount(@s1@); }}]
         }
+        yield - yieldToInvoke {
+            set below {}
+            for {set k 0} {$k < $d - 1} {incr k} { lappend below s$k }
+            set nx $PI($P,next,$pc)
+            if {$op eq "yield"} {
+                set what "yield"; set typ NULL
+                set setup "Tcl_SetObjResult(interp, @s1@); Tcl_DecrRefCount(@s1@);"
+            } else {
+                set what "yieldto"; set typ "INT2PTR(1)"
+                set setup "if (((Namespace *) TclGetCurrentNamespace(interp))->flags & NS_DYING) { Tcl_SetObjResult(interp, Tcl_NewStringObj(\"yieldto called in deleted namespace\", -1)); Tcl_SetErrorCode(interp, \"TCL\", \"COROUTINE\", \"YIELDTO_IN_DELETED\", NULL); goto @E@; } Tcl_IncrRefCount(@s1@); ((Interp *) interp)->execEnvPtr = cp_->callerEEPtr; TclSetTailcall(interp, @s1@); ((Interp *) interp)->execEnvPtr = cp_->eePtr; Tcl_DecrRefCount(@s1@);"
+            }
+            return [string map [concat $X [list @PC@ $pc]] "\{ CoroutineData *cp_ = ((Interp *) interp)->execEnvPtr->corPtr; if (!cp_) \{ Tcl_SetObjResult(interp, Tcl_NewStringObj(\"$what can only be called in a coroutine\", -1)); Tcl_SetErrorCode(interp, \"TCL\", \"COROUTINE\", \"ILLEGAL_YIELD\", NULL); goto @E@; \} $setup \{ Tcl_Obj *bl_\[\] = { [join [concat $below NULL] {, }] }; tbc_setpc(interp, @PC@); tbc_do_yield(interp, tbc_yres_[cident $P], $nx, [expr {$d - 1}], bl_, $typ); \} rcg_ = TCL_OK; goto gexit; \}"]
+        }
         tailcall {
             set n [lindex $a 0]
             set slots {}; set rel ""
@@ -2593,15 +2643,58 @@ proc entryCalled {cid pc} {
     if {![info exists ENT]} {
         array set ENT {}
         foreach {all c n} [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] { set ENT($c,$n) 1 }
+        # (the resume callbacks of the procs that yield enter at the instruction after each yield, and at the yield itself with an error)
+        global PI translatable
+        foreach P $translatable {
+            if {!$PI($P,hasYield)} continue
+            foreach ypc $PI($P,reach) { if {[lindex $PI($P,ins,$ypc) 0] in {yield yieldToInvoke}} { set ENT([cident $P],$PI($P,next,$ypc)) 1; set ENT([cident $P],[expr {-$ypc-1}]) 1 } }
+        }
     }
     return [info exists ENT($cid,$pc)]
+}
+
+# the callback that continues the boxed code of P after a yield: when the coroutine is resumed the interpreter runs it, with the interpreter's result (the value the
+# resumer passed) as the result of the yield instruction.  A coroutine that is deleted while suspended rewinds: the stack is released and nothing runs.
+proc emitResume {P} {
+    global PI REKEY
+    set cid [cident $P]
+    set maxd2 [expr {$PI($P,maxd) + 2}]
+    set fn "static int tbc_yres_${cid}(ClientData data\[\], Tcl_Interp *interp, int result)\n\{\n"
+    append fn "    Interp *iPtr = (Interp *) interp;\n    TbcYieldRec *rec = (TbcYieldRec *) data\[0\];\n    Tcl_Obj *stk\[$maxd2\];\n    int i, n = rec->n, pc = rec->pc, code = TCL_ERROR;\n"
+    append fn "    for (i = 0; i < n; i++) stk\[i\] = rec->o\[i\];\n    ckfree((char *) rec);\n"
+    append fn "    if (iPtr->execEnvPtr->rewind) \{ for (i = 0; i < n; i++) Tcl_DecrRefCount(stk\[i\]); return TCL_ERROR; \}\n"
+    append fn "    stk\[n\] = Tcl_GetObjResult(interp); Tcl_IncrRefCount(stk\[n\]);\n    iPtr->numLevels--; tbc_nest++; tbc_maxdepth = Tcl_SetRecursionLimit(interp, 0);\n"
+    set ok ""; set bad ""
+    global REKEY VK
+    set re [expr {[dict exists $REKEY $P] ? [dict get $REKEY $P] : ""}]
+    set pts [expr {$re ne "" ? [resumePoints $re] : {}}]
+    if {$re ne ""} {
+        set rk $VK($re,ret); if {$rk in {- U}} { set rk B }
+        switch $rk {
+            I { set fin "int64_t r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); code = TCL_OK; \}" }
+            D { set fin "double r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); code = TCL_OK; \}" }
+            default { set fin "Tcl_Obj *r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, r_); Tcl_DecrRefCount(r_); code = TCL_OK; \}" }
+        }
+    }
+    foreach pc $PI($P,reach) {
+        if {[lindex $PI($P,ins,$pc) 0] ni {yield yieldToInvoke}} continue
+        set nx $PI($P,next,$pc)
+        if {$nx in $pts} { append ok "        case $nx: \{ $fin \} break;\n" } else {
+        append ok "        case $nx: code = G_${cid}(interp, $nx, stk, n + 1); break;\n" }
+        append bad "        case $nx: code = G_${cid}(interp, [expr {-$pc-1}], stk, n + 1); break;\n"
+    }
+    append fn "    if (result == TCL_OK) \{\n        switch (pc) \{\n$ok        default: break;\n        \}\n    \} else \{\n        tbc_rc = result;\n        switch (pc) \{\n$bad        default: break;\n        \}\n    \}\n"
+    append fn "    tbc_nest--; iPtr->numLevels++;\n    if (tbc_susp) \{ tbc_susp = 0; return TCL_OK; \}\n    if (code == TCL_ERROR) iPtr->flags |= ERR_ALREADY_LOGGED;\n    return code;\n\}\n"
+    return $fn
 }
 
 proc emitG {P} {
     global PI
     set cid [cident $P]
     set maxd2 [expr {$PI($P,maxd) + 1}]
-    set fn "static int G_${cid}(Tcl_Interp *interp, int entryPc, Tcl_Obj **stk, int nstk)\n\{\n"
+    set fn ""
+    if {$PI($P,hasYield)} { append fn "static int tbc_yres_${cid}(ClientData data\[\], Tcl_Interp *interp, int result);\n" }
+    append fn "static int G_${cid}(Tcl_Interp *interp, int entryPc, Tcl_Obj **stk, int nstk)\n\{\n"
     append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
     foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
@@ -2614,13 +2707,13 @@ proc emitG {P} {
             for {set i 0} {$i < $d} {incr i} { append fn "s$i = stk\[$i\]; " }
             append fn "goto G$pc;\n"
         }
-        if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4} && [entryCalled $cid [expr {-$pc-1}]]} {
+        if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4 yield yieldToInvoke} && [entryCalled $cid [expr {-$pc-1}]]} {
             append fn "    case [expr {-$pc-1}]: "
             for {set i 0} {$i < $d} {incr i} { append fn "s$i = stk\[$i\]; " }
             append fn "rcg_ = tbc_rc; goto X$pc;\n"
         }
     }
-    append fn "    default: goto gf_0;\n    \}\n"
+    append fn "    default: Tcl_SetObjResult(interp, Tcl_ObjPrintf(\"tbc: internal error: the boxed code has no entry at instruction %d\", entryPc)); rcg_ = TCL_ERROR; goto gexit;\n    \}\n"
     foreach pc $PI($P,reach) {
         set d $PI($P,depth,$pc)
         append fn "G$pc: ;  /* $PI($P,ins,$pc) */\n"
@@ -2636,7 +2729,7 @@ proc emitG {P} {
         if {![info exists usedE($pc)]} continue
         set d $PI($P,depth,$pc)
         lassign $PI($P,ins,$pc) op a
-        set cleanup [switch $op { invokeStk1 - invokeStk4 - tailcall { lindex $a 0 } evalStk { expr 1 } invokeReplace { expr {[lindex $a 0] + 1} } invokeExpanded { expr {$d - [lindex $PI($P,mk,$pc) end]} } returnImm - syntax - returnStk { expr 2 } default { expr 0 } }]
+        set cleanup [switch $op { yield - yieldToInvoke { expr 1 } invokeStk1 - invokeStk4 - tailcall { lindex $a 0 } evalStk { expr 1 } invokeReplace { expr {[lindex $a 0] + 1} } invokeExpanded { expr {$d - [lindex $PI($P,mk,$pc) end]} } returnImm - syntax - returnStk { expr 2 } default { expr 0 } }]
         lassign [expr {$PI($P,src,$pc) eq "" ? {-1 0} : $PI($P,src,$pc)}] so sl
         set tos ""; for {set k 0} {$k < $d} {incr k} { append tos ", s$k" }
         append fn "GE$pc: rcg_ = TCL_ERROR;\nX$pc: TBC_XLOG($pc, $so, $sl, $d$tos);\n"
@@ -2672,13 +2765,102 @@ proc emitG {P} {
     foreach it $PI($P,iters) { append fn "    if (dd$it) \{ Tcl_DictObjDone(&ds$it); Tcl_DecrRefCount(dd$it); \}\n" }
     for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    if (ex${it}_) Tcl_DecrRefCount(ex${it}_);\n" }
     append fn "    return rcg_;\n\}\n"
+    if {$PI($P,hasYield)} { append fn [emitResume $P] }
     return $fn
 }
 
 # ================================================================== emitting one variant
 proc rettype {rk} { ctype [expr {$rk in {- U} ? "B" : $rk}] }
 
-proc emitVariant {key recursive} {
+# the instructions after the yields of P at which the generic variant `key` has a typed state
+proc resumePoints {key} {
+    global VK PI
+    lassign [keysplit $key] P sig
+    set pts {}
+    foreach pc $PI($P,reach) {
+        if {[lindex $PI($P,ins,$pc) 0] ni {yield yieldToInvoke}} continue
+        set nx $PI($P,next,$pc)
+        if {[info exists VK($key,in,$nx)] && [resumeWorthwhile $P $nx]} { lappend pts $nx }
+    }
+    return $pts
+}
+# Typed code after a yield pays for the change from boxed code (the locals are read from the frame and checked) and for the change back at the next yield.  Only
+# a loop can make the work between two yields outgrow that: re-enter typed code where a loop that contains no yield can be reached from the resume point before
+# the next yield.  (A generator whose loop body is the yield stays in boxed code, which is as fast as the interpreter's.)
+proc resumeWorthwhile {P nx} {
+    global PI
+    set seen [dict create $nx 1]; set todo [list $nx]; set backs {}
+    while {[llength $todo]} {
+        set pc [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {[lindex $PI($P,ins,$pc) 0] in {yield yieldToInvoke}} continue
+        foreach t $PI($P,succ,$pc) {
+            if {$t <= $pc} { lappend backs [list $pc $t] }
+            if {![dict exists $seen $t]} { dict set seen $t 1; lappend todo $t }
+        }
+    }
+    foreach b $backs {
+        lassign $b src tgt
+        set clean 1
+        foreach pc $PI($P,reach) { if {$pc >= $tgt && $pc <= $src && [lindex $PI($P,ins,$pc) 0] in {yield yieldToInvoke}} { set clean 0; break } }
+        if {$clean} { return 1 }
+    }
+    return 0
+}
+# The entry of the copy that goes on in typed code after a yield.  The boxed code has run since the typed code handed over, so nothing the typed code knew can
+# be taken for granted: every local that may have been assigned is read from the frame and must be what the typed code expects (an integer for an
+# integer variable, no trace, no link), and so must each stack slot; if anything is not, the boxed code goes on instead.  Checks come first and change nothing.
+proc resumePrologue {key} {
+    global VK PI
+    lassign [keysplit $key] P sig
+    set kap $VK($key,kap)
+    set c "    switch (rpc) \{\n"
+    set pts [resumePoints $key]
+    foreach nx $pts { append c "    case $nx: goto R$nx;\n" }
+    append c "    default: goto giveup;\n    \}\n"
+    foreach nx $pts {
+        set st $VK($key,in,$nx)
+        set chk ""; set ld ""
+        foreach v $PI($P,may,$nx) {
+            set k [dict get $kap $v]
+            if {$k eq "F"} continue
+            append chk "    \{ Var *vp_ = &loc_\[$v\]; if (TBC_UNLIKELY(vp_->flags & (VAR_ARRAY | VAR_LINK | VAR_TRACED_READ | VAR_TRACED_WRITE | VAR_TRACED_UNSET | VAR_TRACE_ACTIVE))) goto giveup;"
+            switch $k {
+                I - D {
+                    set conv [expr {$k eq "I" ? "tbc_arg_int" : "tbc_arg_dbl"}]
+                    set var [expr {$k eq "I" ? "i$v" : "d$v"}]
+                    if {$v in [flaggedOf $P]} {
+                        append chk " if (vp_->value.objPtr) \{ if (!${conv}(vp_->value.objPtr, &$var)) goto giveup; g$v = 1; \} else g$v = 0; \}\n"
+                    } else {
+                        append chk " if (!vp_->value.objPtr || !${conv}(vp_->value.objPtr, &$var)) goto giveup; \}\n"
+                    }
+                }
+                B {
+                    append chk " \}\n"
+                    append ld "    \{ Var *vp_ = &loc_\[$v\]; if (vp_->value.objPtr) \{ l$v = vp_->value.objPtr; Tcl_IncrRefCount(l$v); \} \}\n"
+                }
+                default { append chk " goto giveup; \}\n" }
+            }
+        }
+        for {set p 0} {$p < [llength $st]} {incr p} {
+            set e [lindex $st $p]
+            switch [kd $e] {
+                I { append chk "    if (!tbc_arg_int(rstk\[$p\], &si$p)) goto giveup;\n"; append ld "    Tcl_DecrRefCount(rstk\[$p\]);\n" }
+                D { append chk "    if (!tbc_arg_dbl(rstk\[$p\], &sd$p)) goto giveup;\n"; append ld "    Tcl_DecrRefCount(rstk\[$p\]);\n" }
+                B { append ld "    s$p = rstk\[$p\];\n" }
+                T {
+                    set sp [lt $e]
+                    append ld "    fit_$sp = PTR2INT(rstk\[$p\]->internalRep.twoPtrValue.ptr1); fmax_$sp = PTR2INT(rstk\[$p\]->internalRep.twoPtrValue.ptr2); Tcl_DecrRefCount(rstk\[$p\]);\n"
+                }
+                default { append chk "    goto giveup;\n" }
+            }
+        }
+        append c "R$nx: ;\n$chk$ld    goto T$nx;\n"
+    }
+    append c "giveup:\n    \{ int g_ = G_[cident $P](interp, rpc, rstk, rn); if (TBC_UNLIKELY(tbc_susp)) \{ tbc_st = 4; rc = TCL_OK; goto ret; \} if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} goto ret; \}\n"
+    return $c
+}
+
+proc emitVariant {key recursive {resume 0}} {
     global VK PI FM FRM typedMode
     lassign [keysplit $key] P sig
     set cid [cident $P]
@@ -2691,7 +2873,13 @@ proc emitVariant {key recursive} {
     # parameters
     set plist {}
     for {set v 0} {$v < $PI($P,nargs)} {incr v} { lappend plist "[ctype [string index $sig $v]] a$v" }
-    set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
+    if {$resume} {
+        # the copy of the generic variant that goes on after a yield: the boxed code has run, so the locals and the operand stack come from the frame and from
+        # the array the resume callback holds (see resumePrologue)
+        set fn "static [rettype $rk] V_${cid}_RE(Tcl_Interp *interp, int rem, int rpc, Tcl_Obj **rstk, int rn)\n\{\n    const int inframe = 1;\n"
+    } else {
+        set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
+    }
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
@@ -2702,11 +2890,11 @@ proc emitVariant {key recursive} {
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL; int64_t si$k = 0; double sd$k = 0; (void) s$k; (void) si$k; (void) sd$k;\n" }
     foreach pc $PI($P,reach) { if {[lindex $PI($P,ins,$pc) 0] eq "foreach_step"} { set sp [lindex $PI($P,ins,$pc) 1 4]; append fn "    long fit_$sp = 0, fmax_$sp = 0; (void) fit_$sp; (void) fmax_$sp;\n" } }
     append fn "@@VECDECLS@@"
-    if {$recursive} {
+    if {$recursive && !$resume} {
         append fn "    if (TBC_UNLIKELY(rem < 0)) \{ tbc_depth_error(interp); tbc_st = 2; tbc_rc = TCL_ERROR; return rv; \}\n"
     }
     # arguments into locals
-    for {set v 0} {$v < $PI($P,nargs)} {incr v} {
+    for {set v 0} {$v < $PI($P,nargs) && !$resume} {incr v} {
         set s [string index $sig $v]; set k [dict get $kap $v]
         if {$k eq "F"} {
             # (lives in the frame)
@@ -2716,8 +2904,13 @@ proc emitVariant {key recursive} {
             switch $s { I { append fn "    l$v = tbc_newint(a$v);\n" } D { append fn "    l$v = tbc_newdbl(a$v);\n" } }
         }
     }
-    append fn "    TBC_HIT([cstring "V:$key"]);\n"
-    append fn "    goto [expr {[info exists VK($key,in,0)] && $typedMode ? "T0" : "redo_all"}];\n"
+    if {$resume} {
+        append fn "    TBC_HIT([cstring "V:$key/RE"]);\n"
+        append fn [resumePrologue $key]
+    } else {
+        append fn "    TBC_HIT([cstring "V:$key"]);\n"
+        append fn "    goto [expr {[info exists VK($key,in,0)] && $typedMode ? "T0" : "redo_all"}];\n"
+    }
 
     # ---- typed code
     set tpcs {}
@@ -2784,8 +2977,13 @@ proc emitVariant {key recursive} {
     # an error in typed code, or a call that had to be made the ordinary way: the typed attempt had no effects, so the whole call is
     # started again in the boxed code (which produces the error exactly as the interpreter would, with its error info), or, in a function
     # that has no frame, the caller is told to make the call the ordinary way
+    if {$resume} {
+        # (nothing in a copy that resumes starts the call again: failures resume at the failing instruction)
+        append fn "redo_all:\n    Tcl_SetObjResult(interp, Tcl_NewStringObj(\"tbc: restart in a resumed body\", -1)); rc = TCL_ERROR; goto ret;\n"
+    } else {
     append fn "redo_all:\n    if (!inframe) \{ tbc_st = 3; rc = TCL_OK; goto ret; \}\n    Tcl_ResetResult(interp); tbc_st = 0;\n"
-    append fn "    \{ int g_ = G_${cid}(interp, 0, NULL, 0); if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} \}\n"
+    append fn "    \{ int g_ = G_${cid}(interp, 0, NULL, 0);[expr {$PI($P,hasYield) ? " if (TBC_UNLIKELY(tbc_susp)) { tbc_st = 4; rc = TCL_OK; goto ret; }" : ""}] if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} \}\n"
+    }
     append fn "ret:\n"
     for {set v 0} {$v < $nv} {incr v} { append fn "    if (l$v) Tcl_DecrRefCount(l$v);[expr {[dict get $kap $v] eq "A" ? " free(av$v.p);" : [dict get $kap $v] eq "M" ? " tbc_imap_free(&mv$v);" : [dict get $kap $v] eq "R" ? " tbc_rfree(&rv$v);" : ""}]\n" }
     append fn "early:\n    if (rc != TCL_OK) \{ tbc_st = 2; tbc_rc = rc; \}\n    return rv;\n\}\n"
@@ -2868,6 +3066,15 @@ proc reaches {from to} {
 foreach key $variants { set REC($key) [reaches $key $key] }
 
 # ---- output
+# the procs whose generic variant has a copy that goes on in typed code after a yield
+set REKEY {}
+if {$typedMode} {
+    foreach P $translatable {
+        if {!$PI($P,hasYield)} continue
+        set gk $P/[string repeat B $PI($P,nargs)]
+        if {[info exists VK($gk,kap)] && [llength [resumePoints $gk]]} { dict set REKEY $P $gk }
+    }
+}
 if {[info commands ::tbc::fingerprint] eq ""} { error "translate.tcl must run under tcl-aot-sh, a tclsh with tbc::fingerprint linked in (tools/translator-shell.c)" }
 set out "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: [llength $translatable] procs, [llength $variants] typed variants.\n * Do not edit. */\n#include \"tbc_hook.h\"\n\n"
 foreach P $translatable {
@@ -2886,6 +3093,7 @@ proc vproto {key} {
 }
 proc gproto {P} { return "int G_[cident $P](Tcl_Interp *, int, Tcl_Obj **, int);\n" }
 foreach key $variants { append out "static [vproto $key]" }
+dict for {P gk} $REKEY { append out "static [rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
 foreach P $translatable { append out "static [gproto $P]" }
 append out "\n"
 foreach key $variants {
@@ -2894,7 +3102,14 @@ foreach key $variants {
     lassign [keysplit $key] P sig
     append VTXT($P) $t "\n"
 }
+dict for {P gk} $REKEY { set t [emitVariant $gk $REC($gk) 1]; append out $t "\n"; append VTXT($P) $t "\n" }
 foreach P $translatable { set t [emitG $P]; append out $t "\n"; set GTXT($P) $t }
+# every literal entry into the boxed code that generated code makes must have a case in the entry switch of that proc (a missing one would run `default`)
+foreach P $translatable { set G2P([cident $P]) $P }
+foreach {all c n} [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] {
+    if {$n == 0 || ![info exists G2P($c)]} continue
+    if {[string first "    case $n: " $GTXT($G2P($c))] < 0} { error "internal error: the boxed code of $G2P($c) is entered at instruction $n and has no case for it" }
+}
 set outAfterG [string length $out]
 
 proc entryCall {cid s cargs rk ind} {
@@ -2966,7 +3181,7 @@ foreach P $translatable {
     set fp [tbc::fingerprint $P]
     if {[llength [bdeps $P]]} { append out "static int *tbc_bd_$cid\[\] = { [join [lmap b [bdeps $P] {string cat &tbc_boff_$initName\[[lsearch -exact $allBins $b]\]}] {, }], NULL };\n" }
     if {[llength [ydeps $P]]} { append out "static int *tbc_yd_$cid\[\] = { [join [lmap c [ydeps $P] {string cat &tbc_valid_[cident $c]}] {, }], NULL };\n" }
-    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength [bdeps $P]] ? "tbc_bd_$cid" : "NULL"}] \};\n"
+    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength [bdeps $P]] ? "tbc_bd_$cid" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}] \};\n"
 }
 # the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled
 if {[llength $refusedProcs]} {
@@ -3006,6 +3221,7 @@ if {$splitN > 0} {
     }
     foreach key $variants { append hdr [vproto $key] }
     foreach P $translatable { append hdr [gproto $P] }
+    dict for {P gk} $REKEY { append hdr "[rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
     append hdr "\n#endif\n"
     set f [open $base.h w]; puts -nonewline $f $hdr; close $f
     # the files of the typed code and of the boxed code: contiguous runs of procs of about equal size

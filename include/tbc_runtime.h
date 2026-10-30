@@ -665,6 +665,7 @@ fail:
 #include <inttypes.h>
 
 TBC_SHARED int tbc_st, tbc_rc;
+TBC_SHARED int tbc_susp;			/* boxed code has suspended a coroutine: the callbacks are in place, the frames above must return without touching the result */
 TBC_SHARED Tcl_Obj *tbc_box;
 TBC_SHARED int tbc_depth, tbc_maxdepth;
 #ifndef TBC_REMK
@@ -684,6 +685,7 @@ static void tbc_depth_error(Tcl_Interp *interp) {
 
 /* After a typed function returned with tbc_st != 0, from the command entry point. */
 static int tbc_finish(Tcl_Interp *interp) {
+    if (tbc_st == 4) { tbc_st = 0; return TCL_OK; }
     if (tbc_st == 1) {
         Tcl_SetObjResult(interp, tbc_box);
         Tcl_DecrRefCount(tbc_box);

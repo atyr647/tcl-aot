@@ -32,6 +32,7 @@ typedef struct TbcEntry {
     int ysafe;				/* nothing it runs can yield: it may run compiled inside a coroutine, as long as the procs it calls are still the compiled ones */
     int **ydeps;			/* the valid flags of every proc it calls, directly or not (NULL-terminated; NULL if none) */
     int **bdeps;			/* the "withdrawn" flags of the built-in commands it, or a proc it calls, was analysed against (NULL-terminated; NULL if none) */
+    int yres;				/* it yields itself, and everything else it runs is yield-safe: its boxed code can suspend a coroutine */
 } TbcEntry;
 
 typedef struct TbcRec {			/* one attached proc */
@@ -1020,7 +1021,11 @@ static void tbc_logerr(Tcl_Interp *interp, int pcoff, int srcOff, int srcLen, Tc
 
 /* typed code leaving typed mode: store a local (borrowed reference) into its frame slot */
 static void tbc_flushr(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *val) {
-    (void) tbc_setloc(interp, loc, idx, val, 0);
+    Var *vp = &loc[idx];
+    TBC_FOLLOW(vp);
+    /* (a variable with no trace and no link is stored into as the interpreter's own store instruction does it: the same thing, without the general path) */
+    if (TclIsVarDirectWritable(vp)) { (void) tbc_storedirect(vp, val); return; }
+    (void) TclPtrSetVarIdx(interp, vp, NULL, NULL, NULL, val, 0, idx);
 }
 
 /* How many compiled entries may be live on the C stack at once.  Compiled code recurses on the C stack where the interpreter uses its own heap stack; the
@@ -1444,12 +1449,27 @@ static int tbc_enter_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *c
     return Tcl_NRCallObjProc(interp, tbc_enter_nr, cd, objc, objv);
 }
 
-/* may this body run compiled inside a coroutine?  It cannot yield, and nothing it calls has been replaced by a proc that might */
+/* may this body run compiled inside a coroutine?  Either it cannot yield and nothing it calls has been replaced by a proc that might, or it yields itself,
+ * everything else it runs is yield-safe in that sense, and it was entered by the interpreter and not by compiled code: its boxed code suspends by returning to
+ * the interpreter's trampoline, which a C frame of compiled code in between would prevent ("cannot yield: C stack busy") */
 static int tbc_ysafe_now(const TbcEntry *e) {
     int **d;
-    if (!e->ysafe) return 0;
+    if (!e->ysafe && !(e->yres && tbc_nest == 0)) return 0;
     for (d = e->ydeps; d && *d; d++) if (!**d) return 0;
     return 1;
+}
+/* a yield instruction of boxed code: keep the operand stack below the yielded value in a record, put the resume callback and the interpreter's activation
+ * callback on the non-recursive stack (as the bytecode executor does) and tell the frames above to return.  `type` is NULL for yield, 1 for yieldto. */
+typedef struct { int pc, n; Tcl_Obj *o[1]; } TbcYieldRec;
+static void tbc_do_yield(Tcl_Interp *interp, Tcl_NRPostProc *resume, int nextpc, int n, Tcl_Obj *const *below, void *type) {
+    CoroutineData *corPtr = ((Interp *) interp)->execEnvPtr->corPtr;
+    TbcYieldRec *rec = (TbcYieldRec *) ckalloc(sizeof(TbcYieldRec) + (size_t) n * sizeof(Tcl_Obj *));
+    int i;
+    rec->pc = nextpc; rec->n = n;
+    for (i = 0; i < n; i++) rec->o[i] = below[i];
+    TclNRAddCallback(interp, resume, rec, NULL, NULL, NULL);
+    TclNRAddCallback(interp, TclNRCoroutineActivateCallback, corPtr, type, NULL, NULL);
+    tbc_susp = 1;
 }
 static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Interp *iPtr = (Interp *) interp;
@@ -1481,6 +1501,8 @@ static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *co
         code = r->e->fn(interp, p);
         tbc_nest--;
         iPtr->numLevels++;
+        /* the body suspended a coroutine (a yield): its callbacks are in place and the interpreter's trampoline goes on from here */
+        if (tbc_susp) { tbc_susp = 0; return TCL_OK; }
         /* the body has logged its own errors (tbc_logerr); the stub that called it must not add a line of its own */
         if (code == TCL_ERROR) iPtr->flags |= ERR_ALREADY_LOGGED;
         return code;
