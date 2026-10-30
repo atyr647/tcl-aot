@@ -212,6 +212,8 @@ lappend calls {tb_hide {1 2}} {tbal::rev {1 2}} {tbim::rev {1 2}} {tb_fmt {x y}}
 # integer literals written non-canonically
 foreach x {0 1 -1 5 255 256 -256 4294967295 9223372036854775807 -9223372036854775808 1.5 abc {} 0x10 " 5"} { lappend calls [list tl_lit $x] [list tl_lit_big $x] }
 foreach n {0 1 10 1000} { lappend calls [list tl_lit_loop $n] }
+foreach a {-2 -1 0 1 2.5} { foreach b {0 5 9007199254740993 -9007199254740993} { lappend calls [list tl_lit_fold $a $b] } }
+foreach x {0 1 -1 255 9223372036854775807 -9223372036854775808} { lappend calls [list tl_lit_big2 $x] }
 # binary scan with a number format and *: lengths that are not a multiple of the size, bytes of every sign, characters above 255, values that are not strings of bytes
 set bsd [list {} a ab abc abcd abcde abcdefgh "\x00\x01\x7f\x80\xff" "\xff\xff\xff\xff" "\x80\x00\x00\x00" "\x00\x00\x00\x80" "\xfe\xdc\xba\x98\x76\x54\x32\x10\x01" "é€x" 1234 {a b} 1.5]
 foreach tbs_t {c cu s su S Su i iu I Iu} { foreach d $bsd { lappend calls [list tbs_$tbs_t $d] [list tbs_sum_$tbs_t $d] } }

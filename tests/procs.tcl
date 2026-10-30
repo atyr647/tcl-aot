@@ -1463,3 +1463,5 @@ proc tbs_elem {d} { binary scan $d c* a(1); return [array get a] }
 proc tbs_lit {} { binary scan "\x01\xff\x80" cu* x; return $x }
 proc tbs_noarg {d} { binary scan $d c* }
 proc tbs_fmt {d f} { binary scan $d $f x; return $x }
+proc tl_lit_fold {a b} { return [expr {($b / (9223372036854775807 + 2147483648)) - ($a > (0.5 - 2))}] }
+proc tl_lit_big2 {x} { return [list [expr {$x + 0xFFFFFFFFFFFFFFFFF}] [expr {$x & 0x7FFFFFFFFFFFFFFF}] [expr {$x - -0x8000000000000000}]] }

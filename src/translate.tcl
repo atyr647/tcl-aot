@@ -1724,7 +1724,11 @@ proc operandOf {P pc p e} {
         L {
             # an integer written non-canonically (0xFF, 010, 1_000 is not one): the operation reads its value, the string is not kept
             set lit [lindex $::PI($P,lits) [lt $e]]
-            if {[string is wideinteger -strict $lit] && ![string match *_* $lit]} { return [list I "" [c_int [expr {$lit + 0}]]] }
+            # (`string is wideinteger` also accepts integers beyond 64 bits: the range is checked)
+            if {[string is wideinteger -strict $lit] && ![string match *_* $lit]} {
+                set iv [expr {$lit + 0}]
+                if {$iv >= -9223372036854775808 && $iv <= 9223372036854775807} { return [list I "" [c_int $iv]] }
+            }
             return [list X "" ""]
         }
         default { return [list X "" ""] }
