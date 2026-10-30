@@ -1439,3 +1439,27 @@ proc tb_hide {l} { set x 1; set r [lreverse $l]; return [list $r $x] }
 proc tb_fmt {l} { return [format "%d:%s" [llength $l] [join $l ,]] }
 proc tb_spl {s} { set r [split $s ,]; return [list [llength $r] [puts_free $r]] }
 proc puts_free {r} { return [lindex $r 0] }
+
+# integers written other than canonically (hex, octal, binary, a leading space) used as operands of integer operations
+proc tl_lit {x} {
+    list [expr {$x & 0xFF}] [expr {$x ^ 0xFFFFFFFF}] [expr {$x | 010}] [expr {$x + 0x10}] [expr {$x - -0x10}] [expr {$x * 0b101}] [expr {$x < 0o17}] [expr {$x == " 5"}] [expr {$x >> 0x2}] [expr {$x % 0x7}]
+}
+proc tl_lit_loop {n} {
+    set acc 0xFFFFFFFF
+    for {set i 0} {$i < $n} {incr i} { set acc [expr {(($acc ^ $i) & 0xFF) + ($acc >> 8 & 0xFFFFFF)}] }
+    return $acc
+}
+proc tl_lit_big {x} { return [expr {$x & 0xFFFFFFFFFFFFFFFFFF}] }
+
+# binary scan of one number format with * into a local
+foreach tbs_t {c cu s su S Su i iu I Iu} {
+    proc tbs_$tbs_t {d} "set x old; set n \[binary scan \$d ${tbs_t}* x\]; list \$n \$x"
+    proc tbs_sum_$tbs_t {d} "binary scan \$d ${tbs_t}* v; set s 0; foreach e \$v { incr s \$e }; return \$s"
+}
+proc tbs_use {d} { binary scan $d c* nums; set s 0; foreach n $nums { set s [expr {($s ^ $n) & 0xFF}] }; return [list $s [llength $nums]] }
+proc tbs_twice {d} { binary scan $d S* a; binary scan $d s* a; return $a }
+proc tbs_arr {d} { array set a {}; binary scan $d c* a; return $a }
+proc tbs_elem {d} { binary scan $d c* a(1); return [array get a] }
+proc tbs_lit {} { binary scan "\x01\xff\x80" cu* x; return $x }
+proc tbs_noarg {d} { binary scan $d c* }
+proc tbs_fmt {d f} { binary scan $d $f x; return $x }

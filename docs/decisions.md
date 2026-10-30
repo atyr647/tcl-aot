@@ -299,3 +299,33 @@ Found on the way, by the forced hand-over test: the table of boxed-code entry po
 the name of its argument.  The first lookup of a translation therefore asked about the wrong instruction, and a hand-over at that instruction ran the `default`
 of the entry switch: success with an empty result.  Fixed, the `default` is now an error, and the translator checks, after generating, that every entry the
 generated code makes has a case.
+
+## 21. Typed code on integers written as 0xFF, and on `binary scan` of numbers
+
+Profiling eleven tcllib-style workloads (see decision 19) showed the checksum procs (sha1, md5, crc32) spending 33-48% of their instructions in the boxed
+helpers for `&`, `^` and `>>`.  Two things kept typed code from running there.
+
+* **Integer literals that are not written canonically** (`0xFF`, `0xFFFFFFFF`, `010`, `0b11`) were string literals to the translator, so an integer operation with one
+  of them as an operand handed over to boxed code.  They are classified as strings for a reason (a `set x 0xFF` must keep its text), but an operand of an integer
+  operation is only read.  `operandOf` now reads the value of such a literal (`string is wideinteger`, evaluated with `expr`, so octal and `0b` follow this Tcl).
+  A literal outside 64 bits, or one that is a double, is still not an integer operand.  `tests/typed.sh` fails without this (a crc loop hands over at `bitand` and
+  `bitxor`); the differential test has `tl_*` procs with hex, octal, binary, a leading space, out of range, and non-numbers.
+  Measured on a crc loop over a list of 1000 ints: 0.51 s interpreted, 0.42 s compiled before, 0.11 s after (4.7x).
+* **`binary scan $data <t>* var`** named a variable, so typed code (which has no frame) stopped there.  For one of `c s S i I` with an optional `u`, a count of `*`, a
+  data operand that is an object or a literal, and a variable that is a local held as an object, the list is built in C (`tbc_bscan`: ScanNumber's byte order and sign
+  extension, whole numbers only, no data gives the empty object, the same `Tcl_GetByteArrayFromObj` as the command) and stored like `set`; the result is 1.  Any
+  other form runs the command as before.  The differential test covers every format and flag with data of 0..9 bytes, bytes of both signs, characters above 255,
+  numbers, lists, an existing value in the variable, a variable that is an array, an array element, a variable format, and a call without the variable.
+  `tcl::binary::scan` is also counted among the commands that stay in their own frame, so a proc that uses it can be called from typed code.
+  What the inlined command does not do: count in `info cmdcount`, or run execution traces on `binary` (the same as the math functions in decision 15).
+
+Measured on the tcllib procs, as instruction counts net of start-up, interpreter / compiled: sha1 544M / 317M (1.72x; 1.12x before), crc32 378M / 356M (1.06x),
+md5 464M / 452M (1.03x), binary 1206M / 854M (1.41x; 0.99x as shipped before decision 19, 1.12x with only the guard relaxed; the share of this decision was not separated).
+
+What is left in these three, and why it was not changed:
+* **crc32** does not benefit.  tcllib sets `signbit` to 2^63, so `~$signbit>>7` is bignum arithmetic and typed code hands over at the first instruction of every call;
+  the loop then runs boxed.  Typed code cannot do bignums.  What would help is entering typed code again from boxed code at a loop head (the machinery that resumes
+  after a yield does this for coroutines).  Not built; see the roadmap.
+* **md5** runs its transform in boxed code: `variable $token` and `upvar 0 $token state` name variables by a run-time string, and the state is an array.  It is as
+  fast as the interpreter.
+* The attribution of the rest is Tcl's own work: regexp/regsub 30-50% of the text workloads, object allocation 18-48%, with the thread-data lookup of a threaded Tcl build (`pthread_getspecific`) 10-28% of all instructions, and about 350 instructions to dispatch a command implemented in C.

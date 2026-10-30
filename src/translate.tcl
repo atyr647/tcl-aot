@@ -61,7 +61,7 @@ if {$census} { set procNames [lsort [allprocs ::]] }
 # (and calls only such procs) is "pure": nothing can observe its frame, so it needs none of its own while it runs
 set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min}
 # built-ins that work on the variables of the frame they run in, and nothing else
-set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable}
+set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan}
 # one of Tcl's own math functions that is a command written in C (max and min are procs of the Tcl library): it never uses the caller's variables
 proc isMathBuiltin {b} { expr {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f] && $f ni {max min}} }
 
@@ -1708,6 +1708,12 @@ proc operandOf {P pc p e} {
         D { return [list D "" sd$p] }
         B { return [list I "if (TBC_UNLIKELY(!tbc_isint(s$p))) goto D$pc;" "tbc_wide(s$p)"] }
         U { return [list U "" ""] }
+        L {
+            # an integer written non-canonically (0xFF, 010, 1_000 is not one): the operation reads its value, the string is not kept
+            set lit [lindex $::PI($P,lits) [lt $e]]
+            if {[string is wideinteger -strict $lit] && ![string match *_* $lit]} { return [list I "" [c_int [expr {$lit + 0}]]] }
+            return [list X "" ""]
+        }
         default { return [list X "" ""] }
     }
 }
@@ -1974,6 +1980,10 @@ proc stepInvoke {key pc in d n} {
         set c "$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = tbc_rc = r_; tbc_st = 0; [enterG $key [expr {-$pc-1}] $st "" [flushSet $P $pc]] \}$rel s$q = tbc_takeres(interp); \}"
         return [R fall [list {*}$below B] $c]
     }
+    if {[regexp {^(?:::)?tcl::binary::scan$} $nm0]} {
+        set r [binScan $key $P $pc $in $d $n $q]
+        if {$r ne ""} { return $r }
+    }
     set sub [expr {[llength $args] ? [expr {[kd [lindex $args 0]] eq "L" ? [lindex $PI($P,lits) [lt [lindex $args 0]]] : "-"}] : "-"}]
     if {![pureBuiltin $nm0 $sub]} { return $dead }
     foreach e $args { if {[kd $e] in {A N M Q}} { return $dead } }
@@ -1987,6 +1997,25 @@ proc stepInvoke {key pc in d n} {
     set guard [expr {[isMathBuiltin $nm0] ? "if (TBC_UNLIKELY(!tbc_mf_ok)) goto D$pc; " : ""}]
     set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp); \}"
     return [R fall [list {*}$below B] $c]
+}
+
+# `binary scan $data <t>[u]* var` with var a local held as an object: the list is built in C (tbc_bscan) and stored like a `set`; the result of the command is 1.
+# "" when the call is not of that form (the boxed code then runs the command).
+proc binScan {key P pc in d n q} {
+    global PI
+    if {$n != 4} { return "" }
+    set below [lrange $in 0 [expr {$q-1}]]
+    lassign [lrange $in [expr {$q+1}] end] ed ef ev
+    if {[kd $ef] ne "L" || [kd $ev] ne "L" || [kd $ed] ni {B L U}} { return "" }
+    if {![regexp {^([cisSI])(u?)\*$} [lindex $PI($P,lits) [lt $ef]] -> t u]} { return "" }
+    set vi [lsearch -exact $PI($P,vnames) [lindex $PI($P,lits) [lt $ev]]]
+    if {$vi < 0 || [kap $key $vi] ni {B -}} { return "" }
+    if {[kd $ed] eq "U"} { return [R fall [list {*}$below U] ""] }
+    set pd [expr {$q+1}]
+    set dx [expr {[kd $ed] eq "B" ? "s$pd" : "L_[cident $P]_[lt $ed]"}]
+    set rel [expr {[kd $ed] eq "B" ? " Tcl_DecrRefCount(s$pd);" : ""}]
+    set c "\{ Tcl_Obj *n_ = tbc_bscan($dx, '$t', [expr {$u eq "u"}]);$rel Tcl_IncrRefCount(n_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = n_; si$q = 1; \}"
+    return [R fall [list {*}$below I] $c stores [list [list $vi B]]]
 }
 
 # A math function computed in typed code, or "" when the generic call has to do it.  `in` is the stack state before the call: the command word at

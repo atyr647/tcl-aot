@@ -676,6 +676,40 @@ TBC_SHARED int tbc_depth, tbc_maxdepth;
 
 TBC_INLINE Tcl_Obj *tbc_ref(Tcl_Obj *o) { Tcl_IncrRefCount(o); return o; }
 TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) { Tcl_Obj *o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); return o; }
+/* `binary scan $data <t>[u]* var` for t one of c s S i I: the list tclBinary.c's BinaryScanCmd builds (ScanNumber's byte order and sign extension; a
+ * number is read from its bytes, trailing bytes that do not make a whole number are ignored; no data gives the empty object).  Refcount 0.  Equal values share one
+ * object in Tcl's own scan (a cache); here for c only, the one format whose values are always few. */
+static Tcl_Obj *tbc_bscan(Tcl_Obj *data, int type, int uns) {
+    int len, size = type == 'c' ? 1 : (type == 's' || type == 'S') ? 2 : 4, n, i;
+    const unsigned char *b = Tcl_GetByteArrayFromObj(data, &len);
+    Tcl_Obj *res, **el, *small[256];
+    n = len / size;
+    if (n == 0) return Tcl_NewObj();
+    el = (Tcl_Obj **) ckalloc((size_t) n * sizeof(Tcl_Obj *));
+    if (size == 1) memset(small, 0, sizeof small);
+    for (i = 0; i < n; i++) {
+        const unsigned char *p = b + (size_t) i * (size_t) size;
+        long v;
+        switch (type) {
+        case 'c': v = p[0]; if (!uns && (v & 0x80)) v -= 0x100; break;
+        case 's': v = p[0] + (p[1] << 8); if (!uns && (v & 0x8000)) v -= 0x10000; break;
+        case 'S': v = p[1] + (p[0] << 8); if (!uns && (v & 0x8000)) v -= 0x10000; break;
+        case 'i': v = (long) (p[0] + (p[1] << 8) + (p[2] << 16) + (((unsigned long) p[3]) << 24)); if (!uns && v >= 0x80000000L) v -= 0x100000000L; break;
+        default: v = (long) (p[3] + (p[2] << 8) + (p[1] << 16) + (((unsigned long) p[0]) << 24)); if (!uns && v >= 0x80000000L) v -= 0x100000000L; break;
+        }
+        if (size == 1) {
+            int idx = (int) (v & 0xFF);
+            if (!small[idx]) { small[idx] = Tcl_NewLongObj(v); Tcl_IncrRefCount(small[idx]); }
+            el[i] = small[idx];
+        } else {
+            el[i] = Tcl_NewLongObj(v);
+        }
+    }
+    res = Tcl_NewListObj(n, el);
+    ckfree((char *) el);
+    if (size == 1) for (i = 0; i < 256; i++) if (small[i]) Tcl_DecrRefCount(small[i]);
+    return res;
+}
 TBC_INLINE Tcl_Obj *tbc_newdbl(double d) { Tcl_Obj *o = Tcl_NewDoubleObj(d); Tcl_IncrRefCount(o); return o; }
 
 static void tbc_depth_error(Tcl_Interp *interp) {

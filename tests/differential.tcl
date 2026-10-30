@@ -209,6 +209,14 @@ lappend calls {interp hide {} lreverse; set a [catch {tb_hide {1 2}} m]; interp 
 lappend calls {set r [tb_self {1 2}]; rename lreverse {}; rename tb_self_orig lreverse; set r}
 lappend calls {set r [tb_self2 5]; rename lreverse {}; rename tb_self2_orig lreverse; set r}
 lappend calls {tb_hide {1 2}} {tbal::rev {1 2}} {tbim::rev {1 2}} {tb_fmt {x y}} {tb_spl x,y}
+# integer literals written non-canonically
+foreach x {0 1 -1 5 255 256 -256 4294967295 9223372036854775807 -9223372036854775808 1.5 abc {} 0x10 " 5"} { lappend calls [list tl_lit $x] [list tl_lit_big $x] }
+foreach n {0 1 10 1000} { lappend calls [list tl_lit_loop $n] }
+# binary scan with a number format and *: lengths that are not a multiple of the size, bytes of every sign, characters above 255, values that are not strings of bytes
+set bsd [list {} a ab abc abcd abcde abcdefgh "\x00\x01\x7f\x80\xff" "\xff\xff\xff\xff" "\x80\x00\x00\x00" "\x00\x00\x00\x80" "\xfe\xdc\xba\x98\x76\x54\x32\x10\x01" "é€x" 1234 {a b} 1.5]
+foreach tbs_t {c cu s su S Su i iu I Iu} { foreach d $bsd { lappend calls [list tbs_$tbs_t $d] [list tbs_sum_$tbs_t $d] } }
+foreach d $bsd { lappend calls [list tbs_use $d] [list tbs_twice $d] [list tbs_arr $d] [list tbs_elem $d] [list tbs_noarg $d] [list tbs_fmt $d c*] [list tbs_fmt $d i2] [list tbs_fmt $d I*] }
+lappend calls {tbs_lit}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}
