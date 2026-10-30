@@ -360,3 +360,6 @@ tables the generated code owns.  Measured on this tree, as instruction counts (v
 * **Strings built lazily.**  Decision 10 measured typed strings: generated code is 0-7% of the string workloads, the rest is Tcl's own commands.  The profile of
   the eleven workloads agrees: generated code is 0.7-8.5% of the six text workloads, and the string-object work in them (2-23%) is done by Tcl's own functions,
   which lazy building in generated code would not remove.  Nothing was built.
+
+Checked: the full `tests/run.sh` passes on this tree (differential 13460 calls in four modes, forced hand-over 6 configurations, fuzz typed seeds 1-3 and boxed seeds
+1-2, valgrind 13431 calls, 0 mismatches).  The earlier commit of this change (f6dc853) was a work-in-progress snapshot made while that run was pending.
