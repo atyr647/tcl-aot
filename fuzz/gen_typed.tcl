@@ -115,8 +115,11 @@ for {set k 0} {$k < $nfa} {incr k} {
     set head [pick {{upvar #0 fzg g} {global g} {namespace upvar ::fzns g g} {variable g}}]
     set head2 [pick {{upvar #0 fzga ga} {upvar #0 fzga ga} {global ga}}]
     if {$head eq "variable g"} { set head "namespace eval ::fzns {}; namespace upvar ::fzns g g" }
-    set ret [pick {{return [list $s [lsort [array get a]] $g]} {return [list $s $g [lsort [array get ga]]]} {return $s}}]
-    puts $p "proc fa_$k {n a} {\n    $head\n    $head2\n    set s 0\n    for {set i 0} {\$i < \$n} {incr i} {\n[join $body \n]\n    }\n    $ret\n}"
+    set ret [pick {{return [list $s [lsort [array get ar]] $g]} {return [list $s $g [lsort [array get ga]]]} {return $s}}]
+    # (the local array is `ar`: `a` is the integer argument)
+    set body [lmap l $body {regsub -all {array (size|get|names) a\y} [regsub -all {\ya\(} $l ar(] {array \1 ar}}]
+    set init [pick {{} {for {set z 0} {$z < 6} {incr z} { set ar($z) $z }} {set ar(k0) 1; set ar(x) 2} {}}]
+    puts $p "proc fa_$k {n a} {\n    $head\n    $head2\n    $init\n    set s 0\n    for {set i 0} {\$i < \$n} {incr i} {\n[join $body \n]\n    }\n    $ret\n}"
     puts $h "fa_$k II ID"
 }
 # programs with arrays that are compiled locals (m, p): element stores, increments, reads and tests that typed code does on a native table, mixed with
