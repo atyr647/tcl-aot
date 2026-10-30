@@ -267,6 +267,9 @@ and redefine a built-in they use between two calls of it (`tb_self`, `tb_self2`:
 interpreter's results in the differential test; that is all that has been shown.  There is no argument that it holds for every shape of body, so it is not
 claimed.
 
+Checked: with the guard forced open the differential test fails; with it, the full `tests/run.sh` passes (differential 12951 calls, forced hand-over, fuzz typed
+seeds 1-3 and boxed seeds 1-2, valgrind 12923 calls, 0 mismatches).
+
 The first forced-hand-over fuzz run crashed.  The cause was in the test instrumentation: the coverage counters of a `-DTBC_COV` build (a fixed table of 8192 sites, no bound
 check) overflowed once every instruction had a hand-over site, and wrote over `tbcOne`.  The table is larger now and the sites beyond it share the last slot.
 
