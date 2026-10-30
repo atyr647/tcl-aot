@@ -1,0 +1,6 @@
+t_arith DD ID DI
+t_cmp DD ID DI
+t_double DD ID DI
+t_mixed ID DI DD
+t_neg D
+t_dblloop I
