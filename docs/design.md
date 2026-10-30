@@ -35,7 +35,7 @@ errors), and counts nesting levels.  `info body`, `info args`, `info level`, `in
 * The proc's `ByteCode` is then patched in place to three instructions, `push1 ::tbc::eN; invokeStk1 1; done`, flagged as precompiled so Tcl never
   recompiles it, with the location tables of the original body.  `::tbc::eN` runs in the proc's frame and calls the compiled function.
 * Before each call the compile epoch is looked at; if it changed (something the compiler consults may have changed) the fingerprint is checked again and
-  the proc is demoted to the interpreter if it no longer matches.  Calls made inside a coroutine, and calls past a nesting cap, run the original body
+  the proc is demoted to the interpreter if it no longer matches.  Calls made inside a coroutine (unless the proc cannot yield, decisions 5), and calls past a nesting cap, run the original body
   with the interpreter on its own stack.
 
 ## Typed and boxed code

@@ -40,11 +40,20 @@ info; its topmost entry names the callee's first command instead of the calling 
 
 ## 5. Coroutines, `yield`, `tailcall`
 
-Compiled code runs on the C stack and a coroutine suspends by unwinding the interpreter's own stack, which cannot cross a C frame.  A call that arrives
-while a coroutine is running is therefore evaluated by the interpreter (the original body, in the already-built frame, with the stub's nesting level given
-back), so a `yield` anywhere below a compiled proc works.  Procs that contain `yield`, `yieldto` or `tailcall` themselves stay interpreted
-(about 1 % of procs in the packages measured; 20 of 1731).  Making compiled code resumable would need a state machine at every suspension point for a class of
-procs that mostly wait; not built.
+Compiled code runs on the C stack and a coroutine suspends by unwinding the interpreter's own stack, which cannot cross a C frame (Tcl answers a `yield`
+below a C frame with "cannot yield: C stack busy").  A call that arrives while a coroutine is running is therefore evaluated by the interpreter (the
+original body, in the already-built frame, with the stub's nesting level given back), so a `yield` anywhere below a compiled proc works, unless the proc
+cannot yield at all.  The translator marks a proc *yield-safe* when everything it runs is known not to reach a `yield`: no `eval`, `uplevel`, `expr` on a
+string, no command whose identity is unknown, only built-ins that run no script, and calls only to translated procs that are yield-safe.  Such a proc runs
+compiled inside a coroutine, provided every proc it calls (directly or not) is still the compiled one: each entry lists their validity flags, which Tcl's
+rename and delete traces clear, so a callee replaced by a proc that yields sends the caller back to the interpreter (`ty_mid` in the differential test, which
+fails without the check).
+
+`tailcall` is compiled (the boxed code stores the tailcall list in the frame and returns `TCL_RETURN`, as the bytecode does; the interpreter's frame pop
+then schedules it).  Procs that contain `yield` or `yieldto` stay interpreted (about 1 % of procs in the packages measured).  Compiling them would need the
+boxed code to suspend through the interpreter's callbacks (save the pc and the operand stack, push the resume callback and `TclNRCoroutineActivateCallback`)
+and every call from it to something that might yield to be made non-recursively; typed code would have to be re-entered after each yield to be worth it.
+Planned, see `roadmap.md`.
 
 ## 6. Command frames and error info are the interpreter's
 
@@ -218,3 +227,35 @@ Found by checking this against the interpreter:
   The interpreter takes a shortcut that makes no entry unless a trace is involved.  The entry made and removed again changes when the hash table grows and so the
   order in which `array names` lists the elements.  Fixed; `tr_exists_order` in the differential test, and a `fr_` family in the typed fuzzer (random programs
   over local arrays, including ones that fail halfway and write the table out, 64000 calls per seed, seeds 1 to 8 clean).
+
+## 18. Handing over at every instruction
+
+Typed code can leave typed mode at any instruction (an assumption fails, a tick is due, the instruction is not implemented).  The ways out were tested by the
+programs that happen to fail there, which left most instruction/state combinations untested.  A module translated with `TBC_FORCE_DEOPT=1` now asks, at every
+typed instruction, whether to hand over (`TBC_FORCE_RATE=n`: about one instruction in n, from a seeded generator), and the differential test and the typed fuzzer run
+that way (`tests/run.sh`).  It found one bug at once: the loop variables of `foreach` were not written to the frame when typed code handed over inside or right
+after the loop, because the liveness analysis took `foreach_step` for a definition that always happens, while at the end of the list the variables keep their
+values (`foreach x $l {}; info exists x` answered no).  Fixed (`tf_after`, `tfe_after`).  18 combinations of rate and seed are clean on the differential test.
+
+A hand-over in the middle of a pure recursion enters the next body from the interpreter, so the recursion-limit edge is the one of decision 4 (one level early);
+the forced run compares those checks with the tolerance used for the other procs.
+
+## 19. Built-ins the analysis relied on can be replaced
+
+Purity and caller-safety rest on facts about commands: `lreverse` runs no script and cannot touch the caller's variables, so typed code keeps the caller's
+variables in C locals across a call of it.  A program can break that after the module is compiled: `rename lreverse x; proc lreverse {l} { uplevel 1 {set x 77} ... }`
+made the compiled proc answer with a stale `x` where the interpreter answers 77 (found by looking for divergences by hand; the tests had never replaced a built-in).
+Math functions had a guard for this (`tbc_mf_ok`); the other built-ins had none.
+
+Now the translator lists, for every proc, the built-ins it relied on (with those of every proc it calls), and the module registers them: a flag per name, set when
+the command is renamed or deleted (command traces), when a proc of that name is defined in any namespace (the proc wrapper), or when the module is loaded
+while the name is already a proc or shadowed in some namespace.  Setting the flag withdraws the direct calls to the procs that depend on it, and an entry
+whose built-ins are withdrawn runs the interpreter's version.  A plain name (`lreverse`) is withdrawn by a command of that name anywhere, an implementation
+name (`::tcl::string::reverse`) only by itself.  `tb_*` in the differential test (global and namespace shadowing, replaced and put back); the checks fail
+without the guard.
+
+What this does not cover: a command of the same name created in a namespace by `interp alias`, `namespace import` or C code rather than `proc` (the delete
+trace covers replacing the global built-in itself).  That needs Tcl to tell us about command creation, which it does not.
+
+The first forced-hand-over fuzz run crashed.  The cause was in the test instrumentation: the coverage counters of a `-DTBC_COV` build (a fixed table of 8192 sites, no bound
+check) overflowed once every instruction had a hand-over site, and wrote over `tbcOne`.  The table is larger now and the sites beyond it share the last slot.

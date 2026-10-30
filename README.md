@@ -81,7 +81,9 @@ code is attached to a proc only while the bytecode the interpreter would run for
 ## Limits
 
 * Valid for one Tcl release (8.6.14); a module refuses to load into another.  It uses Tcl's internal headers, so Tcl must be built as a static library.
-* Procs containing `yield`, `yieldto` or `tailcall`, and procs shorter than the entry stub, stay interpreted; calls inside a coroutine use the interpreter.
+* Procs containing `yield` or `yieldto`, and procs shorter than the entry stub, stay interpreted.  Inside a coroutine, a proc runs compiled if nothing it runs
+  can yield (it calls only commands known not to run scripts, and procs of that kind); the others run the interpreter's version, so a `yield` below them works.
+  `tailcall` is compiled.
 * Typed code stops, and boxed code (about interpreter speed) continues, at `dict for`, `lmap`, `unset`, `lsort`, and commands that
   name variables or are not known to leave the caller's variables alone.  `TBC_DEADOPS=1` lists the places for your procs.
 
