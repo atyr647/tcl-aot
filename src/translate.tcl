@@ -61,6 +61,8 @@ if {$census} { set procNames [lsort [allprocs ::]] }
 # (and calls only such procs) is "pure": nothing can observe its frame, so it needs none of its own while it runs
 set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min}
 # built-ins that work on the variables of the frame they run in, and nothing else
+# the formats of `binary scan` typed code does itself: one of c s S i I, an optional u, and *
+set tbcScanFmt {^([cisSI])(u?)\*$}
 set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan}
 # one of Tcl's own math functions that is a command written in C (max and min are procs of the Tcl library): it never uses the caller's variables
 proc isMathBuiltin {b} { expr {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f] && $f ni {max min}} }
@@ -444,6 +446,7 @@ proc prepare {P} {
     set hasYield 0
     # the built-in commands whose identity the analysis relies on (that they run no script and leave the caller's variables alone)
     set bins {}
+    array unset scanVar
     set pst(0) {}; set pwork {0}
     while {[llength $pwork]} {
         set pc [lindex $pwork end]; set pwork [lrange $pwork 0 end-1]
@@ -473,6 +476,14 @@ proc prepare {P} {
             } else {
                 set nm [lindex [dict get $bc literals] $c]
                 set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+                # `binary scan data fmt var` (typed code does it inline when var is a local): the instruction reads and writes that local by name
+                if {[regexp {^(?:::)?tcl::binary::scan$} $nm] && $n == 4} {
+                    set wf [lindex $st [expr {$q+2}]]; set wv [lindex $st [expr {$q+3}]]
+                    if {$wf ne "-" && $wv ne "-"} {
+                        set vi [lsearch -exact $vnames [lindex [dict get $bc literals] $wv]]
+                        if {$vi >= 0 && [regexp $::tbcScanFmt [lindex [dict get $bc literals] $wf]]} { set scanVar($pc) $vi }
+                    }
+                }
                 set callee [resolveProc $ns $nm]
                 if {$callee ne ""} {
                     lappend callees $callee
@@ -531,6 +542,7 @@ proc prepare {P} {
     # liveness of locals (backward) and definite assignment (forward)
     array set use {}; array set def {}
     foreach pc $reach { lassign $ins($pc) op a; lassign [usedef $op $a] use($pc) def($pc) }
+    foreach pc [array names scanVar] { if {[info exists use($pc)]} { lappend use($pc) $scanVar($pc); lappend def($pc) $scanVar($pc) } }
     array set liveIn {}; foreach pc $reach { set liveIn($pc) {} }
     set changed 1
     while {$changed} {
@@ -604,6 +616,7 @@ proc prepare {P} {
         lassign $ins($pc) op a
         if {$op in $::tbcRops} continue
         foreach v [concat {*}[usedef $op $a]] { set rv [lsearch -all -inline -not -exact $rv $v] }
+        if {[info exists scanVar($pc)]} { set rv [lsearch -all -inline -not -exact $rv $scanVar($pc)] }
     }
     if {$hasYield} { set rv {} }
     set PI($P,rvars) $rv
@@ -2007,7 +2020,7 @@ proc binScan {key P pc in d n q} {
     set below [lrange $in 0 [expr {$q-1}]]
     lassign [lrange $in [expr {$q+1}] end] ed ef ev
     if {[kd $ef] ne "L" || [kd $ev] ne "L" || [kd $ed] ni {B L U}} { return "" }
-    if {![regexp {^([cisSI])(u?)\*$} [lindex $PI($P,lits) [lt $ef]] -> t u]} { return "" }
+    if {![regexp $::tbcScanFmt [lindex $PI($P,lits) [lt $ef]] -> t u]} { return "" }
     set vi [lsearch -exact $PI($P,vnames) [lindex $PI($P,lits) [lt $ev]]]
     if {$vi < 0 || [kap $key $vi] ni {B -}} { return "" }
     if {[kd $ed] eq "U"} { return [R fall [list {*}$below U] ""] }
