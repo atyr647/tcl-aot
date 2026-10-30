@@ -772,7 +772,8 @@ TBC_INLINE int tbc_arg_dbl(Tcl_Obj *o, double *d) {
 TBC_INLINE Tcl_Obj *tbc_lindex_i(Tcl_Interp *interp, Tcl_Obj *list, int64_t i) {
     int n;
     Tcl_Obj **v, *r;
-    if (Tcl_ListObjGetElements(interp, list, &n, &v) != TCL_OK) return NULL;
+    if (list->typePtr == tbcList) { n = ListRepPtr(list)->elemCount; v = &ListRepPtr(list)->elements; }	/* (what Tcl_ListObjGetElements does for a list) */
+    else if (Tcl_ListObjGetElements(interp, list, &n, &v) != TCL_OK) return NULL;
     if (i < 0 || i >= n) {
         Tcl_Obj *io = tbc_newint(i);
         r = TclLindexList(interp, list, io);
@@ -788,7 +789,8 @@ TBC_INLINE Tcl_Obj *tbc_lindex_i(Tcl_Interp *interp, Tcl_Obj *list, int64_t i) {
 TBC_INLINE Tcl_Obj *tbc_lindex_end(Tcl_Interp *interp, Tcl_Obj *list, int64_t k) {
     int n;
     Tcl_Obj **v, *r;
-    if (Tcl_ListObjGetElements(interp, list, &n, &v) != TCL_OK) return NULL;
+    if (list->typePtr == tbcList) { n = ListRepPtr(list)->elemCount; v = &ListRepPtr(list)->elements; }
+    else if (Tcl_ListObjGetElements(interp, list, &n, &v) != TCL_OK) return NULL;
     r = (n - 1 - k >= 0) ? v[n - 1 - k] : tbcEmpty;
     Tcl_IncrRefCount(r);
     return r;

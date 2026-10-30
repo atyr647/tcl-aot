@@ -339,3 +339,24 @@ Two defects of this change were found by the test stages that exist for this pur
 
 Checked: the full `tests/run.sh` passes on this tree (differential 13460 calls in four modes, forced hand-over 6 configurations, fuzz typed seeds 1-3 and boxed seeds
 1-2, valgrind 13431 calls, 0 mismatches).
+
+## 22. What was measured for native aggregates, hash growth and lazy strings
+
+Asked for: native doubles and strings, native aggregates passed between compiled procs, strings built lazily, incremental growth and presizing of the hash
+tables the generated code owns.  Measured on this tree, as instruction counts (valgrind, start-up included, so small figures are inflated by it):
+
+* **Doubles** are already native in typed code (kind D), through calls, math functions and `foreach`; nothing is boxed between operations.
+* **Hash growth.**  A native counting map (`dict incr` on 100003 distinct keys, 400000 increments) runs 398.2M instructions with the map growing by doubling from 16
+  entries, and 394.6M when it starts at the final size: 1.7% of the work net of start-up, which is the most that presizing from a compile-time hint could give, and
+  it would cost 2 MB per map that never grows.  Not changed.  A single doubling at 65k entries re-inserts 65k entries (about 0.5M instructions), so there is no
+  latency spike worth removing either.
+* **Native aggregates between compiled procs.**  A proc that builds a 1000-element native vector and calls a helper with it 2000 times: 1257M interpreted, 180M
+  compiled, against 44M when the helper's loop is written inline.  The call hands over to boxed code (a native vector cannot be an argument), so the helper gets
+  a Tcl list and reads it with `lindex`.  Passing the vector by reference is the missing 4x, for loops that pass a vector repeatedly.  It was not built: the
+  tcllib-style workloads (decision 19's profile) spend 0.7-8.5% of their instructions in generated code on the six text and data workloads, 12-18% on records and
+  binary, and 18-43% on the three checksums; a vector passed by reference needs ownership rules (a callee that writes to it needs its own copy), and the
+  estimated cost of proc calls in all eleven workloads is at most 6.3% (md5, 67000 proc entries at about 500 instructions each).  What was changed instead: `lindex` of a list object with an integer index reads the list's element
+  array directly (what `Tcl_ListObjGetElements` does for a list) instead of calling it; the helper above went from 180M to 142M (21%).
+* **Strings built lazily.**  Decision 10 measured typed strings: generated code is 0-7% of the string workloads, the rest is Tcl's own commands.  The profile of
+  the eleven workloads agrees: generated code is 0.7-8.5% of the six text workloads, and the string-object work in them (2-23%) is done by Tcl's own functions,
+  which lazy building in generated code would not remove.  Nothing was built.
