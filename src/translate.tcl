@@ -1,0 +1,2492 @@
+# translate.tcl -- ahead-of-time translation of Tcl 8.6 procs from bytecode to C.
+#
+#   tcl-aot-sh src/translate.tcl <procs.tcl> <out.c> <InitName> [-hints file] [-untyped] [-split N]
+#
+# <procs.tcl> is loaded (it may define procs in any namespace, or load packages); every proc it adds is a candidate.  For each candidate that can be
+# translated the output holds compiled code, registered under (namespace, arguments, body).  A program that defines the same proc later gets the
+# compiled body attached to its proc (include/tbc_hook.h); the interpreter, the proc and everything that calls it stay as they are.
+#
+# Code generation.  Each proc is translated twice:
+#   typed code    one function per argument-type signature (I = int64_t, D = double, B = Tcl_Obj *); the translator infers which locals and stack
+#                 slots are integers or doubles and keeps those in C variables.  Calls between translated procs by literal name are direct C
+#                 calls, guarded by a flag that Tcl clears when the callee is deleted, renamed or redefined.
+#   boxed code    one function per proc, entered at any instruction; locals live in the interpreter's own call frame and the operand stack holds
+#                 Tcl_Obj references, exactly as the bytecode executor does it.
+# Typed code falls into the boxed code, at the instruction it was executing, whenever an assumption of the inference fails (integer overflow, a
+# non-numeric operand, a NaN result, a callee that was redefined...).  Nothing observable has happened before such a fall, so results, error codes
+# and error info are the interpreter's.  See docs/design.md.
+#
+# Options
+#   -hints file   lines "<proc> <sig> [<sig>...]" request extra entry signatures (default: all-I plus the all-B generic one)
+#   -untyped      generate the boxed code only
+#   -split N      write the module as several files instead of one: <out>.h (shared declarations), <out>_v1.c .. <out>_vN.c (typed code),
+#                 <out>_g1.c .. <out>_gN.c (boxed code) and <out>.c (tables and Init); build them with tools/build-module.sh
+#
+# Environment: TBC_CENSUS=1 lists which procs can be translated and exits; TBC_DEADOPS=1 logs, to stderr, every instruction at which typed code gives
+# up; TBC_TIMING=1 logs procs that take long to analyse.
+
+if {$argc < 3} { puts stderr "usage: translate.tcl procs.tcl out.c InitName \[-hints file\] \[-untyped\] \[-split N\]"; exit 2 }
+lassign $argv srcFile outFile initName
+set hintFile ""; set typedMode 1; set splitN 0
+set rest [lrange $argv 3 end]
+while {[llength $rest]} {
+    switch -- [lindex $rest 0] {
+        -hints { set hintFile [lindex $rest 1]; set rest [lrange $rest 2 end] }
+        -untyped { set typedMode 0; set rest [lrange $rest 1 end] }
+        -split { set splitN [lindex $rest 1]; set rest [lrange $rest 2 end] }
+        default { puts stderr "unknown option [lindex $rest 0]"; exit 2 }
+    }
+}
+
+proc allprocs {ns} {
+    set r {}
+    foreach p [namespace eval $ns {::info procs}] {
+        set q [expr {$ns eq "::" ? "::$p" : "${ns}::$p"}]
+        # an imported command is the other namespace's proc, not one of this one's
+        if {[catch {namespace origin $q} o] || $o ne $q} continue
+        lappend r $q
+    }
+    foreach c [namespace children $ns] { lappend r {*}[allprocs $c] }
+    return $r
+}
+set before [allprocs ::]
+source $srcFile
+set procNames [lsort [lmap p [allprocs ::] {expr {$p in $before ? [continue] : $p}}]]
+set census [info exists ::env(TBC_CENSUS)]
+if {$census} { set procNames [lsort [allprocs ::]] }
+
+# ================================================================== helpers
+
+# built-in commands that neither reach the variables of the calling frame nor call back into scripts: a proc that uses nothing else
+# (and calls only such procs) is "pure": nothing can observe its frame, so it needs none of its own while it runs
+set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min}
+# where a command word may resolve to, for a proc in namespace ns
+proc candidates {ns nm} {
+    if {[string match ::* $nm]} { return [list $nm] }
+    if {$ns eq "::"} { return [list ::$nm] }
+    return [list ${ns}::$nm ::$nm]
+}
+# the proc a command word resolves to (the first candidate that exists), or "" when it is not a proc / unknown
+proc resolveProc {ns nm} {
+    foreach c [candidates $ns $nm] {
+        if {[llength [info commands [globEsc $c]]]} { return [expr {[llength [info procs [globEsc $c]]] ? [string map {::::: ::} $c] : ""}] }
+    }
+    return ""
+}
+proc keysplit {key} { set i [string last / $key]; list [string range $key 0 [expr {$i-1}]] [string range $key [expr {$i+1}] end] }
+proc refuse {why} { return -code error -errorcode TBC_REFUSED $why }
+proc fm {tmpl args} { string map $args $tmpl }
+
+# a name as a glob pattern that matches only itself (info commands and info procs take patterns)
+proc globEsc {s} { string map [list \\ \\\\ * \\* ? \\? \[ \\\[ \] \\\]] $s }
+proc cident {s} {
+    set r ""
+    foreach c [split $s ""] {
+        if {[string is alnum -strict $c] && [scan $c %c] < 128} { append r $c } else { append r _[format %02x [scan $c %c]] }
+    }
+    return $r
+}
+# a string as the bytes of Tcl's internal representation: modified UTF-8, in which the NUL character is the two bytes C0 80
+proc istr {s} { string map [list \x00 \xC0\x80] [encoding convertto utf-8 $s] }
+proc cstring {s} {
+    set r ""
+    foreach b [split [istr $s] ""] {
+        set n [scan $b %c]
+        if {$n >= 32 && $n < 127 && $b ni {\" \\ ?}} { append r $b } else { append r [format {\%03o} $n] }
+    }
+    return \"$r\"
+}
+proc cbytes {s} { string length [istr $s] }
+proc c_int {s} {
+    if {$s eq "-9223372036854775808"} { return "(-INT64_C(9223372036854775807) - 1)" }
+    return "INT64_C($s)"
+}
+proc c_dbl {s} {
+    set v [expr {double($s)}]
+    if {$v != $v} { return "__builtin_nan(\"\")" }
+    if {$v == Inf} { return "__builtin_inf()" }
+    if {$v == -Inf} { return "(-__builtin_inf())" }
+    set t [format %.17g $v]
+    if {![regexp {[.eEn]} $t]} { append t .0 }
+    return $t
+}
+
+# the C constant of a double literal: the value of the object when the compiler made it (litd), else the value of its text
+proc litdbl {P n} {
+    global PI
+    set e [lindex $PI($P,litd) $n]
+    if {$e ne ""} { return $e }
+    return [c_dbl [lindex $PI($P,lits) $n]]
+}
+
+proc operand {a} {
+    switch -regexp -- $a {
+        {^%(\d+)$} - {^@(\d+)$} { return [string range $a 1 end] }
+        {^pc (\d+)$} { return [lindex $a 1] }
+        default { return $a }
+    }
+}
+
+# {pops pushes kind target}; kind: fall | jump | cond | term
+source [file join [file dirname [info script]] opcodes.tcl]
+# instructions that have a handler in the boxed code (G) -- the others keep a proc interpreted
+set tbcGops {nop startCommand beginCatch4 endCatch tryCvtToNumeric push1 push4 pop dup loadScalar1 loadScalar4 storeScalar1 storeScalar4
+    incrScalar1Imm incrScalar1 add sub mult div mod lt le gt ge eq neq jump1 jump4 jumpTrue1 jumpTrue4 jumpFalse1 jumpFalse4 done
+    invokeStk1 invokeStk4 strcat strlen reverse appendScalar1 appendScalar4 lappendScalar1 lappendScalar4 listIndex listIndexImm
+    listLength list lsetList dictExists dictGet dictIncrImm verifyDict dictFirst dictNext unsetScalar
+    pushResult pushReturnCode pushReturnOpts returnCodeBranch returnImm syntax returnStk break continue variable upvar nsupvar
+    foreach_start foreach_step foreach_end lmap_collect
+    over streq strneq strcmp strindex strmatch strfind strrfind strrange strrangeImm strreplace strmap strcaseUpper strcaseLower strcaseTitle strtrim strtrimLeft
+    strtrimRight strclass regexp uminus uplus not bitnot bitand bitor bitxor lshift rshift expon listIn listNotIn listConcat lindexMulti lsetFlat listRangeImm
+    concatStk jumpTable infoLevelNumber infoLevelArgs currentNamespace expandStart expandStkTop invokeExpanded expandDrop syntax
+    tailcall evalStk coroName dictExpand dictRecombineImm dictRecombineStk dictUpdateStart dictUpdateEnd invokeReplace dictSet dictUnset dictAppend dictLappend arrayMakeImm arrayMakeStk exprStk tryCvtToBoolean numericType clockRead resolveCmd originCmd
+    loadArray1 loadArray4 loadArrayStk loadStk loadScalarStk storeArray1 storeArray4 storeArrayStk storeStk storeScalarStk
+    appendArray1 appendArray4 appendArrayStk appendStk lappendArray1 lappendArray4 lappendArrayStk lappendStk
+    incrArray1 incrArrayStk incrStk incrScalarStk incrArray1Imm incrArrayStkImm incrStkImm incrScalarStkImm lappendList lappendListArray lappendListStk lappendListArrayStk
+    existScalar existArray existArrayStk existStk unsetArray unsetArrayStk unsetStk arrayExistsImm arrayExistsStk}
+# the stack effect of an instruction as {pops pushes kind ?target?}; the G handler of an instruction with a table-derived effect
+# must keep exactly the net effect the table says
+proc effect {op a {d {}} {d0 {}}} {
+    switch -- $op {
+        expandStart { return {0 0 fall} }
+        expandStkTop - expandDrop { return [list [expr {$op eq "expandDrop" ? $d - $d0 : $d - $d0}] 0 fall] }
+        invokeExpanded { return [list [expr {$d - $d0}] 1 fall] }
+        push1 - push4 - dup - loadScalar1 - loadScalar4 - incrScalar1Imm - pushResult - pushReturnCode - pushReturnOpts { return {0 1 fall} }
+        pop - verifyDict - variable { return {1 0 fall} }
+        upvar - nsupvar { return {1 0 fall} }
+        storeScalar1 - storeScalar4 - nop - startCommand - beginCatch4 - endCatch - unsetScalar - tryCvtToNumeric { return {0 0 fall} }
+        incrScalar1 - strlen - dictIncrImm - appendScalar1 - appendScalar4 - lappendScalar1 - lappendScalar4 { return {1 1 fall} }
+        dictGet { return [list [expr {[lindex $a 0] + 1}] 1 fall] }
+        add - sub - mult - div - mod - lt - le - gt - ge - eq - neq - listIndex { return {2 1 fall} }
+        lsetList { return {3 1 fall} }
+        listIndexImm - listLength {
+            if {$op eq "listIndexImm" && ![regexp {^\.(-?\d+|end(-\d+)?)$} [lindex $a 0]]} { refuse "listIndexImm [lindex $a 0]" }
+            return {1 1 fall}
+        }
+        list { return [list [lindex $a 0] 1 fall] }
+        jump1 - jump4 { return [list 0 0 jump [operand [lindex $a 0]]] }
+        jumpTrue1 - jumpTrue4 - jumpFalse1 - jumpFalse4 { return [list 1 0 cond [operand [lindex $a 0]]] }
+        done { return {1 0 term} }
+        break - continue { return {0 0 special} }
+        returnCodeBranch { return {1 0 special} }
+        tailcall { return [list [lindex $a 0] 0 term] }
+        returnImm - syntax {
+            # a return with an error code (or any level) never continues with the next instruction
+            lassign $a rcode rlevel
+            if {$rcode + 0 == 0 && $rlevel + 0 == 0} { return {1 0 fall} }
+            return {2 0 term}
+        }
+        returnStk { return {2 1 fall} }
+        invokeStk1 - invokeStk4 - strcat { set n [lindex $a 0]; return [list $n 1 fall] }
+        reverse { set n [lindex $a 0]; return [list $n $n fall] }
+        dictExists { return [list [expr {[lindex $a 0] + 1}] 1 fall] }
+        dictFirst { return {1 3 fall} }
+        concatStk - lindexMulti { return [list [lindex $a 0] 1 fall] }
+        invokeReplace { return [list [expr {[lindex $a 0] + 1}] 1 fall] }
+        dictSet { return [list [expr {[lindex $a 0] + 1}] 1 fall] }
+        dictUnset { return [list [lindex $a 0] 1 fall] }
+        dictAppend - dictLappend { return {2 1 fall} }
+        lsetFlat { return [list [lindex $a 0] 1 fall] }
+        jumpTable { lassign $a n tgts; return [list 1 0 multi $tgts] }
+        foreach_start { lassign $a n nl jo vl stepPc; return [list $nl [expr {$nl + 2}] jump $stepPc] }
+        foreach_step { lassign $a n nl jo vl stepPc; return [list 0 0 cond [expr {$stepPc + $jo}]] }
+        foreach_end { lassign $a n nl; return [list [expr {$nl + 2}] 0 fall] }
+        dictNext { return {0 3 fall} }
+        default {
+            if {$op ni $::tbcGops || ![dict exists $::OPNET $op]} { refuse "opcode $op" }
+            set n [dict get $::OPNET $op]
+            if {$n eq "V"} { refuse "opcode $op (variable stack effect)" }
+            return [list [expr {max(-$n, 0)}] [expr {max($n, 0)}] fall]
+        }
+    }
+}
+
+# can this instruction end with a break or continue result (which then goes to the enclosing loop's targets)?  A command can; a return with a
+# code known when it is compiled cannot unless that code is break or continue at level 0
+proc tbcCanBC {op a} {
+    if {$op in {returnImm syntax}} {
+        lassign $a rcode rlevel
+        return [expr {$rlevel + 0 == 0 && $rcode + 0 in {3 4}}]
+    }
+    return [expr {$op in {invokeStk1 invokeStk4 evalStk tailcall invokeReplace invokeExpanded returnStk break continue}}]
+}
+
+# variables read and written by an instruction
+proc usedef {op a} {
+    switch -- $op {
+        loadScalar1 - loadScalar4 { return [list [operand [lindex $a 0]] {}] }
+        storeScalar1 - storeScalar4 { return [list {} [operand [lindex $a 0]]] }
+        incrScalar1Imm - incrScalar1 - appendScalar1 - appendScalar4 - lappendScalar1 - lappendScalar4 { set v [operand [lindex $a 0]]; return [list $v $v] }
+        dictIncrImm { set v [operand [lindex $a 1]]; return [list $v $v] }
+        variable - upvar - nsupvar { return [list {} [operand [lindex $a 0]]] }
+        foreach_step { return [list {} [lsort -integer -unique [concat {*}[lindex $a 3]]]] }
+        existScalar { return [list [operand [lindex $a 0]] {}] }
+        dictUpdateStart - dictUpdateEnd { set vs [concat [list [operand [lindex $a 0]]] [lindex $a 2]]; return [list $vs $vs] }
+        dictRecombineImm { set v [operand [lindex $a 0]]; return [list $v $v] }
+        dictAppend - dictLappend { set v [operand [lindex $a 0]]; return [list $v $v] }
+        dictSet - dictUnset { set v [operand [lindex $a 1]]; return [list $v $v] }
+        arrayMakeImm { set v [operand [lindex $a 0]]; return [list $v $v] }
+        loadArray1 - loadArray4 - storeArray1 - storeArray4 - appendArray1 - appendArray4 - lappendArray1 - lappendArray4 - incrArray1 - incrArray1Imm - existArray -
+        unsetArray - unsetScalar - lappendList - lappendListArray - arrayExistsImm {
+            # array element operations: they work on the variable in the frame, so what typed code holds for it must be there
+            set v [operand [lindex $a [expr {$op in {unsetArray unsetScalar} ? 1 : 0}]]]
+            return [list $v $v]
+        }
+        default { return [list {} {}] }
+    }
+}
+
+# ================================================================== per-proc preparation (variant independent)
+
+array set PI {}
+set translatable {}
+
+# the innermost exception range around pc for a result code (mode 1 = error: catch ranges only; 3 = break: any range; 4 = continue: a
+# range that has a continue target, or a catch range) -- the interpreter's GetExceptRangeForPc; "" if none
+proc findRange {ranges pc mode} {
+    for {set i [expr {[llength $ranges] - 1}]} {$i >= 0} {incr i -1} {
+        set r [lindex $ranges $i]
+        if {[dict get $r from] <= $pc && $pc <= [dict get $r to]} {
+            if {[dict get $r type] eq "catch"} { return $r }
+            if {$mode == 3} { return $r }
+            if {$mode == 4 && [dict get $r continue] != -1} { return $r }
+        }
+    }
+    return ""
+}
+
+proc prepare {P} {
+    global PI
+    if {[regexp {[[:cntrl:]]} $P] || [string match *:::* $P]} { refuse "unusual proc name" }
+    set bc [::tcl::unsupported::getbytecode proc [expr {[string match ::* $P] ? $P : "::$P"}]]
+    set args [info args $P]
+    set PI($P,argsIdx) [expr {[lindex $args end] eq "args" ? [llength $args] - 1 : -1}]
+    set vnames {}; set nargs 0; set vflags {}
+    foreach v [dict get $bc variables] {
+        set flags [lindex $v 0]
+        foreach f $flags { if {$f ni {scalar array arg temp}} { refuse "variable flag $f" } }
+        if {"scalar" ni $flags && "array" ni $flags} { refuse "non-scalar variable" }
+        if {"arg" in $flags} { incr nargs }
+        lappend vnames [lindex $v 1]; lappend vflags $flags
+    }
+    if {$nargs != [llength $args]} { refuse "argument count mismatch" }
+
+    array set ins {}; set pcs {}
+    foreach {pc i} [dict get $bc instructions] { set ins($pc) [list [lindex $i 0] [lrange $i 1 end]]; lappend pcs $pc }
+    # foreach: the loop's data is in the auxiliary table; the start jumps to the step (5 bytes on, minus the step's backward offset), which
+    # jumps back to the start of the body (offset from the step) and falls through to the end.  Step and end carry the same data.
+    set aux [dict get $bc auxiliary]
+    foreach pc $pcs {
+        if {[lindex $ins($pc) 0] ne "foreach_start"} continue
+        set n [string trimleft [lindex $ins($pc) 1 0] ?]
+        set ax [lindex $aux $n]
+        set jo [dict get $ax jumpOffset]; set vl [dict get $ax assign]; set nl [llength $vl]
+        set stepPc [expr {$pc + 5 - $jo}]
+        set data [list $n $nl $jo $vl $stepPc]
+        set ins($pc) [list foreach_start $data]
+        if {![info exists ins($stepPc)] || [lindex $ins($stepPc) 0] ne "foreach_step"} { refuse "foreach without its step" }
+        set ins($stepPc) [list foreach_step $data]
+        set endPc [lindex $pcs [expr {[lsearch -exact $pcs $stepPc] + 1}]]
+        if {[lindex $ins($endPc) 0] ne "foreach_end"} { refuse "foreach without its end" }
+        set ins($endPc) [list foreach_end $data]
+    }
+    foreach pc $pcs {
+        if {[lindex $ins($pc) 0] ni {dictUpdateStart dictUpdateEnd}} continue
+        lassign [lindex $ins($pc) 1] var ax
+        set n [string trimleft $ax ?]
+        set ins($pc) [list [lindex $ins($pc) 0] [list $var $n [dict get [lindex $aux $n] variables]]]
+    }
+    foreach pc $pcs {
+        if {[lindex $ins($pc) 0] ne "jumpTable"} continue
+        set n [string trimleft [lindex $ins($pc) 1 0] ?]
+        set map [dict get [lindex $aux $n] mapping]
+        set tg {}
+        foreach {k off} $map { lappend tg [expr {$pc + $off}] }
+        set ins($pc) [list jumpTable [list $n [lsort -integer -unique $tg] $map]]
+    }
+    # exception ranges (loops: break and continue targets; catch: handler), innermost last, as the interpreter's table lists them
+    set ranges [dict get $bc exception]
+    set PI($P,ranges) $ranges
+    # the command each instruction belongs to (the innermost one: the last whose code starts at or before the pc and still covers it)
+    set cmds [dict get $bc commands]
+    foreach pc $pcs {
+        set best {}
+        foreach c $cmds { if {[dict get $c codefrom] <= $pc && $pc <= [dict get $c codeto]} { set best [list [dict get $c scriptfrom] [expr {[dict get $c scriptto] - [dict get $c scriptfrom] + 1}]] } }
+        set PI($P,src,$pc) $best
+    }
+
+    array set nxtOf {}; array set prevOp {}
+    for {set i 0} {$i < [llength $pcs]} {incr i} { set nxtOf([lindex $pcs $i]) [lindex $pcs [expr {$i+1}]]; if {$i} { set prevOp([lindex $pcs $i]) [lindex $ins([lindex $pcs [expr {$i-1}]]) 0] } }
+    # stack depth at every reachable pc, successors
+    array set depth {}; array set depthAtBegin {}; array set mkAt {}; array set mkAtBegin {}; set maxd 0; set targets {}; set iters {}
+    array set succ {}
+    # mk: the stack depths at which the argument expansions that are open at an instruction started (the interpreter's auxiliary stack)
+    set work [list [list 0 0 {}]]
+    # A command can end with break or continue; the interpreter then pops the command's operands and goes on at the loop's target, whatever else is on
+    # the stack.  Where the depth there is not the one the loop's own flow gives, that result cannot happen (the compiler would be wrong otherwise: a
+    # `dict for` cleanup handler's `return -options`, for instance, sits above the iteration state).  Such edges are examined once the flow is known:
+    # kept when the depths agree (or when the target is reached no other way), dropped otherwise (the result then leaves the proc, as with no loop).
+    set soft {}; array set softDrop {}
+    while 1 {
+    while {[llength $work]} {
+        lassign [lindex $work end] pc d mk
+        set work [lrange $work 0 end-1]
+        if {[info exists depth($pc)]} {
+            if {$depth($pc) != $d} { refuse "inconsistent stack depth at pc $pc" }
+            if {$mkAt($pc) ne $mk} { refuse "inconsistent expansion state at pc $pc" }
+            continue
+        }
+        if {![info exists ins($pc)]} { refuse "jump to pc $pc" }
+        set depth($pc) $d; set mkAt($pc) $mk
+        lassign $ins($pc) op a
+        lassign [effect $op $a $d [lindex $mk end]] pops pushes kind tgt
+        # the `return -options` behind returnCodeBranch re-raises a caught exception whose code is none of the five it dispatches on: it never completes normally
+        if {$op eq "returnStk" && [info exists prevOp($pc)] && $prevOp($pc) eq "returnCodeBranch"} { set kind term }
+        if {$d < $pops} { refuse "stack underflow at pc $pc" }
+        set nd [expr {$d - $pops + $pushes}]
+        switch $op {
+            expandStart { set nmk [list {*}$mk $d] }
+            invokeExpanded - expandDrop { set nmk [lrange $mk 0 end-1] }
+            default { set nmk $mk }
+        }
+        if {$nd > $maxd} { set maxd $nd }
+        if {$op in {dictFirst dictNext}} { lappend iters [operand [lindex $a 0]] }
+        set nextpc $nxtOf($pc)
+        set PI($P,next,$pc) $nextpc
+        if {[tbcCanBC $op $a]} {
+            set cl [switch $op { invokeStk1 - invokeStk4 - tailcall { lindex $a 0 } evalStk { expr 1 } invokeReplace { expr {[lindex $a 0] + 1} } invokeExpanded { expr {$d - [lindex $mk end]} } default { expr 2 } }]
+            foreach m {3 4} {
+                set r [findRange $ranges $pc $m]
+                if {$r ne "" && [dict get $r type] ne "catch"} {
+                    set tg [dict get $r [expr {$m == 3 ? "break" : "continue"}]]
+                    set tmk [expr {[info exists mkAt([dict get $r from])] ? $mkAt([dict get $r from]) : $mk}]
+                    if {$tg >= 0} { lappend soft [list $pc $m $tg [expr {$d - $cl}] $tmk] }
+                }
+            }
+        }
+        if {$op eq "beginCatch4"} {
+            # the handler is entered from anywhere inside the range, with the stack as it is here
+            set r [lindex $ranges [lindex $a 0]]
+            lappend work [list [dict get $r catch] $d $mk]; lappend targets [dict get $r catch]
+            set depthAtBegin([dict get $r catch]) $d; set mkAtBegin([dict get $r catch]) $mk
+        }
+        switch $kind {
+            fall { lappend work [list $nextpc $nd $nmk]; set succ($pc) [list $nextpc] }
+            jump { lappend work [list $tgt $nd $nmk]; lappend targets $tgt; set succ($pc) [list $tgt] }
+            cond { lappend work [list $tgt $nd $nmk] [list $nextpc $nd $nmk]; lappend targets $tgt; set succ($pc) [list $nextpc $tgt] }
+            term { set succ($pc) {} }
+            multi {
+                foreach t $tgt { lappend work [list $t $nd $nmk]; lappend targets $t }
+                lappend work [list $nextpc $nd $nmk]
+                set succ($pc) [concat $tgt [list $nextpc]]
+            }
+            special {
+                # break/continue go to the target of the enclosing range; returnCodeBranch to one of the five jumps behind it
+                set succ($pc) {}
+                if {$op eq "returnCodeBranch"} {
+                    foreach o {1 3 5 7 9} { lappend work [list [expr {$pc + $o}] $nd $nmk]; lappend succ($pc) [expr {$pc + $o}]; lappend targets [expr {$pc + $o}] }
+                } else {
+                    set r [findRange $ranges $pc [expr {$op eq "break" ? 3 : 4}]]
+                    if {$r ne ""} {
+                        if {[dict get $r type] eq "catch"} {
+                            set tg [dict get $r catch]; set td [expr {$depthAtBegin($tg)}]; set tmk $mkAtBegin($tg)
+                        } else {
+                            set tg [dict get $r [expr {$op eq "break" ? "break" : "continue"}]]; set td $nd
+                            set tmk [expr {[info exists mkAt([dict get $r from])] ? $mkAt([dict get $r from]) : $mk}]
+                        }
+                        lappend succ($pc) $tg; lappend targets $tg
+                        if {[dict get $r type] ne "catch"} { lappend work [list $tg $td $tmk] }
+                    }
+                }
+            }
+        }
+    }
+    set progressed 0; array unset pend
+    foreach e $soft {
+        lassign $e spc m tg sd smk
+        if {[info exists depth($tg)]} { set td $depth($tg); set tm $mkAt($tg) } elseif {[info exists pend($tg)]} { lassign $pend($tg) td tm } else { set td $sd; set tm $smk; set pend($tg) [list $sd $smk]; lappend work [list $tg $sd $smk]; set progressed 1 }
+        if {$td == $sd && $tm eq $smk} { lappend targets $tg } else { set softDrop($spc,$m) 1 }
+    }
+    set soft {}
+    if {!$progressed} break
+    }
+    foreach k [array names softDrop] { set PI($P,drop,$k) 1 }
+    set iters [lsort -unique $iters]
+    # Translated procs have no call frame: a command that reaches the frame's variables by name would not find them.  Every command
+    # invoked by name must be known: a proc (it has a frame of its own), or a built-in that is known not to use the caller's variables.
+    # (stack of producers: the literal that pushed each slot, or - when it is not one)
+    array set pst {}
+    set callees {}
+    set pure 1
+    set pst(0) {}; set pwork {0}
+    while {[llength $pwork]} {
+        set pc [lindex $pwork end]; set pwork [lrange $pwork 0 end-1]
+        set st $pst($pc)
+        lassign $ins($pc) op a
+        lassign [effect $op $a [llength $st] [lindex $mkAt($pc) end]] pops pushes
+        switch -- $op {
+            push1 - push4 { set out [list {*}$st [operand [lindex $a 0]]] }
+            dup { set out [list {*}$st [lindex $st end]] }
+            reverse { set n [lindex $a 0]; set out [list {*}[lrange $st 0 end-$n] {*}[lreverse [lrange $st end-[expr {$n-1}] end]]] }
+            default { set out [list {*}[lrange $st 0 [expr {[llength $st] - $pops - 1}]] {*}[lrepeat $pushes -]] }
+        }
+        # instructions that reach variables by name or link them to other frames make the proc impure
+        if {$op in {upvar nsupvar variable infoLevelNumber infoLevelArgs currentNamespace} || ([string match *Stk $op] && $op ne "returnStk") || [string match *StkImm $op]} { set pure 0 }
+        if {$op in {invokeStk1 invokeStk4}} {
+            set n [lindex $a 0]; set q [expr {[llength $st] - $n}]
+            set c [lindex $st $q]
+            if {$c eq "-"} {
+                set pure 0
+            } else {
+                set nm [lindex [dict get $bc literals] $c]
+                set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+                set callee [resolveProc $ns $nm]
+                if {$callee ne ""} {
+                    lappend callees $callee
+                } else {
+                    set w2 [expr {$n > 1 ? [lindex $st [expr {$q+1}]] : "-"}]
+                    set sub [expr {$w2 eq "-" ? "-" : [lindex [dict get $bc literals] $w2]}]
+                    set b $nm; regsub {^::} $b {} b
+                    if {[regexp {^tcl::dict::(\w+)$} $b -> sub1]} { set b dict; set sub $sub1 }
+                    if {[string match tcl::string::* $b] || [string match tcl::list::* $b]} {
+                        # the string ensemble's own implementations never use the caller's variables
+                    } elseif {$b eq "dict"} {
+                        if {$sub ni {size keys values get exists create merge replace remove}} { set pure 0 }
+                    } elseif {$b ni $::tbcPureBuiltins} {
+                        set pure 0
+                    }
+                }
+            }
+        }
+        set pdst $succ($pc)
+        if {$op eq "beginCatch4"} { lappend pdst [dict get [lindex $ranges [lindex $a 0]] catch] }
+        foreach s $pdst {
+            if {![info exists pst($s)]} { set pst($s) $out; lappend pwork $s } else {
+                set j [lmap x $pst($s) y $out {expr {$x eq $y ? $x : "-"}}]
+                if {$j ne $pst($s)} { set pst($s) $j; lappend pwork $s }
+            }
+        }
+    }
+    foreach it $iters { if {"temp" ni [lindex $vflags $it]} { refuse "dict iterator in a named variable" } }
+    set reach [lsort -integer [array names depth]]
+
+    # successors for the data flow: besides the normal ones, a catch handler can be entered from anywhere inside its range, and a command
+    # that returns break/continue/return codes can jump to the targets of the loops around it
+    array set dsucc {}
+    foreach pc $reach {
+        set l $succ($pc)
+        foreach r $ranges { if {[dict get $r type] eq "catch" && [dict get $r from] <= $pc && $pc <= [dict get $r to]} { lappend l [dict get $r catch] } }
+        lassign $ins($pc) op a
+        if {[tbcCanBC $op $a]} {
+            foreach m {3 4} {
+                if {[info exists PI($P,drop,$pc,$m)]} continue
+                set r [findRange $ranges $pc $m]
+                if {$r ne "" && [dict get $r type] ne "catch"} { lappend l [dict get $r [expr {$m == 3 ? "break" : "continue"}]] }
+            }
+        }
+        set dsucc($pc) [lsort -integer -unique [lmap x $l {expr {[info exists depth($x)] ? $x : [continue]}}]]
+    }
+    # liveness of locals (backward) and definite assignment (forward)
+    array set use {}; array set def {}
+    foreach pc $reach { lassign $ins($pc) op a; lassign [usedef $op $a] use($pc) def($pc) }
+    array set liveIn {}; foreach pc $reach { set liveIn($pc) {} }
+    set changed 1
+    while {$changed} {
+        set changed 0
+        foreach pc [lreverse $reach] {
+            set out {}
+            foreach s $dsucc($pc) { set out [lsort -integer -unique [concat $out $liveIn($s)]] }
+            set nl [lsort -integer -unique [concat $use($pc) [lmap v $out {expr {$v in $def($pc) ? [continue] : $v}}]]]
+            if {$nl ne $liveIn($pc)} { set liveIn($pc) $nl; set changed 1 }
+        }
+    }
+    set allv {}; for {set v 0} {$v < [llength $vnames]} {incr v} { lappend allv $v }
+    set params {}; for {set v 0} {$v < $nargs} {incr v} { lappend params $v }
+    array set asgIn {}
+    foreach pc $reach { set asgIn($pc) $allv }
+    set asgIn(0) $params
+    set changed 1
+    while {$changed} {
+        set changed 0
+        foreach pc $reach {
+            set out [lsort -integer -unique [concat $asgIn($pc) $def($pc)]]
+            foreach s $dsucc($pc) {
+                set ni [expr {$s == 0 ? $params : [lmap v $asgIn($s) {expr {$v in $out ? $v : [continue]}}]}]
+                if {$ni ne $asgIn($s)} { set asgIn($s) $ni; set changed 1 }
+            }
+        }
+    }
+    # variables that may have been assigned on some path to a pc (their frame slots may have to be written if the code leaves typed mode there)
+    array set mayIn {}
+    foreach pc $reach { set mayIn($pc) {} }
+    set mayIn(0) $params
+    set changed 1
+    while {$changed} {
+        set changed 0
+        foreach pc $reach {
+            set out [lsort -integer -unique [concat $mayIn($pc) $def($pc)]]
+            foreach s $dsucc($pc) {
+                set ni [lsort -integer -unique [concat $mayIn($s) $out]]
+                if {$ni ne $mayIn($s)} { set mayIn($s) $ni; set changed 1 }
+            }
+        }
+    }
+    # variables that are assigned on some paths only: a proc that can be asked about its variables by name must hold them boxed (unset = NULL)
+    set mustBoxNamed {}
+    foreach pc $reach { foreach v $mayIn($pc) { if {$v ni $asgIn($pc)} { lappend mustBoxNamed $v } } }
+    # a variable that may be read before it is assigned cannot be held unboxed
+    set mustBox {}
+    foreach pc $reach { foreach v $liveIn($pc) { if {$v ni $asgIn($pc)} { lappend mustBox $v } } }
+
+    # variables typed code keeps in the frame (kind F): the targets of upvar/variable and the arrays whose elements it works on.  Such a proc runs in
+    # its own frame only (it is not pure: a direct call cannot reach it).
+    set fv {}
+    foreach pc $reach {
+        lassign $ins($pc) op a
+        switch -- $op {
+            upvar - nsupvar - variable - loadArray1 - loadArray4 - storeArray1 - storeArray4 - appendArray1 - appendArray4 - lappendArray1 - lappendArray4 -
+            incrArray1 - incrArray1Imm - existArray - arrayExistsImm - lappendListArray { lappend fv [operand [lindex $a 0]] }
+            unsetArray { lappend fv [operand [lindex $a 1]] }
+        }
+    }
+    set PI($P,fvars) [lsort -integer -unique $fv]
+    if {[llength $fv]} { set pure 0 }
+    set PI($P,callees) [lsort -unique $callees]; set PI($P,pure) $pure; set PI($P,mustBoxNamed) [lsort -unique $mustBoxNamed]
+    set PI($P,args) $args; set PI($P,nargs) $nargs; set PI($P,vnames) $vnames; set PI($P,lits) [dict get $bc literals]
+    # a literal the compiler folded is a double object with no string yet (or one whose printed form is not exact: Tcl prints 2^64 as
+    # 1.844674407370955e+19, which parses to the double below): take the value of the object itself, before anything turns it into text
+    set litd {}
+    # (not through expr: its ?: result is parsed as a number and printed again the short way, which gives 2^64 back as the double below)
+    foreach l $PI($P,lits) {
+        if {[string match {value is a double *} [tcl::unsupported::representation $l]]} { lappend litd [c_dbl $l] } else { lappend litd "" }
+    }
+    set PI($P,litd) $litd
+    set PI($P,pcs) $pcs; set PI($P,reach) $reach; set PI($P,maxd) $maxd; set PI($P,targets) [lsort -unique $targets]
+    set PI($P,iters) $iters; set PI($P,mustBox) [lsort -unique $mustBox]
+    set lh {}
+    foreach pc [array names succ] { foreach t $succ($pc) { if {$t <= $pc} { lappend lh $t } } }
+    set PI($P,loopheads) [lsort -integer -unique $lh]
+    set exl 0
+    foreach pc $reach { set PI($P,mk,$pc) $mkAt($pc); set l [llength $mkAt($pc)]; if {[lindex $ins($pc) 0] eq "expandStart"} { incr l }; if {$l > $exl} { set exl $l } }
+    set PI($P,exlevels) $exl
+    foreach pc $pcs { set PI($P,ins,$pc) $ins($pc) }
+    foreach pc $reach { set PI($P,depth,$pc) $depth($pc); set PI($P,succ,$pc) $succ($pc); set PI($P,live,$pc) $liveIn($pc); set PI($P,may,$pc) $mayIn($pc) }
+    # literal classes: canonical integers and doubles can be used as numbers; everything else stays a string
+    set cls {}
+    foreach s $PI($P,lits) {
+        set c [list L]
+        if {[lindex $PI($P,litd) [llength $cls]] ne ""} {
+            set dd [lindex $PI($P,litd) [llength $cls]]
+            if {![string match *inf* $dd] && ![string match *nan* $dd]} { set c [list D] }
+        } elseif {[regexp {^-?(0|[1-9][0-9]*)$} $s] && $s ne "-0" && $s >= -9223372036854775808 && $s <= 9223372036854775807} {
+            set c [list I]
+        } elseif {[string is double -strict $s] && ![regexp {[^0-9eE.+-]} $s]} {
+            set dv [expr {double($s)}]
+            if {[string equal $dv $s] && $dv == $dv && abs($dv) < 1.7e308} { set c [list D] }
+        }
+        lappend cls $c
+    }
+    set PI($P,lcls) $cls
+}
+
+set refusedProcs {}
+foreach p $procNames {
+    set t0 [clock milliseconds]
+    set rc0 [catch {prepare $p} res opts]
+    if {[info exists ::env(TBC_TIMING)] && [clock milliseconds] - $t0 > 500} { puts stderr "TIME [expr {[clock milliseconds] - $t0}] ms: $p" }
+    if {$rc0} {
+        if {[dict get $opts -errorcode] eq "TBC_REFUSED"} { lappend refusedProcs [list $p $res]; if {$census} { puts "REFUSED $p :: $res" } else { puts stderr "translate: $p stays interpreted: $res" }; continue }
+        if {$census} { puts "ERROR $p :: [string map [list \n { }] $res]"; continue }
+        return -options $opts $res
+    }
+    lappend translatable $p
+}
+# a proc is pure if it only uses pure built-ins and calls only pure compiled procs: nothing can then observe its frame, so while it runs
+# in typed code it needs none (and a direct call to it from compiled code skips the interpreter's call entirely)
+set pureProcs [lmap P $translatable {expr {$PI($P,pure) ? $P : [continue]}}]
+set pruned 1
+while {$pruned} {
+    set pruned 0
+    foreach P $pureProcs {
+        foreach c $PI($P,callees) {
+            if {$c ni $pureProcs} { set pureProcs [lsearch -all -inline -not -exact $pureProcs $P]; set pruned 1; break }
+        }
+    }
+}
+foreach P $translatable { set PI($P,pure) [expr {$P in $pureProcs}] }
+proc flushSet {P pc} { global PI; expr {$PI($P,pure) ? $PI($P,live,$pc) : $PI($P,may,$pc)} }
+# A proc that can be asked about its variables by name (not pure) must write every variable that was assigned on some path into the frame when it leaves
+# typed mode, and only those: a variable that is assigned on some paths only and is never read before it is assigned is held unboxed with a flag
+# `g<v>` that says whether it has been assigned on the way taken ("flagged"); one that may be read before it is assigned has to be boxed (unset = NULL).
+proc mustBoxOf {P} { global PI; return $PI($P,mustBox) }
+proc flaggedOf {P} {
+    global PI
+    if {$PI($P,pure)} { return {} }
+    set r {}
+    foreach v $PI($P,mustBoxNamed) { if {$v ni $PI($P,mustBox) && $v ni $PI($P,fvars)} { lappend r $v } }
+    return [lsort -integer -unique $r]
+}
+if {$census} { foreach P $translatable { puts "OK $P" }; exit 0 }
+
+# ================================================================== abstract values
+# a stack slot is described by a kind letter, optionally ":<literal index>":  I int64, D double, B Tcl_Obj*, L a string literal
+# (no variable, materialised on demand), U not known yet (while return types are still being worked out).
+
+proc kd {e} { string index $e 0 }
+proc lt {e} { set i [string first : $e]; expr {$i < 0 ? "" : [string range $e [expr {$i+1}] end]} }
+proc jd {a b} {
+    if {$a eq $b} { return $a }
+    set ka [kd $a]; set kb [kd $b]
+    if {$ka eq "U"} { return $b }
+    if {$kb eq "U"} { return $a }
+    if {$ka eq $kb && $ka in {I D}} { return $ka }
+    return B
+}
+proc jk {a b} {
+    if {$a eq $b} { return $a }
+    if {$a eq "F" || $b eq "F"} { return F }
+    if {$a in {- U}} { return $b }
+    if {$b in {- U}} { return $a }
+    return B
+}
+proc jstate {a b} { lmap x $a y $b { jd $x $y } }
+
+proc ctype {k} { switch $k { I {return int64_t} D {return double} default {return "Tcl_Obj *"} } }
+proc svar {k p} { switch $k { I {return si$p} D {return sd$p} default {return s$p} } }
+
+# C expression giving an owned boxed object for slot p (described by e)
+proc boxe {P p e} {
+    switch [kd $e] {
+        L { return "tbc_ref(L_[cident $P]_[lt $e])" }
+        I { if {[lt $e] ne ""} { return "tbc_ref(L_[cident $P]_[lt $e])" } else { return "tbc_newint(si$p)" } }
+        D { if {[lt $e] ne ""} { return "tbc_ref(L_[cident $P]_[lt $e])" } else { return "tbc_newdbl(sd$p)" } }
+        A {
+            # alias: in a fall-back stub the local has just been turned into a list, and the slot shares it (as the interpreter's stack does)
+            # copy: typed code needs a value of its own
+            switch $::boxMode {
+                alias { return "tbc_ref(l[lt $e])" }
+                copy { return "tbc_ivec_list(&av[lt $e], 0)" }
+                default { return "tbc_ivec_list(&av[lt $e], 0)" }
+            }
+        }
+        N { return "tbc_ivec_list(&sv$p, 1)" }
+        M {
+            switch $::boxMode {
+                alias { return "tbc_ref(l[lt $e])" }
+                copy { return "tbc_imap_dict(&mv[lt $e], 0)" }
+                default { return "tbc_imap_dict(&mv[lt $e], 0)" }
+            }
+        }
+        Q { return "tbc_imap_dict(&qv$p, 1)" }
+        default { return "NULL /* unknown slot $p */" }
+    }
+}
+# code making slot p (described by e) a boxed object in s$p that holds one reference
+proc boxc {P p e} {
+    if {[kd $e] eq "B"} { return "" }
+    return "s$p = [boxe $P $p $e];"
+}
+# conversion on an edge from state `from` to state `to`
+proc edgec {P from to} {
+    set ::boxMode edge
+    set c [edgec1 $P $from $to]
+    set ::boxMode copy
+    return $c
+}
+set boxMode copy
+# code boxing the typed locals that a fall-back needs: the live ones, and the vectors that slots of `slots` are views of
+proc boxLocals {key live slots} {
+    global VK
+    set P [lindex [keysplit $key] 0]
+    set vs $live
+    foreach e $slots { if {[kd $e] in {A M}} { lappend vs [lt $e] } }
+    set c ""
+    foreach v [lsort -integer -unique $vs] {
+        switch [kap $key $v] {
+            I { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newint(i$v);" } D { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newdbl(d$v);" } A { append c " l$v = tbc_ivec_list(&av$v, 1);" } M { append c " l$v = tbc_imap_dict(&mv$v, 1);" }
+        }
+    }
+    return $c
+}
+proc edgec1 {P from to} {
+    set c ""
+    for {set p 0} {$p < [llength $from]} {incr p} {
+        set f [lindex $from $p]; set t [lindex $to $p]
+        if {[kd $t] eq "B" && [kd $f] ne "B"} { append c [boxc $P $p $f] " " }
+    }
+    return $c
+}
+# bit mask (hex) of the slots that hold a boxed reference
+proc maskOf {st} {
+    set m 0
+    for {set p 0} {$p < [llength $st]} {incr p} { if {[kd [lindex $st $p]] eq "B"} { set m [expr {$m | (1 << $p)}] } }
+    return [format %x $m]
+}
+
+# ================================================================== variants
+# key = "<proc>/<sig>".  VK(key,kap): kinds of the locals (flow-insensitive: one representation per variable for the whole
+# function); VK(key,ret): kind of the result; VK(key,in,<pc>): stack state on entry to each pc reached by typed code.
+
+array set VK {}
+set variants {}
+
+proc newVariant {P sig} {
+    global VK variants PI
+    set key $P/$sig
+    if {[info exists VK($key,kap)]} { return $key }
+    lappend variants $key
+    set kap {}
+    for {set v 0} {$v < [llength $PI($P,vnames)]} {incr v} {
+        dict set kap $v [expr {$v in $PI($P,fvars) ? "F" : $v < $PI($P,nargs) ? [string index $sig $v] : "-"}]
+    }
+    set VK($key,kap) $kap; set VK($key,ret) "-"; set VK($key,calls) {}
+    return $key
+}
+
+proc kap {key v} { global VK; dict get $VK($key,kap) $v }
+
+# result of one typed step
+proc R {flow out code args} { dict create flow $flow out $out code $code stores {} ret "" calls {} stub "" {*}$args }
+
+# One instruction in typed code.  `in` is the stack state before it.  Returns a dict: flow (fall jump cond term dead),
+# out (stack state afterwards), code, tgt, stores ({var kind}...), ret (kind of a returned value), calls ({proc sig}...),
+# stub (code for the post-call stub of a direct call).  Typed code never changes any state before it knows it will not fall
+# back: the instructions that can fall back test first, then act.
+proc stepT {key pc in} {
+    global PI VK procNames translatable typedMode
+    set ::stepPC $pc
+    lassign [keysplit $key] P sig
+    lassign $PI($P,ins,$pc) op a
+    set d [llength $in]
+    set dead [R dead {} "goto D$pc;"]
+    if {!$typedMode} { return $dead }
+    set top [expr {$d - 1}]
+    # int-vector slots (A:<var> a view of a local's vector, N a fresh vector) are understood by a few instructions only
+    if {$op in {expandStart expandStkTop invokeExpanded expandDrop}} { return $dead }
+    if {$op ni {pop listIndex listIndexImm listLength lsetList storeScalar1 storeScalar4 invokeStk1 invokeStk4 verifyDict dictFirst dictExists dictIncrImm dictGet done}} {
+        set np [lindex [effect $op $a] 0]
+        for {set k [expr {$d - $np}]} {$k < $d} {incr k} { if {[kd [lindex $in $k]] in {A N M Q}} { return $dead } }
+    }
+    switch -- $op {
+        nop - startCommand { return [R fall $in ""] }
+        tryCvtToNumeric {
+            set e [lindex $in $top]
+            switch [kd $e] {
+                I - D - U { return [R fall $in ""] }
+                B { return [R fall $in "if (TBC_UNLIKELY(tbc_trycvt(interp, &s$top))) goto [fl $key $in];"] }
+                default {
+                    # a string literal: only a literal that could be a number needs the conversion
+                    set lit [lindex $PI($P,lits) [lt $e]]
+                    if {![string is double -strict $lit] && ![string is wideinteger -strict $lit]} { return [R fall $in ""] }
+                    set st [lreplace $in $top $top B]
+                    return [R fall $st "[boxc $P $top $e] if (TBC_UNLIKELY(tbc_trycvt(interp, &s$top))) goto [fl $key $st];"]
+                }
+            }
+        }
+
+        push1 - push4 {
+            set n [operand [lindex $a 0]]
+            switch [lindex $PI($P,lcls) $n] {
+                I { return [R fall [list {*}$in I:$n] "si$d = [c_int [lindex $PI($P,lits) $n]];"] }
+                D { return [R fall [list {*}$in D:$n] "sd$d = [litdbl $P $n];"] }
+                default { return [R fall [list {*}$in L:$n] ""] }
+            }
+        }
+        pop {
+            set e [lindex $in $top]
+            return [R fall [lrange $in 0 end-1] [expr {[kd $e] eq "B" ? "Tcl_DecrRefCount(s$top);" : [kd $e] eq "N" ? "free(sv$top.p);" : [kd $e] eq "Q" ? "tbc_imap_free(&qv$top);" : ""}]]
+        }
+        dup {
+            set e [lindex $in $top]
+            switch [kd $e] {
+                I { set c "si$d = si$top;" } D { set c "sd$d = sd$top;" } B { set c "s$d = s$top; Tcl_IncrRefCount(s$d);" }
+                default { set c "" }
+            }
+            return [R fall [list {*}$in $e] $c]
+        }
+        loadScalar1 - loadScalar4 {
+            set v [operand [lindex $a 0]]
+            switch [kap $key $v] {
+                F { return [R fall [list {*}$in B] "\{ Tcl_Obj *o_ = tbc_tld(loc_, $v); if (TBC_UNLIKELY(!o_)) goto D$pc; s$d = o_; Tcl_IncrRefCount(s$d); \}"] }
+                I { return [R fall [list {*}$in I] "si$d = i$v;"] }
+                D { return [R fall [list {*}$in D] "sd$d = d$v;"] }
+                - { return [R fall [list {*}$in U] ""] }
+                A { return [R fall [list {*}$in A:$v] ""] }
+                M { return [R fall [list {*}$in M:$v] ""] }
+                default {
+                    return [R fall [list {*}$in B] "if (TBC_UNLIKELY(!l$v)) goto D$pc; s$d = l$v; Tcl_IncrRefCount(s$d);"]
+                }
+            }
+        }
+        storeScalar1 - storeScalar4 {
+            set v [operand [lindex $a 0]]
+            set e [lindex $in $top]; set k [kd $e]
+            if {$k eq "U"} { return [R fall $in "" stores {}] }
+            if {[kap $key $v] eq "F"} {
+                # a variable in the frame: stored there when nothing (link target aside) stands in the way, else the boxed code does it
+                set ok [fvalue $P $top $e "tbc_tset(loc_, $v, @V@)" "tbc_tseti(loc_, $v, @I@)"]
+                if {$ok eq ""} { return $dead }
+                lassign $ok pre call rel
+                return [R fall $in "\{ $pre if (TBC_UNLIKELY(!($call))) \{$rel goto D$pc; \}$rel \}"]
+            }
+            if {$k in {A N M Q}} {
+                set kv [kap $key $v]
+                set fam [expr {$k in {A N} ? "A" : "M"}]
+                if {$kv in [list $fam -]} {
+                    if {$k in {N Q}} {
+                        if {"$fam:$v" in [lrange $in 0 [expr {$top-1}]]} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+                        set c [expr {$fam eq "A" ? "free(av$v.p); av$v = sv$top;" : "tbc_imap_free(&mv$v); mv$v = qv$top;"}]
+                        return [R fall [lreplace $in $top $top $fam:$v] $c stores [list [list $v $fam]]]
+                    } elseif {[lt $e] == $v} {
+                        return [R fall $in "" stores [list [list $v $fam]]]
+                    }
+                }
+                if {$kv ne "B"} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+            }
+            set sk [expr {$k eq "L" || $k in {A N M Q} ? "B" : $k}]
+            switch [kap $key $v] {
+                I { set c "i$v = si$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
+                D { set c "d$v = sd$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
+                default {
+                    if {$k eq "B"} {
+                        set c "Tcl_IncrRefCount(s$top); if (l$v) Tcl_DecrRefCount(l$v); l$v = s$top;"
+                    } else {
+                        set c "\{ Tcl_Obj *n_ = [boxe $P $top $e]; if (l$v) Tcl_DecrRefCount(l$v); l$v = n_; \}"
+                    }
+                }
+            }
+            return [R fall $in $c stores [list [list $v $sk]]]
+        }
+        incrScalar1Imm {
+            set v [operand [lindex $a 0]]; set imm [lindex $a 1]
+            if {[kap $key $v] eq "F"} {
+                return [R fall [list {*}$in I] "\{ int64_t w_; if (TBC_UNLIKELY(!tbc_tincr(loc_, $v, INT64_C($imm), &w_))) goto D$pc; si$d = w_; \}"]
+            }
+            if {[kap $key $v] ni {I -}} { return [R dead {} "goto D$pc;" stores [list [list $v I]]] }
+            return [R fall [list {*}$in I] "\{ int64_t t_; if (TBC_UNLIKELY(__builtin_add_overflow(i$v, INT64_C($imm), &t_))) goto D$pc; i$v = t_; si$d = t_; \}" stores [list [list $v I]]]
+        }
+        incrScalar1 {
+            set v [operand [lindex $a 0]]
+            set e [lindex $in $top]
+            if {[kap $key $v] eq "F"} {
+                if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                lassign [operandOf $P $pc $top $e] ce ge xe
+                if {$ce ne "I"} { return $dead }
+                set rel ""; if {[kd $e] eq "B"} { set rel " Tcl_DecrRefCount(s$top);" }
+                return [R fall [lreplace $in $top $top I] "\{ int64_t w_; $ge if (TBC_UNLIKELY(!tbc_tincr(loc_, $v, $xe, &w_))) goto D$pc;$rel si$top = w_; \}"]
+            }
+            if {[kap $key $v] ni {I -} || [kd $e] ni {I U B}} { return [R dead {} "goto D$pc;" stores [list [list $v I]]] }
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v I]]] }
+            # (an increment held as an object is used as a machine integer if it is one; anything else is left to the boxed code)
+            lassign [operandOf $P $pc $top $e] ce ge xe
+            set rel ""; if {[kd $e] eq "B"} { set rel " Tcl_DecrRefCount(s$top);" }
+            return [R fall [lreplace $in $top $top I] "\{ int64_t t_; $ge if (TBC_UNLIKELY(__builtin_add_overflow(i$v, $xe, &t_))) goto D$pc; i$v = t_;$rel si$top = t_; \}" stores [list [list $v I]]]
+        }
+
+        add - sub - mult - div - mod - lt - le - gt - ge - eq - neq { return [stepArith $P $pc $op $in $d] }
+        bitand - bitor - bitxor - lshift - rshift { return [stepBit $P $pc $op $in $d] }
+        uminus - bitnot - not - uplus { return [stepUnary $P $pc $op $in $d] }
+
+        jump1 - jump4 { return [R jump $in "" tgt [operand [lindex $a 0]]] }
+        jumpTrue1 - jumpTrue4 - jumpFalse1 - jumpFalse4 {
+            set tgt [operand [lindex $a 0]]
+            set e [lindex $in $top]; set neg [expr {[string match jumpFalse* $op] ? "!" : ""}]
+            set out [lrange $in 0 end-1]
+            switch [kd $e] {
+                I { set c "if (${neg}(si$top != 0)) \{ @TAKEN@ goto T$tgt; \}" }
+                D { set c "if (${neg}(sd$top != 0.0)) \{ @TAKEN@ goto T$tgt; \}" }
+                U { set c "" }
+                B {
+                    set c "\{ int t_; if (TBC_UNLIKELY(tbc_truth(interp, s$top, &t_) != TCL_OK)) goto [fl $key $in]; Tcl_DecrRefCount(s$top); if (${neg}t_) \{ @TAKEN@ goto T$tgt; \} \}"
+                }
+                default { return $dead }
+            }
+            return [R cond $out $c tgt $tgt]
+        }
+        done {
+            set e [lindex $in $top]
+            set rel ""
+            for {set k 0} {$k < $top} {incr k} { if {[kd [lindex $in $k]] eq "B"} { append rel " Tcl_DecrRefCount(s$k);" } }
+            if {[kd $e] in {A M N Q}} {
+                # returning a vector or map: it becomes a list or dict (a copy: the local is released on the way out)
+                return [R term {} "rv = [boxe $P $top $e];$rel rc = TCL_OK; goto ret;" ret B]
+            }
+            set k [kd $e]; set rk $VK($key,ret)
+            if {$k eq "U"} { return [R term {} "" ret U] }
+            set sk [expr {$k eq "L" ? "B" : $k}]
+            if {$rk in {- U}} { set rk $sk }
+            if {$rk eq "B"} {
+                if {$k eq "B"} { set c "rv = s$top;" } else { set c "[boxc $P $top $e] rv = s$top;" }
+            } else {
+                set c "rv = [svar $sk $top];"
+                if {$sk ne $rk} { set c "[boxc $P $top $e] rv = s$top;" }
+            }
+            return [R term {} "$c$rel rc = TCL_OK; goto ret;" ret $sk]
+        }
+
+        invokeStk1 - invokeStk4 { return [stepInvoke $key $pc $in $d [lindex $a 0]] }
+
+        strcat {
+            set n [lindex $a 0]; set q [expr {$d - $n}]
+            set parts ""; set rel ""
+            for {set k $q} {$k < $d} {incr k} {
+                set e [lindex $in $k]
+                switch [kd $e] {
+                    I { if {[lt $e] ne ""} { append parts " tbc_cat_bytes(&c_, [cstring [lindex $PI($P,lits) [lt $e]]], [cbytes [lindex $PI($P,lits) [lt $e]]]);" } else { append parts " tbc_cat_i(&c_, si$k);" } }
+                    L { append parts " tbc_cat_bytes(&c_, [cstring [lindex $PI($P,lits) [lt $e]]], [cbytes [lindex $PI($P,lits) [lt $e]]]);" }
+                    B { append parts " tbc_cat_o(&c_, s$k);"; append rel " Tcl_DecrRefCount(s$k);" }
+                    D { append parts " \{ Tcl_Obj *t_ = tbc_newdbl(sd$k); tbc_cat_o(&c_, t_); Tcl_DecrRefCount(t_); \}" }
+                    default { return [R fall [list {*}[lrange $in 0 $q-1] U] ""] }
+                }
+            }
+            return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] B] "\{ tbc_cat_t c_; tbc_cat_init(&c_);$parts$rel s$q = tbc_cat_done(&c_); \}"]
+        }
+        strlen {
+            set e [lindex $in $top]
+            set pre [boxc $P $top $e]
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+            return [R fall [lreplace $in $top $top I] "$pre si$top = Tcl_GetCharLength(s$top); Tcl_DecrRefCount(s$top);"]
+        }
+        reverse { return [stepReverse $P $in $d [lindex $a 0]] }
+
+        appendScalar1 - appendScalar4 {
+            set v [operand [lindex $a 0]]
+            set e [lindex $in $top]; set k [kd $e]
+            if {[kap $key $v] ni {B -}} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+            switch $k {
+                I { if {[lt $e] ne ""} { set c "tbc_append_bytes(&l$v, [cstring [lindex $PI($P,lits) [lt $e]]], [cbytes [lindex $PI($P,lits) [lt $e]]]);" } else { set c "tbc_append_i(&l$v, si$top);" } }
+                L { set c "tbc_append_bytes(&l$v, [cstring [lindex $PI($P,lits) [lt $e]]], [cbytes [lindex $PI($P,lits) [lt $e]]]);" }
+                B { set c "(void) tbc_append(&l$v, s$top); Tcl_DecrRefCount(s$top);" }
+                D { set c "\{ Tcl_Obj *t_ = tbc_newdbl(sd$top); (void) tbc_append(&l$v, t_); Tcl_DecrRefCount(t_); \}" }
+                default { return [R fall [lreplace $in $top $top U] "" stores [list [list $v B]]] }
+            }
+            return [R fall [lreplace $in $top $top B] "$c s$top = l$v; Tcl_IncrRefCount(s$top);" stores [list [list $v B]]]
+        }
+        listIndex {
+            set pl [expr {$d-2}]; set pi [expr {$d-1}]
+            set el [lindex $in $pl]; set ei [lindex $in $pi]
+            if {[kd $el] eq "U" || [kd $ei] eq "U"} { return [R fall [list {*}[lrange $in 0 $pl-1] U] ""] }
+            if {[kd $el] eq "A" && [kd $ei] eq "I"} {
+                set av [lt $el]
+                return [R fall [list {*}[lrange $in 0 [expr {$pl-1}]] I] "\{ int64_t i_ = si$pi; if (TBC_UNLIKELY((uint64_t) i_ >= (uint64_t) av$av.n)) goto D$pc; si$pl = av$av.p\[i_\]; \}"]
+            }
+            if {[kd $el] ne "B"} { return $dead }
+            set fl [fl $key $in]
+            if {[kd $ei] eq "I"} {
+                set c "\{ Tcl_Obj *r_ = tbc_lindex_i(interp, s$pl, si$pi); if (!r_) goto $fl; Tcl_DecrRefCount(s$pl); s$pl = r_; \}"
+                return [R fall [list {*}[lrange $in 0 [expr {$pl-1}]] B] $c]
+            }
+            set st [lreplace $in $pi $pi B]
+            set c "[boxc $P $pi $ei] \{ Tcl_Obj *r_ = tbc_lindex(interp, s$pl, s$pi); if (!r_) goto [fl $key $st]; Tcl_DecrRefCount(s$pi); Tcl_DecrRefCount(s$pl); s$pl = r_; \}"
+            return [R fall [list {*}[lrange $in 0 [expr {$pl-1}]] B] $c]
+        }
+        listIndexImm {
+            set pl $top; set el [lindex $in $pl]
+            regexp {^\.(-?\d+|end)(?:-(\d+))?$} [lindex $a 0] -> ix kk
+            if {[string match -* $ix]} { return $dead }
+            if {$ix eq "end"} { set idx "(int64_t) av_n_ - 1 - [expr {$kk eq "" ? 0 : $kk}]" } else { set idx $ix }
+            if {[kd $el] eq "U"} { return [R fall [lreplace $in $pl $pl U] ""] }
+            if {[kd $el] eq "A"} {
+                set av [lt $el]
+                set idx [string map [list av_n_ av$av.n] $idx]
+                return [R fall [lreplace $in $pl $pl I] "\{ int64_t i_ = $idx; if (TBC_UNLIKELY((uint64_t) i_ >= (uint64_t) av$av.n)) goto D$pc; si$pl = av$av.p\[i_\]; \}"]
+            }
+            if {[kd $el] ne "B"} { return $dead }
+            set call [expr {$ix eq "end" ? "tbc_lindex_end(interp, s$pl, [expr {$kk eq "" ? 0 : $kk}])" : "tbc_lindex_i(interp, s$pl, $ix)"}]
+            return [R fall [lreplace $in $pl $pl B] "\{ Tcl_Obj *r_ = $call; if (!r_) goto [fl $key $in]; Tcl_DecrRefCount(s$pl); s$pl = r_; \}"]
+        }
+        listLength {
+            set el [lindex $in $top]
+            if {[kd $el] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+            if {[kd $el] eq "A"} { return [R fall [lreplace $in $top $top I] "si$top = av[lt $el].n;"] }
+            if {[kd $el] ne "B"} { return $dead }
+            return [R fall [lreplace $in $top $top I] "\{ int n_; if (Tcl_ListObjLength(interp, s$top, &n_) != TCL_OK) goto [fl $key $in]; Tcl_DecrRefCount(s$top); si$top = n_; \}"]
+        }
+        list {
+            set n [lindex $a 0]; set q [expr {$d - $n}]
+            if {"U" in [lrange $in $q end]} { return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] U] ""] }
+            set pre ""; set slots {}; set rel ""
+            for {set k $q} {$k < $d} {incr k} { append pre [boxc $P $k [lindex $in $k]] " "; lappend slots s$k; append rel " Tcl_DecrRefCount(s$k);" }
+            return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] B] "$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; Tcl_Obj *r_ = Tcl_NewListObj($n, ov_); Tcl_IncrRefCount(r_);$rel s$q = r_; \}"]
+        }
+        lsetList {
+            # stack: index, value, list
+            set pi [expr {$d-3}]; set pv [expr {$d-2}]; set pl [expr {$d-1}]
+            set ei [lindex $in $pi]; set ev [lindex $in $pv]; set el [lindex $in $pl]
+            if {"U" in [list [kd $ei] [kd $ev] [kd $el]]} { return [R fall [list {*}[lrange $in 0 $pi-1] U] ""] }
+            if {[kd $el] eq "A" && [kd $ei] eq "I" && [kd $ev] eq "I"} {
+                set av [lt $el]
+                # the vector is changed in place: no other view of it may be on the stack
+                if {"A:$av" in [lrange $in 0 [expr {$pi-1}]]} { return $dead }
+                return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] $el] "\{ int64_t i_ = si$pi; if (TBC_UNLIKELY((uint64_t) i_ >= (uint64_t) av$av.n)) goto D$pc; av$av.p\[i_\] = si$pv; \}"]
+            }
+            if {[kd $el] ne "B"} { return $dead }
+            set st [list {*}[lrange $in 0 [expr {$pi-1}]] [expr {[kd $ei] eq "I" ? $ei : "B"}] B B]
+            set pre "[boxc $P $pv $ev]"
+            if {[kd $ei] ne "I"} { append pre " [boxc $P $pi $ei]" }
+            set fl [fl $key [list {*}[lrange $in 0 [expr {$pi-1}]] [expr {[kd $ei] eq "I" ? $ei : "B"}] B B]]
+            if {[kd $ei] eq "I"} {
+                set call "tbc_lset_i(interp, lst_, si$pi, s$pv)"; set reli ""
+            } else {
+                set call "TclLsetList(interp, lst_, s$pi, s$pv)"; set reli " Tcl_DecrRefCount(s$pi);"
+            }
+            set c "$pre \{ Tcl_Obj *lst_ = s$pl, *r_; Tcl_DecrRefCount(lst_); r_ = $call; if (!r_) \{ Tcl_IncrRefCount(lst_); goto $fl; \} Tcl_DecrRefCount(s$pv);$reli s$pi = r_; \}"
+            return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] B] $c]
+        }
+        dictGet {
+            if {[lindex $a 0] != 1} { return $dead }
+            set pd [expr {$d-2}]; set pk [expr {$d-1}]
+            set ed [lindex $in $pd]; set ek [lindex $in $pk]
+            if {"U" in [list [kd $ed] [kd $ek]]} { return [R fall [list {*}[lrange $in 0 $pd-1] U] ""] }
+            if {[kd $ed] eq "M"} {
+                set kb [keyArgs $P $pk $ek]
+                if {$kb eq ""} { return $dead }
+                lassign $kb kpre kptr klen krel kobj
+                return [R fall [list {*}[lrange $in 0 [expr {$pd-1}]] I] "\{ int64_t r_; $kpre if (TBC_UNLIKELY(!tbc_imap_get(&mv[lt $ed], $kptr, $klen, &r_))) goto D$pc;$krel si$pd = r_; \}"]
+            }
+            if {[kd $ed] ne "B" || [kd $ek] in {A N M Q}} { return $dead }
+            set st [list {*}[lrange $in 0 [expr {$pd-1}]] B B]
+            set pre [boxc $P $pk $ek]
+            return [R fall [list {*}[lrange $in 0 [expr {$pd-1}]] B] "$pre \{ Tcl_Obj *v_ = NULL; if (Tcl_DictObjGet(interp, s$pd, s$pk, &v_) != TCL_OK) goto [fl $key $st]; if (!v_) \{ tbc_dict_nokey(interp, s$pk); goto [fl $key $st]; \} Tcl_IncrRefCount(v_); Tcl_DecrRefCount(s$pk); Tcl_DecrRefCount(s$pd); s$pd = v_; \}"]
+        }
+        lappendScalar1 - lappendScalar4 {
+            set v [operand [lindex $a 0]]
+            set e [lindex $in $top]
+            if {[kd $e] in {A N M Q}} { return $dead }
+            if {[kap $key $v] ni {B -}} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v B]]] }
+            set st [lreplace $in $top $top B]
+            return [R fall $st "[boxc $P $top $e] if (tbc_lappend(interp, &l$v, s$top)) goto [fl $key $st]; Tcl_DecrRefCount(s$top); s$top = l$v; Tcl_IncrRefCount(s$top);" stores [list [list $v B]]]
+        }
+        dictExists {
+            if {[lindex $a 0] != 1} { return $dead }
+            set pd [expr {$d-2}]; set pk [expr {$d-1}]
+            set ed [lindex $in $pd]; set ek [lindex $in $pk]
+            if {"U" in [list [kd $ed] [kd $ek]]} { return [R fall [list {*}[lrange $in 0 $pd-1] U] ""] }
+            if {[kd $ed] eq "M"} {
+                set kb [keyArgs $P $pk $ek]
+                if {$kb eq ""} { return $dead }
+                lassign $kb kpre kptr klen krel kobj
+                return [R fall [list {*}[lrange $in 0 [expr {$pd-1}]] I] "\{ $kpre si$pd = tbc_imap_has(&mv[lt $ed], $kptr, $klen);$krel \}"]
+            }
+            if {[kd $ed] ne "B" || [kd $ek] in {A N M Q}} { return $dead }
+            set pre [boxc $P $pk $ek]
+            return [R fall [list {*}[lrange $in 0 [expr {$pd-1}]] I] "$pre si$pd = tbc_dict_exists(s$pd, s$pk); Tcl_DecrRefCount(s$pk); Tcl_DecrRefCount(s$pd);"]
+        }
+        dictIncrImm {
+            set imm [lindex $a 0]; set v [operand [lindex $a 1]]
+            set e [lindex $in $top]
+            if {[kd $e] in {A N M Q}} { return $dead }
+            if {[kap $key $v] eq "M"} {
+                if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                set kb [keyArgs $P $top $e]
+                if {$kb eq ""} { return $dead }
+                lassign $kb kpre kptr klen krel kobj
+                return [R fall [lreplace $in $top $top M:$v] "\{ $kpre if (TBC_UNLIKELY(tbc_imap_incr(&mv$v, $kptr, $klen, $kobj, INT64_C($imm)))) goto D$pc;$krel \}"]
+            }
+            if {[kap $key $v] eq "-"} { return [R fall [lreplace $in $top $top U] ""] }
+            if {[kap $key $v] ne "B"} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+            if {[kd $e] eq "U"} { return [R fall $in "" stores [list [list $v B]]] }
+            set st [lreplace $in $top $top B]
+            set c "[boxc $P $top $e] if (tbc_dict_incr2(interp, &l$v, s$top, INT64_C($imm))) goto [fl $key $st]; Tcl_DecrRefCount(s$top); s$top = l$v; Tcl_IncrRefCount(s$top);"
+            return [R fall $st $c stores [list [list $v B]]]
+        }
+        verifyDict {
+            set e [lindex $in $top]
+            if {[kd $e] eq "U"} { return [R fall [lrange $in 0 end-1] ""] }
+            # `dict create` with no arguments is the literal empty dict, duplicated and checked: the copy that is kept becomes a fresh map
+            if {[kd $e] eq "L" && $top >= 1 && [lindex $in [expr {$top-1}]] eq $e && [lindex $PI($P,lits) [lt $e]] eq ""} {
+                set lo [expr {$top-1}]
+                return [R fall [list {*}[lrange $in 0 [expr {$lo-1}]] Q] "if (TBC_UNLIKELY(!tbc_imap_init(&qv$lo))) goto D$pc;"]
+            }
+            set st [lreplace $in $top $top B]
+            set c "[boxc $P $top $e] \{ int n_; if (Tcl_DictObjSize(interp, s$top, &n_) != TCL_OK) goto [fl $key $st]; Tcl_DecrRefCount(s$top); \}"
+            return [R fall [lrange $in 0 end-1] $c]
+        }
+        dictFirst - dictNext - unsetScalar { return $dead }
+        loadArray1 - loadArray4 {
+            set v [operand [lindex $a 0]]
+            if {[kap $key $v] ne "F"} { return $dead }
+            set e [lindex $in $top]
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+            set k [akey $P $top $e]
+            if {$k eq ""} { return $dead }
+            lassign $k pre kx fake rel
+            return [R fall [lreplace $in $top $top B] "\{ $pre Tcl_Obj *o_ = tbc_tald(loc_, $v, $kx); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_);$rel s$top = o_; \}"]
+        }
+        storeArray1 - storeArray4 {
+            set v [operand [lindex $a 0]]
+            if {[kap $key $v] ne "F"} { return $dead }
+            set pk [expr {$d-2}]; set pv [expr {$d-1}]
+            set ek [lindex $in $pk]; set ev [lindex $in $pv]
+            set base [lrange $in 0 [expr {$pk-1}]]
+            if {"U" in [list [kd $ek] [kd $ev]]} { return [R fall [list {*}$base U] ""] }
+            set k [akey $P $pk $ek]
+            if {$k eq ""} { return $dead }
+            lassign $k pre kx fake rel
+            set ok [fvalue $P $pv $ev "tbc_tast(interp, loc_, $v, $kx, $fake, @V@)" "tbc_tasti(interp, loc_, $v, $kx, $fake, @I@)"]
+            if {$ok eq ""} { return $dead }
+            lassign $ok vpre call vrel
+            switch [kd $ev] {
+                I { set mv "si$pk = si$pv;" } D { set mv "sd$pk = sd$pv;" } B { set mv "s$pk = s$pv;" } default { set mv "" }
+            }
+            return [R fall [list {*}$base $ev] "\{ $pre $vpre if (TBC_UNLIKELY(!($call))) \{$vrel goto D$pc; \}$vrel$rel $mv \}"]
+        }
+        incrArray1Imm {
+            set v [operand [lindex $a 0]]; set imm [lindex $a 1]
+            if {[kap $key $v] ne "F"} { return $dead }
+            set e [lindex $in $top]
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+            set k [akey $P $top $e]
+            if {$k eq ""} { return $dead }
+            lassign $k pre kx fake rel
+            return [R fall [lreplace $in $top $top I] "\{ $pre int64_t w_; if (TBC_UNLIKELY(!tbc_tainc(interp, loc_, $v, $kx, $fake, INT64_C($imm), &w_))) goto D$pc;$rel si$top = w_; \}"]
+        }
+        incrArray1 {
+            set v [operand [lindex $a 0]]
+            if {[kap $key $v] ne "F"} { return $dead }
+            set pk [expr {$d-2}]; set pi [expr {$d-1}]
+            set ek [lindex $in $pk]; set ei [lindex $in $pi]
+            set base [lrange $in 0 [expr {$pk-1}]]
+            if {"U" in [list [kd $ek] [kd $ei]]} { return [R fall [list {*}$base U] ""] }
+            set k [akey $P $pk $ek]
+            lassign [operandOf $P $pc $pi $ei] ci gi xi
+            if {$k eq "" || $ci ne "I"} { return $dead }
+            lassign $k pre kx fake rel
+            set irel ""; if {[kd $ei] eq "B"} { set irel " Tcl_DecrRefCount(s$pi);" }
+            return [R fall [list {*}$base I] "\{ $pre int64_t w_; $gi if (TBC_UNLIKELY(!tbc_tainc(interp, loc_, $v, $kx, $fake, $xi, &w_))) goto D$pc;$irel$rel si$pk = w_; \}"]
+        }
+        existArray {
+            set v [operand [lindex $a 0]]
+            if {[kap $key $v] ne "F"} { return $dead }
+            set e [lindex $in $top]
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+            set k [akey $P $top $e]
+            if {$k eq ""} { return $dead }
+            lassign $k pre kx fake rel
+            return [R fall [lreplace $in $top $top I] "\{ $pre int r_ = tbc_texist(loc_, $v, $kx); if (TBC_UNLIKELY(r_ < 0)) goto D$pc;$rel si$top = r_; \}"]
+        }
+        upvar - nsupvar - variable {
+            set v [operand [lindex $a 0]]
+            if {[kap $key $v] ne "F"} { return $dead }
+            set pn [expr {$d-1}]; set en [lindex $in $pn]
+            if {[kd $en] eq "U"} { return [R fall [lrange $in 0 end-1] ""] }
+            if {[kd $en] ni {B L I}} { return $dead }
+            set st $in
+            set pre ""
+            # the name, and for upvar and namespace upvar the level (or namespace) beneath it, as objects; the level stays on the stack as the result
+            set args {}
+            if {$op eq "variable"} {
+                append pre [boxc $P $pn $en]; lset st $pn B
+                set call "tbc_t_variable(interp, loc_, $v, s$pn)"
+                set rel " Tcl_DecrRefCount(s$pn);"
+            } else {
+                set pl [expr {$d-2}]; set el [lindex $in $pl]
+                if {[kd $el] eq "U"} { return [R fall [lrange $in 0 end-1] ""] }
+                if {[kd $el] ni {B L I}} { return $dead }
+                append pre [boxc $P $pn $en]; lset st $pn B
+                # the level: a literal is used as it is; a number held unboxed is boxed for the call and released after it
+                if {[kd $el] eq "B" || [lt $el] ne ""} {
+                    set lx [expr {[kd $el] eq "B" ? "s$pl" : "L_[cident $P]_[lt $el]"}]
+                    set lpre ""; set lrel ""
+                } else {
+                    set lx "lv_"; set lpre "Tcl_Obj *lv_ = tbc_newint(si$pl);"; set lrel " Tcl_DecrRefCount(lv_);"
+                }
+                set fn [expr {$op eq "upvar" ? "tbc_t_upvar" : "tbc_t_nsupvar"}]
+                set call "${fn}(interp, loc_, $v, $lx, s$pn)"
+                set rel " Tcl_DecrRefCount(s$pn);"
+            }
+            set code "\{ $pre"
+            if {$op eq "variable"} {
+                append code " if (TBC_UNLIKELY($call)) goto [fl $key $st];$rel \}"
+                return [R fall [lrange $in 0 end-1] $code]
+            }
+            append code " $lpre int r_ = $call;$lrel if (TBC_UNLIKELY(r_)) goto [fl $key $st];$rel \}"
+            return [R fall [lrange $in 0 end-1] $code]
+        }
+        default { return $dead }
+    }
+}
+
+# the element name in slot p (kind e) for the array fast paths: {declarations expression fake release}, or "" when typed code does not take the kind
+proc akey {P p e} {
+    switch [kd $e] {
+        I {
+            if {[lt $e] ne ""} { return [list "" L_[cident $P]_[lt $e] 0 ""] }
+            return [list "tbc_ikey_t k_;" "tbc_ikey(&k_, si$p)" 1 ""]
+        }
+        L { return [list "" L_[cident $P]_[lt $e] 0 ""] }
+        B { return [list "" s$p 0 " Tcl_DecrRefCount(s$p);"] }
+    }
+    return ""
+}
+# the value of slot p (kind e) as an argument of a fast path that stores it: {setup call release} or "".  The call templates (tmplObj with @V@ for an
+# object, tmplInt with @I@ for a machine integer); `call` is a C expression that is true when the store was done.
+proc fvalue {P p e tmplObj tmplInt} {
+    switch [kd $e] {
+        I {
+            if {[lt $e] ne ""} { return [list "" [string map [list @V@ L_[cident $P]_[lt $e]] $tmplObj] ""] }
+            return [list "" [string map [list @I@ si$p] $tmplInt] ""]
+        }
+        D {
+            if {[lt $e] ne ""} { return [list "" [string map [list @V@ L_[cident $P]_[lt $e]] $tmplObj] ""] }
+            return [list "Tcl_Obj *dv_ = tbc_newdbl(sd$p); int dok_ = [string map [list @V@ dv_] $tmplObj];" dok_ " Tcl_DecrRefCount(dv_);"]
+        }
+        L { return [list "" [string map [list @V@ L_[cident $P]_[lt $e]] $tmplObj] ""] }
+        B { return [list "" [string map [list @V@ s$p] $tmplObj] ""] }
+    }
+    return ""
+}
+
+# a dict key held in slot p (described by e) as bytes: {setup pointer length release key-object}, or "" if the kind is not handled
+proc keyArgs {P p e} {
+    global PI
+    switch [kd $e] {
+        B { return [list "int kl_; const char *kp_ = Tcl_GetStringFromObj(s$p, &kl_);" kp_ kl_ " Tcl_DecrRefCount(s$p);" s$p] }
+        L - I {
+            if {[lt $e] ne ""} {
+                set lit [lindex $PI($P,lits) [lt $e]]
+                return [list "" [cstring $lit] [cbytes $lit] "" NULL]
+            }
+            return [list "char kb_\[24\]; int kl_ = tbc_fmt_i64(kb_, si$p); const char *kp_ = kb_;" kp_ kl_ "" NULL]
+        }
+    }
+    return ""
+}
+
+# failure label (releasing the boxed slots of state `st`)
+proc fl {key st} {
+    global FM FRM PI
+    lassign [keysplit $key] P sig
+    set m [maskOf $st]
+    if {[llength $PI($P,fvars)] && [info exists ::stepPC]} {
+        # a proc with variables in the frame can have changed state before this point, so it cannot start the whole call over in the boxed code: it
+        # goes on there at this instruction (the boxed code then repeats the failing step, which raises the error with its error info)
+        set pc $::stepPC
+        set FRM($key,$pc,$m) $st
+        return FR${pc}_$m
+    }
+    set FM($key,$m) 1
+    return F$m
+}
+# the failure chain that starts the whole call over (used where nothing can have changed yet)
+proc flAll {key st} {
+    global FM
+    set m [maskOf $st]
+    set FM($key,$m) 1
+    return F$m
+}
+
+# arithmetic and comparison
+proc operandOf {P pc p e} {
+    switch [kd $e] {
+        I { return [list I "" si$p] }
+        D { return [list D "" sd$p] }
+        B { return [list I "if (TBC_UNLIKELY(!tbc_isint(s$p))) goto D$pc;" "tbc_wide(s$p)"] }
+        U { return [list U "" ""] }
+        default { return [list X "" ""] }
+    }
+}
+proc stepArith {P pc op in d} {
+    set pa [expr {$d-2}]; set pb [expr {$d-1}]
+    set ea [lindex $in $pa]; set eb [lindex $in $pb]
+    lassign [operandOf $P $pc $pa $ea] ca ga xa
+    lassign [operandOf $P $pc $pb $eb] cb gb xb
+    set base [lrange $in 0 [expr {$pa-1}]]
+    if {$ca eq "X" || $cb eq "X"} { return [R dead {} "goto D$pc;"] }
+    if {$ca eq "U" || $cb eq "U"} { return [R fall [list {*}$base U] ""] }
+    set rel ""
+    if {[kd $ea] eq "B"} { append rel " Tcl_DecrRefCount(s$pa);" }
+    if {[kd $eb] eq "B"} { append rel " Tcl_DecrRefCount(s$pb);" }
+    set guards "$ga $gb"
+    set cmp {lt < le <= gt > ge >= eq == neq !=}
+    if {$ca eq "I" && $cb eq "I"} {
+        switch $op {
+            add - sub - mult {
+                set bi [dict get {add __builtin_add_overflow sub __builtin_sub_overflow mult tbc_mul_ovf} $op]
+                set c "\{ int64_t r_; $guards if (TBC_UNLIKELY(${bi}($xa, $xb, &r_))) goto D$pc;$rel si$pa = r_; \}"
+                return [R fall [list {*}$base I] $c]
+            }
+            div {
+                set c "\{ int64_t a_, b_, r_; $guards a_ = $xa; b_ = $xb; if (TBC_UNLIKELY(b_ == 0 || (a_ == INT64_MIN && b_ == -1))) goto D$pc; r_ = a_ / b_; if (a_ % b_ != 0 && ((a_ < 0) != (b_ < 0))) r_--;$rel si$pa = r_; \}"
+                return [R fall [list {*}$base I] $c]
+            }
+            mod {
+                set c "\{ int64_t a_, b_, r_; $guards a_ = $xa; b_ = $xb; if (TBC_UNLIKELY(b_ == 0)) goto D$pc; if (b_ == -1) r_ = 0; else \{ r_ = a_ % b_; if (r_ != 0 && ((r_ < 0) != (b_ < 0))) r_ += b_; \}$rel si$pa = r_; \}"
+                return [R fall [list {*}$base I] $c]
+            }
+            default {
+                set c "\{ int64_t r_; $guards r_ = ($xa [dict get $cmp $op] $xb);$rel si$pa = r_; \}"
+                return [R fall [list {*}$base I] $c]
+            }
+        }
+    }
+    # at least one double
+    if {$op eq "mod"} { return [R dead {} "goto D$pc;"] }
+    set conv ""
+    set xda $xa; set xdb $xb
+    if {$ca eq "I"} {
+        set xda "(double) ($xa)"
+        if {$op in {lt le gt ge eq neq}} { append conv " if (TBC_UNLIKELY(($xa) > TBC_2P53 || ($xa) < -TBC_2P53)) goto D$pc;" }
+    }
+    if {$cb eq "I"} {
+        set xdb "(double) ($xb)"
+        if {$op in {lt le gt ge eq neq}} { append conv " if (TBC_UNLIKELY(($xb) > TBC_2P53 || ($xb) < -TBC_2P53)) goto D$pc;" }
+    }
+    switch $op {
+        add - sub - mult {
+            set sym [dict get {add + sub - mult *} $op]
+            set c "\{ double r_; $guards$conv r_ = $xda $sym $xdb; if (TBC_UNLIKELY(r_ != r_)) goto D$pc;$rel sd$pa = r_; \}"
+            return [R fall [list {*}$base D] $c]
+        }
+        div {
+            set c "\{ double r_, b_; $guards$conv b_ = $xdb; if (TBC_UNLIKELY(b_ == 0.0)) goto D$pc; r_ = $xda / b_; if (TBC_UNLIKELY(r_ != r_)) goto D$pc;$rel sd$pa = r_; \}"
+            return [R fall [list {*}$base D] $c]
+        }
+        default {
+            set c "\{ int64_t r_; $guards$conv r_ = ($xda [dict get $cmp $op] $xdb);$rel si$pa = r_; \}"
+            return [R fall [list {*}$base I] $c]
+        }
+    }
+}
+
+# &, |, ^, << and >> on machine integers (anything else leaves typed mode: the boxed code raises the interpreter's errors, or goes to bignums)
+proc stepBit {P pc op in d} {
+    set pa [expr {$d-2}]; set pb [expr {$d-1}]
+    set ea [lindex $in $pa]; set eb [lindex $in $pb]
+    lassign [operandOf $P $pc $pa $ea] ca ga xa
+    lassign [operandOf $P $pc $pb $eb] cb gb xb
+    set base [lrange $in 0 [expr {$pa-1}]]
+    if {$ca eq "X" || $cb eq "X"} { return [R dead {} "goto D$pc;"] }
+    if {$ca eq "U" || $cb eq "U"} { return [R fall [list {*}$base U] ""] }
+    if {$ca ne "I" || $cb ne "I"} { return [R dead {} "goto D$pc;"] }
+    set rel ""
+    if {[kd $ea] eq "B"} { append rel " Tcl_DecrRefCount(s$pa);" }
+    if {[kd $eb] eq "B"} { append rel " Tcl_DecrRefCount(s$pb);" }
+    set guards "$ga $gb"
+    switch $op {
+        bitand { set c "\{ int64_t r_; $guards r_ = ($xa & $xb);$rel si$pa = r_; \}" }
+        bitor { set c "\{ int64_t r_; $guards r_ = ($xa | $xb);$rel si$pa = r_; \}" }
+        bitxor { set c "\{ int64_t r_; $guards r_ = ($xa ^ $xb);$rel si$pa = r_; \}" }
+        lshift { set c "\{ int64_t a_, b_, r_; $guards a_ = $xa; b_ = $xb; if (TBC_UNLIKELY(b_ < 0 || b_ > 62)) goto D$pc; r_ = (int64_t) ((uint64_t) a_ << b_); if (TBC_UNLIKELY((r_ >> b_) != a_)) goto D$pc;$rel si$pa = r_; \}" }
+        rshift { set c "\{ int64_t a_, b_, r_; $guards a_ = $xa; b_ = $xb; if (TBC_UNLIKELY(b_ < 0)) goto D$pc; r_ = b_ >= 64 ? (a_ < 0 ? -1 : 0) : (a_ >> b_);$rel si$pa = r_; \}" }
+    }
+    return [R fall [list {*}$base I] $c]
+}
+proc stepUnary {P pc op in d} {
+    set p [expr {$d-1}]; set e [lindex $in $p]
+    lassign [operandOf $P $pc $p $e] ca ga xa
+    set base [lrange $in 0 [expr {$p-1}]]
+    if {$ca eq "X"} { return [R dead {} "goto D$pc;"] }
+    if {$ca eq "U"} { return [R fall [list {*}$base U] ""] }
+    set rel ""; if {[kd $e] eq "B"} { set rel " Tcl_DecrRefCount(s$p);" }
+    if {$ca eq "I"} {
+        switch $op {
+            uminus { return [R fall [list {*}$base I] "\{ int64_t r_; $ga if (TBC_UNLIKELY($xa == INT64_MIN)) goto D$pc; r_ = -($xa);$rel si$p = r_; \}"] }
+            bitnot { return [R fall [list {*}$base I] "\{ int64_t r_; $ga r_ = ~($xa);$rel si$p = r_; \}"] }
+            not { return [R fall [list {*}$base I] "\{ int64_t r_; $ga r_ = ($xa == 0);$rel si$p = r_; \}"] }
+            uplus { return [R fall [list {*}$base I] "\{ int64_t r_; $ga r_ = $xa;$rel si$p = r_; \}"] }
+        }
+    }
+    # a double
+    switch $op {
+        uminus { return [R fall [list {*}$base D] "sd$p = -sd$p;"] }
+        not { return [R fall [list {*}$base I] "\{ int64_t r_; if (TBC_UNLIKELY(sd$p != sd$p)) goto D$pc; r_ = (sd$p == 0.0); si$p = r_; \}"] }
+        default { return [R dead {} "goto D$pc;"] }
+    }
+}
+
+proc stepReverse {P in d n} {
+    set q [expr {$d - $n}]
+    set old [lrange $in $q end]
+    set new [lreverse $old]
+    set c ""
+    # copy the affected slots to temporaries of the right type, then store them in their new places
+    for {set j 0} {$j < $n} {incr j} {
+        set e [lindex $old $j]; set k [kd $e]; set p [expr {$q + $j}]
+        switch $k { I { append c "int64_t ti$j = si$p; " } D { append c "double td$j = sd$p; " } B { append c "Tcl_Obj *tb$j = s$p; " } }
+    }
+    for {set j 0} {$j < $n} {incr j} {
+        set src [expr {$n - 1 - $j}]; set e [lindex $old $src]; set k [kd $e]; set p [expr {$q + $j}]
+        switch $k { I { append c "si$p = ti$src; " } D { append c "sd$p = td$src; " } B { append c "s$p = tb$src; " } }
+    }
+    return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] {*}$new] "\{ $c\}"]
+}
+
+# code that leaves typed mode: write the state (locals into the frame, the stack into an array) and continue in G_<proc> at gpc.  `pre` runs
+# first.  A function that was called directly has no frame: it reports tbc_st 3 and the caller makes the call the ordinary way.
+proc enterG {key gpc slots pre flush} {
+    lassign [keysplit $key] P sig
+    set c "if (TBC_UNLIKELY(!inframe)) \{ tbc_st = 3; rc = TCL_OK; goto [flAll $key $slots]; \} $pre"
+    append c [boxLocals $key $flush $slots]
+    set vs $flush
+    foreach e $slots { if {[kd $e] in {A M}} { lappend vs [lt $e] } }
+    foreach v [lsort -integer -unique $vs] { append c " if (l$v) tbc_flushr(interp, loc_, $v, l$v);" }
+    set ::boxMode alias
+    set n [llength $slots]
+    for {set p 0} {$p < $n} {incr p} { append c " [boxc $P $p [lindex $slots $p]]" }
+    set ::boxMode copy
+    set arr {}; for {set p 0} {$p < $n} {incr p} { lappend arr s$p }
+    append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] }; int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
+    append c " if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} goto ret; \}"
+    return $c
+}
+
+proc stepInvoke {key pc in d n} {
+    global PI VK translatable pureProcs
+    lassign [keysplit $key] P sig
+    set dead [R dead {} "goto D$pc;"]
+    set q [expr {$d - $n}]
+    set cmdE [lindex $in $q]
+    set below [lrange $in 0 [expr {$q-1}]]
+    set args [lrange $in [expr {$q+1}] end]
+    # direct call to a translated proc?
+    if {[kd $cmdE] eq "L"} {
+        set nm0 [lindex $PI($P,lits) [lt $cmdE]]
+        set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+        set nm [resolveProc $ns $nm0]
+        if {$nm ni $pureProcs} { set nm "" }
+        set isLrepeat [expr {$nm0 in {lrepeat ::lrepeat} && [resolveProc $ns $nm0] eq ""}]
+        if {$isLrepeat && [llength $args] == 2 && "U" in [lmap e $args {kd $e}]} {
+            return [R fall [list {*}$below U] ""]
+        }
+        if {$isLrepeat && [llength $args] == 2 && [kd [lindex $args 0]] eq "I" && [kd [lindex $args 1]] eq "I"} {
+            set p1 [expr {$q+1}]; set p2 [expr {$q+2}]
+            return [R fall [list {*}$below N] "if (TBC_UNLIKELY(!tbc_is_lrepeat(interp))) goto D$pc; sv$q = tbc_ivec_new(si$p1, si$p2); if (TBC_UNLIKELY(!sv$q.p)) goto D$pc;"]
+        }
+        set hasVec 0
+        foreach e $args { if {[kd $e] in {A N M Q}} { set hasVec 1 } }
+        if {!$hasVec && $nm ne "" && $PI($nm,argsIdx) < 0 && [llength $args] == $PI($nm,nargs)} {
+            if {"U" in [lmap e $args {kd $e}]} { return [R fall [list {*}$below U] ""] }
+            set csig ""; set cargs {}
+            set pos [expr {$q+1}]
+            foreach e $args {
+                switch [kd $e] {
+                    I { append csig I; lappend cargs si$pos }
+                    D { append csig D; lappend cargs sd$pos }
+                    B { append csig B; lappend cargs s$pos }
+                    L { append csig B; lappend cargs L_[cident $P]_[lt $e] }
+                }
+                incr pos
+            }
+            set ckey [newVariant $nm $csig]
+            set rk $VK($ckey,ret)
+            set rel ""
+            set pos [expr {$q+1}]
+            foreach e $args { if {[kd $e] eq "B"} { append rel " Tcl_DecrRefCount(s$pos);" }; incr pos }
+            set cid [cident $nm]
+            if {$rk in {- U}} { set outk U } else { set outk $rk }
+            set rtype [ctype [expr {$outk eq "U" ? "B" : $outk}]]
+            set rvar [svar [expr {$outk eq "U" ? "B" : $outk}] $q]
+            set c "if (TBC_UNLIKELY(!tbc_valid_$cid)) goto D$pc; \{ $rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]); if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $rvar = r_; \}"
+            # post-call stub: error, or a boxed result because the callee fell back to its generic code
+            set nextpc $PI($P,next,$pc)
+            # a callee that had to leave typed mode reports it (tbc_st 3): the call is then made the ordinary way, with boxed arguments
+            set ov "Tcl_Obj *ov_\[$n\]; int r2_; tbc_st = 0; ov_\[0\] = Tcl_NewStringObj([cstring $nm0], -1); Tcl_IncrRefCount(ov_\[0\]);"
+            set j 1; set pos [expr {$q+1}]
+            foreach e $args {
+                switch [kd $e] {
+                    I { append ov " ov_\[$j\] = tbc_newint(si$pos);" }
+                    D { append ov " ov_\[$j\] = tbc_newdbl(sd$pos);" }
+                    B { append ov " ov_\[$j\] = s$pos; Tcl_IncrRefCount(ov_\[$j\]);" }
+                    L { append ov " ov_\[$j\] = L_[cident $P]_[lt $e]; Tcl_IncrRefCount(ov_\[$j\]);" }
+                }
+                incr j; incr pos
+            }
+            append ov " tbc_setpc(interp, $pc); r2_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); \{ int i_; for (i_ = 0; i_ < $n; i_++) Tcl_DecrRefCount(ov_\[i_\]); \}"
+            append ov " if (r2_ != TCL_OK) \{ tbc_st = 0; rc = tbc_rc = r2_; [enterG $key [expr {-$pc-1}] $in "" [flushSet $P $pc]] \} r_ = tbc_takeres(interp);"
+            set stub "C$pc: TBC_HIT([cstring "C:$key:$pc"]); if (tbc_st == 2) \{ tbc_st = 0; rc = tbc_rc; goto [fl $key $in]; \}\n"
+            append stub "    \{ Tcl_Obj *r_; if (tbc_st == 3) \{ if (!inframe) \{ rc = TCL_OK; goto [fl $key $in]; \} $ov \} else \{ r_ = tbc_box; \} tbc_st = 0;$rel s$q = r_; [enterG $key $nextpc [list {*}$below B] "" [flushSet $P $nextpc]] \}\n"
+            return [R fall [list {*}$below $outk] $c calls [list [list $nm $csig]] stub $stub]
+        }
+    }
+    # a command that cannot see or change the frame (a built-in that is pure): box the words and let the interpreter dispatch.  Anything else
+    # leaves typed mode: the boxed code runs it with the variables in the frame.
+    if {[kd $cmdE] ne "L"} { return $dead }
+    set nm0 [lindex $PI($P,lits) [lt $cmdE]]
+    set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+    if {[resolveProc $ns $nm0] ne ""} { return $dead }
+    set sub [expr {[llength $args] ? [expr {[kd [lindex $args 0]] eq "L" ? [lindex $PI($P,lits) [lt [lindex $args 0]]] : "-"}] : "-"}]
+    if {![pureBuiltin $nm0 $sub]} { return $dead }
+    foreach e $args { if {[kd $e] in {A N M Q}} { return $dead } }
+    set pre ""; set slots {}; set rel ""
+    for {set k $q} {$k < $d} {incr k} {
+        append pre [boxc $P $k [lindex $in $k]] " "
+        lappend slots s$k; append rel " Tcl_DecrRefCount(s$k);"
+    }
+    set st [list {*}$below {*}[lrepeat $n B]]
+    set c "$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp); \}"
+    return [R fall [list {*}$below B] $c]
+}
+
+# is a call of the built-in command nm (first word after it: sub, or -) free of any access to variables and of callbacks into scripts?
+proc pureBuiltin {nm sub} {
+    regsub {^::} $nm {} b
+    if {[regexp {^tcl::dict::(\w+)$} $b -> s1]} { set b dict; set sub $s1 }
+    if {[string match tcl::string::* $b] || [string match tcl::list::* $b]} { return 1 }
+    if {$b eq "dict"} { return [expr {$sub in {size keys values get exists create merge replace remove}}] }
+    return [expr {$b in $::tbcPureBuiltins}]
+}
+
+# ---------------------------------------------------------------- fixpoint for one variant
+# returns 1 if the result kind of this variant changed or a new variant was discovered
+proc analyze {key} {
+    global VK PI variants
+    lassign [keysplit $key] P sig
+    set nvar [llength $PI($P,vnames)]
+    set nbefore [llength $variants]
+    set oldret $VK($key,ret)
+    while 1 {
+        array unset IN
+        set IN(0) {}
+        set work [list 0]
+        set stores {}; set rets {}; set calls {}
+        while {[llength $work]} {
+            set pc [lindex $work end]; set work [lrange $work 0 end-1]
+            set r [stepT $key $pc $IN($pc)]
+            foreach s [dict get $r stores] { lappend stores $s }
+            if {[dict get $r ret] ne ""} { lappend rets [dict get $r ret] }
+            set flow [dict get $r flow]
+            set out [dict get $r out]
+            set succs {}
+            switch $flow {
+                fall { set succs [list $PI($P,next,$pc)] }
+                jump { set succs [list [dict get $r tgt]] }
+                cond { set succs [list $PI($P,next,$pc) [dict get $r tgt]] }
+            }
+            foreach s $succs {
+                if {![info exists IN($s)]} {
+                    set IN($s) $out; lappend work $s
+                } else {
+                    set j [jstate $IN($s) $out]
+                    if {$j ne $IN($s)} { set IN($s) $j; lappend work $s }
+                }
+            }
+        }
+        # variable kinds: join of everything stored
+        set kap $VK($key,kap)
+        set nk $kap
+        foreach s $stores { lassign $s v k; dict set nk $v [jk [dict get $nk $v] $k] }
+        foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M}} { dict set nk $v B } }
+        foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M}} { dict set nk $v B } }
+        if {$nk eq $kap} {
+            set pending 0
+            dict for {v k} $nk { if {$k eq "-"} { dict set nk $v B; set pending 1 } }
+            if {!$pending} break
+        }
+        set VK($key,kap) $nk
+    }
+    foreach k [array names VK [globEsc $key],in,*] { unset VK($k) }
+    foreach k [array names IN] { set VK($key,in,$k) $IN($k) }
+    set rk $VK($key,ret)
+    foreach r $rets { set rk [jk $rk [expr {$r eq "L" ? "B" : $r}]] }
+    set VK($key,ret) $rk
+    return [expr {$rk ne $oldret || [llength $variants] != $nbefore}]
+}
+
+# ================================================================== boxed (generic) code for one instruction
+# labels for leaving an instruction abnormally: an error, or another result code (in rcg_).  Without exception ranges they are the
+# stack-releasing chain; with ranges every instruction has its own stub that dispatches like the interpreter does.
+proc hasRanges {P} { global PI; expr {[llength $PI($P,ranges)] > 0} }
+proc errLabel {P pc d} { return GE$pc }
+proc xLabel {P pc d} { return X$pc }
+
+# flags of a store-like instruction
+proc gStoreFlags {op} {
+    if {[string match lappend* $op]} { return "TCL_LEAVE_ERR_MSG|TCL_APPEND_VALUE|TCL_LIST_ELEMENT" }
+    if {[string match append* $op]} { return "TCL_LEAVE_ERR_MSG|TCL_APPEND_VALUE" }
+    return TCL_LEAVE_ERR_MSG
+}
+# a command called in place of an instruction: the n topmost stack slots are its arguments (after the optional leading words pre and before the
+# trailing words post, given as index strings), the result replaces them
+proc gCmd {d n name nan {pre {}} {post {}}} {
+    set slots {}; set rel ""
+    foreach w $pre { lappend slots "TBC_NM([cstring $w])" }
+    for {set k 0} {$k < $n} {incr k} { lappend slots s[expr {$d-$n+$k}]; append rel " Tcl_DecrRefCount(s[expr {$d-$n+$k}]);" }
+    foreach w $post { lappend slots "TBC_NM([cstring $w])" }
+    set e GE[set ::curpc]
+    return "\{ Tcl_Obj *av_\[[expr {[llength $slots] + 1}]\] = { [join $slots {, }], NULL }, *r_; if (tbc_cmdcall(interp, TBC_NM([cstring $name]), [llength $slots], av_, $nan, &r_)) goto $e;$rel s[expr {$d-$n}] = r_; \}"
+}
+
+proc genG {key pc d} {
+    global PI VK
+    set ::curpc $pc
+    lassign [keysplit $key] P sig
+    lassign $PI($P,ins,$pc) op a
+    set X [list @E@ [errLabel $P $pc $d] @X@ [xLabel $P $pc $d] @PC@ $pc @D@ $d @s1@ s[expr {$d-1}] @s2@ s[expr {$d-2}] @s3@ s[expr {$d-3}] @sn@ s$d @sn1@ s[expr {$d+1}] @sn2@ s[expr {$d+2}] @P@ [cident $P]]
+    switch -- $op {
+        nop - startCommand - beginCatch4 { return "" }
+        endCatch { return "Tcl_ResetResult(interp); rcg_ = TCL_OK;" }
+        tryCvtToNumeric { return [string map $X {if (tbc_trycvt(interp, &@s1@)) goto @E@;}] }
+        push1 - push4 { return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {@sn@ = L_@P@_@N@; Tcl_IncrRefCount(@sn@);}] }
+        pop { return [string map $X {Tcl_DecrRefCount(@s1@);}] }
+        dup { return [string map $X {@sn@ = @s1@; Tcl_IncrRefCount(@sn@);}] }
+        loadScalar1 - loadScalar4 {
+            set n [operand [lindex $a 0]]
+            return [string map [concat $X [list @N@ $n]] {{ Tcl_Obj *o_ = tbc_ld(interp, loc_, @N@); if (!o_) goto @E@; @sn@ = o_; Tcl_IncrRefCount(@sn@); }}]
+        }
+        storeScalar1 - storeScalar4 {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_setloc(interp, loc_, @N@, @s1@, TCL_LEAVE_ERR_MSG); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        incrScalar1Imm {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]] @IMM@ [lindex $a 1]]] {{ Tcl_Obj *r_ = tbc_incrimm(interp, loc_, @N@, @IMM@); if (!r_) goto @E@; @sn@ = r_; Tcl_IncrRefCount(@sn@); }}]
+        }
+        incrScalar1 {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_incrloc(interp, loc_, @N@, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        add - sub - mult - div - mod - lt - le - gt - ge - eq - neq {
+            return [string map [concat $X [list @OP@ [dict get {add ADD sub SUB mult MULT div DIV mod MOD lt LT le LE gt GT ge GE eq EQ neq NEQ} $op]]] {if (tbc_bin_@OP@(interp, &@s2@, @s1@)) goto @E@;}]
+        }
+        jump1 - jump4 { return "goto G[operand [lindex $a 0]];" }
+        jumpTrue1 - jumpTrue4 - jumpFalse1 - jumpFalse4 {
+            set neg [expr {[string match jumpFalse* $op] ? "!" : ""}]
+            return [string map [concat $X [list @TGT@ [operand [lindex $a 0]] @NEG@ $neg]] {{ int t_; if (tbc_truth(interp, @s1@, &t_) != TCL_OK) goto @E@; Tcl_DecrRefCount(@s1@); if (@NEG@t_) goto G@TGT@; }}]
+        }
+        done {
+            set rel ""
+            for {set k [expr {$d-2}]} {$k >= 0} {incr k -1} { append rel " Tcl_DecrRefCount(s$k);" }
+            return "Tcl_SetObjResult(interp, s[expr {$d-1}]); Tcl_DecrRefCount(s[expr {$d-1}]);$rel goto gok;"
+        }
+        invokeStk1 - invokeStk4 {
+            set n [lindex $a 0]; set slots {}; set rel ""
+            for {set k 0} {$k < $n} {incr k} { lappend slots s[expr {$d-$n+$k}]; append rel " Tcl_DecrRefCount(s[expr {$d-$n+$k}]);" }
+            return "\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); rcg_ = r_; if (r_ != TCL_OK) \{ goto [xLabel $P $pc $d]; \}$rel s[expr {$d-$n}] = tbc_takeres(interp); \}"
+        }
+        strcat {
+            set n [lindex $a 0]; set slots {}; set rel ""
+            for {set k 0} {$k < $n} {incr k} { lappend slots s[expr {$d-$n+$k}]; append rel " Tcl_DecrRefCount(s[expr {$d-$n+$k}]);" }
+            return "\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; Tcl_Obj *r_ = tbc_concat($n, ov_);$rel s[expr {$d-$n}] = r_; \}"
+        }
+        strlen { return [string map $X {{ Tcl_Obj *r_ = Tcl_NewWideIntObj(Tcl_GetCharLength(@s1@)); Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}] }
+        reverse {
+            set n [lindex $a 0]; set c ""
+            for {set k 0} {$k < $n/2} {incr k} { append c "\{ Tcl_Obj *t_ = s[expr {$d-$n+$k}]; s[expr {$d-$n+$k}] = s[expr {$d-1-$k}]; s[expr {$d-1-$k}] = t_; \} " }
+            return $c
+        }
+        appendScalar1 - appendScalar4 {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_setloc(interp, loc_, @N@, @s1@, TCL_LEAVE_ERR_MSG|TCL_APPEND_VALUE); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        listIndexImm {
+            regexp {^\.(-?\d+|end)(?:-(\d+))?$} [lindex $a 0] -> ix kk
+            set call [expr {$ix eq "end" ? "tbc_lindex_end(interp, @s1@, [expr {$kk eq "" ? 0 : $kk}])" : "tbc_lindex_i(interp, @s1@, $ix)"}]
+            return [string map $X "\{ Tcl_Obj *r_ = $call; if (!r_) goto @E@; Tcl_DecrRefCount(@s1@); @s1@ = r_; \}"]
+        }
+        listLength { return [string map $X {{ int n_; if (Tcl_ListObjLength(interp, @s1@, &n_) != TCL_OK) goto @E@; Tcl_DecrRefCount(@s1@); @s1@ = tbc_newint(n_); }}] }
+        list {
+            set n [lindex $a 0]; set slots {}; set rel ""
+            for {set k 0} {$k < $n} {incr k} { lappend slots s[expr {$d-$n+$k}]; append rel " Tcl_DecrRefCount(s[expr {$d-$n+$k}]);" }
+            return "\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; Tcl_Obj *r_ = Tcl_NewListObj($n, ov_); Tcl_IncrRefCount(r_);$rel s[expr {$d-$n}] = r_; \}"
+        }
+        listIndex { return [string map $X {{ Tcl_Obj *r_ = tbc_lindex(interp, @s2@, @s1@); if (!r_) goto @E@; Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}] }
+        lsetList { return [string map $X {{ Tcl_Obj *lst_ = @s1@, *r_; Tcl_DecrRefCount(lst_); r_ = TclLsetList(interp, lst_, @s3@, @s2@); if (!r_) { Tcl_IncrRefCount(lst_); goto @E@; } Tcl_DecrRefCount(@s2@); Tcl_DecrRefCount(@s3@); @s3@ = r_; }}] }
+        dictGet - dictExists {
+            set n [lindex $a 0]
+            if {$n == 1} {
+                if {$op eq "dictGet"} { return [string map $X {{ Tcl_Obj *v_ = NULL; if (Tcl_DictObjGet(interp, @s2@, @s1@, &v_) != TCL_OK) goto @E@; if (!v_) { tbc_dict_nokey(interp, @s1@); goto @E@; } Tcl_IncrRefCount(v_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = v_; }}] }
+                return [string map $X {{ Tcl_Obj *v_ = NULL; int f_ = (Tcl_DictObjGet(NULL, @s2@, @s1@, &v_) == TCL_OK && v_ != NULL); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = f_ ? tbcOne : tbcZero; Tcl_IncrRefCount(@s2@); }}]
+            }
+            set base [expr {$d - $n - 1}]
+            set keys {}; for {set k 1} {$k <= $n} {incr k} { lappend keys s[expr {$base + $k}] }
+            set rel ""; for {set k [expr {$d-1}]} {$k >= $base} {incr k -1} { append rel " Tcl_DecrRefCount(s$k);" }
+            if {$op eq "dictGet"} {
+                return "\{ Tcl_Obj *kv_\[\] = { [join $keys {, }], NULL }, *r_; int f_; r_ = tbc_dictpath(interp, s$base, $n, kv_, 0, &f_); if (!r_) goto [errLabel $P $pc $d]; Tcl_IncrRefCount(r_);$rel s$base = r_; \}"
+            }
+            return "\{ Tcl_Obj *kv_\[\] = { [join $keys {, }], NULL }; int f_ = 0; (void) tbc_dictpath(interp, s$base, $n, kv_, 1, &f_);$rel s$base = f_ ? tbcOne : tbcZero; Tcl_IncrRefCount(s$base); \}"
+        }
+        lappendScalar1 - lappendScalar4 {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_setloc(interp, loc_, @N@, @s1@, TCL_LEAVE_ERR_MSG|TCL_APPEND_VALUE|TCL_LIST_ELEMENT); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        dictIncrImm {
+            return [string map [concat $X [list @IMM@ [lindex $a 0] @N@ [operand [lindex $a 1]]]] {{ Tcl_Obj *r_ = tbc_dictincr_var(interp, loc_, @N@, @s1@, @IMM@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        verifyDict { return [string map $X {{ int n_; if (Tcl_DictObjSize(interp, @s1@, &n_) != TCL_OK) goto @E@; Tcl_DecrRefCount(@s1@); }}] }
+        dictFirst {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *k_, *v_; int dn_; if (dd@N@) { Tcl_DictObjDone(&ds@N@); Tcl_DecrRefCount(dd@N@); dd@N@ = NULL; } if (Tcl_DictObjFirst(interp, @s1@, &ds@N@, &k_, &v_, &dn_) != TCL_OK) goto @E@; dd@N@ = @s1@; if (dn_) k_ = v_ = tbcEmpty; @s1@ = v_; Tcl_IncrRefCount(@s1@); @sn@ = k_; Tcl_IncrRefCount(@sn@); @sn1@ = dn_ ? tbcOne : tbcZero; Tcl_IncrRefCount(@sn1@); }}]
+        }
+        dictNext {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *k_, *v_; int dn_; Tcl_DictObjNext(&ds@N@, &k_, &v_, &dn_); if (dn_) k_ = v_ = tbcEmpty; @sn@ = v_; Tcl_IncrRefCount(@sn@); @sn1@ = k_; Tcl_IncrRefCount(@sn1@); @sn2@ = dn_ ? tbcOne : tbcZero; Tcl_IncrRefCount(@sn2@); }}]
+        }
+        unsetScalar {
+            set n [operand [lindex $a 1]]
+            if {$n in $PI($P,iters)} { return "if (dd$n) \{ Tcl_DictObjDone(&ds$n); Tcl_DecrRefCount(dd$n); dd$n = NULL; \}" }
+            return [string map [concat $X [list @N@ $n @FL@ [lindex $a 0]]] {if (tbc_unsetloc(interp, loc_, @N@, @FL@)) goto @E@;}]
+        }
+        expandStart {
+            set L [llength $PI($P,mk,$pc)]
+            return "if (ex${L}_) Tcl_DecrRefCount(ex${L}_); ex${L}_ = Tcl_NewListObj(0, NULL); Tcl_IncrRefCount(ex${L}_);"
+        }
+        expandStkTop {
+            set L [expr {[llength $PI($P,mk,$pc)] - 1}]; set d0 [lindex $PI($P,mk,$pc) end]
+            set c "\{ int oc_, i_; Tcl_Obj **ov_; if (TclListObjGetElements(interp, s[expr {$d-1}], &oc_, &ov_) != TCL_OK) goto [errLabel $P $pc $d];"
+            for {set k $d0} {$k < $d-1} {incr k} { append c " Tcl_ListObjAppendElement(NULL, ex${L}_, s$k); Tcl_DecrRefCount(s$k);" }
+            append c " for (i_ = 0; i_ < oc_; i_++) Tcl_ListObjAppendElement(NULL, ex${L}_, ov_\[i_\]); Tcl_DecrRefCount(s[expr {$d-1}]); \}"
+            return $c
+        }
+        invokeExpanded {
+            set L [expr {[llength $PI($P,mk,$pc)] - 1}]; set d0 [lindex $PI($P,mk,$pc) end]
+            set c "\{ int oc_, r_; Tcl_Obj **ov_;"
+            for {set k $d0} {$k < $d} {incr k} { append c " Tcl_ListObjAppendElement(NULL, ex${L}_, s$k);" }
+            append c " Tcl_ListObjGetElements(NULL, ex${L}_, &oc_, &ov_); if (oc_ == 0) \{ s$d0 = Tcl_NewObj(); Tcl_IncrRefCount(s$d0); \} else \{ tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, oc_, ov_, TBC_EV); rcg_ = r_; if (r_ != TCL_OK) goto [xLabel $P $pc $d];"
+            for {set k [expr {$d-1}]} {$k >= $d0} {incr k -1} { append c " Tcl_DecrRefCount(s$k);" }
+            append c " s$d0 = tbc_takeres(interp); \} \}"
+            return $c
+        }
+        expandDrop {
+            set d0 [lindex $PI($P,mk,$pc) end]
+            set c ""
+            for {set k [expr {$d-1}]} {$k >= $d0} {incr k -1} { append c "Tcl_DecrRefCount(s$k); " }
+            return $c
+        }
+        invokeReplace {
+            lassign $a objc opnd
+            set base [expr {$d - 1 - $objc}]
+            set words {}; for {set k 0} {$k < $objc} {incr k} { lappend words s[expr {$base + $k}] }
+            set rel ""; for {set k [expr {$d-1}]} {$k >= $base} {incr k -1} { append rel " Tcl_DecrRefCount(s$k);" }
+            return "\{ Tcl_Obj *wv_\[\] = { [join $words {, }], NULL }, *cp_, **cv_; int cn_, r_; cp_ = Tcl_NewListObj(0, NULL); Tcl_IncrRefCount(cp_); Tcl_ListObjAppendElement(NULL, cp_, s[expr {$d-1}]); Tcl_ListObjReplace(NULL, cp_, LIST_MAX, 0, $objc - $opnd, wv_ + $opnd); tbc_setpc(interp, $pc); TclInitRewriteEnsemble(interp, $opnd, 1, wv_); TclMarkTailcall(interp); Tcl_ListObjGetElements(NULL, cp_, &cn_, &cv_); r_ = Tcl_EvalObjv(interp, cn_, cv_, TCL_EVAL_INVOKE); TclClearRootEnsemble(NULL, interp, r_); Tcl_DecrRefCount(cp_); rcg_ = r_; if (r_ != TCL_OK) goto [xLabel $P $pc $d];$rel s$base = tbc_takeres(interp); \}"
+        }
+        dictSet - dictUnset {
+            set nk [lindex $a 0]; set v [operand [lindex $a 1]]
+            set mode [expr {$op eq "dictSet" ? 0 : 1}]
+            set base [expr {$d - $nk - ($op eq "dictSet" ? 1 : 0)}]
+            set keys {}; for {set k 0} {$k < $nk} {incr k} { lappend keys s[expr {$base + $k}] }
+            set val [expr {$op eq "dictSet" ? "s[expr {$d-1}]" : "NULL"}]
+            set rel ""; for {set k [expr {$d-1}]} {$k >= $base} {incr k -1} { append rel " Tcl_DecrRefCount(s$k);" }
+            return "\{ Tcl_Obj *kv_\[\] = { [join $keys {, }], NULL }, *r_ = tbc_dictmod(interp, loc_, $v, $mode, $nk, kv_, $val); if (!r_) goto [errLabel $P $pc $d]; Tcl_IncrRefCount(r_);$rel s$base = r_; \}"
+        }
+        dictAppend - dictLappend {
+            set v [operand [lindex $a 0]]
+            set mode [expr {$op eq "dictAppend" ? 2 : 3}]
+            return [string map [concat $X [list @V@ $v @M@ $mode]] {{ Tcl_Obj *kv_[] = { @s2@, NULL }, *r_ = tbc_dictmod(interp, loc_, @V@, @M@, 1, kv_, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        arrayMakeImm { return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {if (tbc_arrmake(interp, loc_, @N@, NULL)) goto @E@;}] }
+        arrayMakeStk { return [string map $X {if (tbc_arrmake(interp, loc_, -1, @s1@)) goto @E@; Tcl_DecrRefCount(@s1@);}] }
+        exprStk {
+            return [string map $X {{ Tcl_Obj *r_; tbc_setpc(interp, @PC@); if (Tcl_ExprObj(interp, @s1@, &r_) != TCL_OK) goto @E@; Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        tryCvtToBoolean {
+            return [string map $X {@sn@ = (@s1@->typePtr == &tclBooleanType || TclSetBooleanFromAny(NULL, @s1@) == TCL_OK) ? tbcOne : tbcZero; Tcl_IncrRefCount(@sn@);}]
+        }
+        numericType { return [string map $X {{ Tcl_Obj *r_ = tbc_newint(tbc_numtype(@s1@)); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}] }
+        clockRead { return [string map [concat $X [list @W@ [lindex $a 0]]] {@sn@ = Tcl_NewWideIntObj(tbc_clock(@W@)); Tcl_IncrRefCount(@sn@);}] }
+        resolveCmd {
+            return [string map $X {{ Tcl_Command cmd_ = Tcl_GetCommandFromObj(interp, @s1@); Tcl_Obj *r_ = Tcl_NewObj(); if (cmd_ != NULL) Tcl_GetCommandFullName(interp, cmd_, r_); Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        originCmd {
+            return [string map $X {{ Tcl_Command cmd_ = Tcl_GetCommandFromObj(interp, @s1@), orig_; Tcl_Obj *r_; if (cmd_ == NULL) { Tcl_SetObjResult(interp, Tcl_ObjPrintf("invalid command name \"%s\"", Tcl_GetString(@s1@))); Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "COMMAND", Tcl_GetString(@s1@), NULL); goto @E@; } orig_ = TclGetOriginalCommand(cmd_); if (orig_ == NULL) orig_ = cmd_; r_ = Tcl_NewObj(); Tcl_GetCommandFullName(interp, orig_, r_); Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        evalStk {
+            return [string map $X {{ tbc_setpc(interp, @PC@); NRE_callback *root_ = TOP_CB(interp); ByteCode *bc_ = TclCompileObj(interp, @s1@, NULL, 0); int r_ = TclNRRunCallbacks(interp, TclNRExecuteByteCode(interp, bc_), root_); rcg_ = r_; if (r_ != TCL_OK) goto @X@; Tcl_DecrRefCount(@s1@); @s1@ = tbc_takeres(interp); }}]
+        }
+        coroName {
+            return [string map $X {{ CoroutineData *cp_ = ((Interp *) interp)->execEnvPtr->corPtr; Tcl_Obj *r_ = Tcl_NewObj(); if (cp_ && !(cp_->cmdPtr->flags & CMD_IS_DELETED)) Tcl_GetCommandFullName(interp, (Tcl_Command) cp_->cmdPtr, r_); Tcl_IncrRefCount(r_); @sn@ = r_; }}]
+        }
+        dictExpand {
+            return [string map $X {{ int oc_; Tcl_Obj **ov_, *r_; if (TclListObjGetElements(interp, @s1@, &oc_, &ov_) != TCL_OK) goto @E@; r_ = TclDictWithInit(interp, @s2@, oc_, ov_); if (r_ == NULL) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        dictRecombineImm {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ int oc_; Tcl_Obj **ov_; Var *vp_ = &loc_[@N@]; if (TclListObjGetElements(interp, @s2@, &oc_, &ov_) != TCL_OK) goto @E@; TBC_FOLLOW(vp_); if (TclDictWithFinish(interp, vp_, NULL, NULL, NULL, @N@, oc_, ov_, @s1@) != TCL_OK) goto @E@; Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); }}]
+        }
+        dictRecombineStk {
+            return [string map $X {{ int oc_, r_; Tcl_Obj **ov_; Var *vp_, *ap_ = NULL; if (TclListObjGetElements(interp, @s2@, &oc_, &ov_) != TCL_OK) goto @E@; vp_ = TclObjLookupVarEx(interp, @s3@, NULL, TCL_LEAVE_ERR_MSG, "set", 1, 1, &ap_); if (vp_ == NULL) goto @E@; r_ = TclDictWithFinish(interp, vp_, ap_, @s3@, NULL, -1, oc_, ov_, @s1@); if (r_ != TCL_OK) goto @E@; Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); Tcl_DecrRefCount(@s3@); }}]
+        }
+        dictUpdateStart {
+            lassign $a var n vars
+            return [string map [concat $X [list @N@ [operand $var] @NV@ [llength $vars] @VI@ [join $vars {, }]]] {{ static const int vi_[] = { @VI@ }; if (tbc_dupstart(interp, loc_, @N@, vi_, @NV@, @s1@)) goto @E@; }}]
+        }
+        dictUpdateEnd {
+            lassign $a var n vars
+            return [string map [concat $X [list @N@ [operand $var] @NV@ [llength $vars] @VI@ [join $vars {, }]]] {{ static const int vi_[] = { @VI@ }; if (tbc_dupend(interp, loc_, @N@, vi_, @s1@)) goto @E@; Tcl_DecrRefCount(@s1@); }}]
+        }
+        tailcall {
+            set n [lindex $a 0]
+            set slots {}; set rel ""
+            for {set k 0} {$k < $n} {incr k} { lappend slots s[expr {$d-$n+$k}]; append rel " Tcl_DecrRefCount(s[expr {$d-$n+$k}]);" }
+            return [string map $X "\{ Interp *ip_ = (Interp *) interp; Tcl_Obj *ov_\[\] = { [join $slots {, }] }, *lp_, *nso_; if (!(ip_->varFramePtr->isProcCallFrame & 1)) \{ Tcl_SetObjResult(interp, Tcl_NewStringObj(\"tailcall can only be called from a proc or lambda\", -1)); Tcl_SetErrorCode(interp, \"TCL\", \"TAILCALL\", \"ILLEGAL\", NULL); goto @E@; \} lp_ = Tcl_NewListObj($n, ov_); nso_ = Tcl_NewStringObj(ip_->varFramePtr->nsPtr->fullName, -1); TclListObjSetElement(interp, lp_, 0, nso_); if (ip_->varFramePtr->tailcallPtr) Tcl_DecrRefCount(ip_->varFramePtr->tailcallPtr); ip_->varFramePtr->tailcallPtr = lp_; rcg_ = TCL_RETURN; goto @X@; \}"]
+        }
+        over { return "s$d = s[expr {$d - 1 - [operand [lindex $a 0]]}]; Tcl_IncrRefCount(s$d);" }
+        streq - strneq {
+            set inv [expr {$op eq "strneq" ? "!" : ""}]
+            return [string map [concat $X [list @INV@ $inv]] {{ Tcl_Obj *r_ = @INV@(TclStringCmp(@s2@, @s1@, 1, 0, -1) == 0) ? tbcOne : tbcZero; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        strcmp {
+            return [string map $X {{ int m_ = TclStringCmp(@s2@, @s1@, 0, 0, -1); Tcl_Obj *r_ = tbc_newint(m_ < 0 ? -1 : m_ > 0 ? 1 : 0); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        strclass {
+            set n [lsearch -exact {alnum alpha ascii control digit graph lower print punct space upper word xdigit} [string trimleft [lindex $a 0] =]]
+            if {$n < 0} { refuse "string class [lindex $a 0]" }
+            return [string map [concat $X [list @N@ $n]] {{ int ll_, m_ = 1; const Tcl_UniChar *u_ = Tcl_GetUnicodeFromObj(@s1@, &ll_); if (ll_ > 0) { const Tcl_UniChar *p_, *e_ = u_ + ll_; for (p_ = u_; p_ < e_; ) { int ch_; p_ += TclUniCharToUCS4(p_, &ch_); if (!tclStringClassTable[@N@].comparator(ch_)) { m_ = 0; break; } } } Tcl_DecrRefCount(@s1@); @s1@ = m_ ? tbcOne : tbcZero; Tcl_IncrRefCount(@s1@); }}]
+        }
+        uminus - uplus - not - bitnot {
+            return [string map [concat $X [list @OP@ [dict get {uminus NEG uplus POS not LNOT bitnot BNOT} $op]]] {if (tbc_un(interp, TBC_@OP@, &@s1@)) goto @E@;}]
+        }
+        bitand - bitor - bitxor - lshift - rshift - expon {
+            return [string map [concat $X [list @OP@ [dict get {bitand BAND bitor BOR bitxor BXOR lshift SHL rshift SHR expon POW} $op]]] {if (tbc_bin_@OP@(interp, &@s2@, @s1@)) goto @E@;}]
+        }
+        listIn - listNotIn {
+            return [gCmd $d 2 [dict get {listIn ::tcl::mathop::in listNotIn ::tcl::mathop::ni} $op] 0]
+        }
+        strindex { return [gCmd $d 2 ::tcl::string::index 0] }
+        strfind { return [gCmd $d 2 ::tcl::string::first 0] }
+        strrfind { return [gCmd $d 2 ::tcl::string::last 0] }
+        strrange { return [gCmd $d 3 ::tcl::string::range 0] }
+        strreplace { return [gCmd $d 4 ::tcl::string::replace 0] }
+        strcaseUpper { return [gCmd $d 1 ::tcl::string::toupper 0] }
+        strcaseLower { return [gCmd $d 1 ::tcl::string::tolower 0] }
+        strcaseTitle { return [gCmd $d 1 ::tcl::string::totitle 0] }
+        strtrim { return [gCmd $d 2 ::tcl::string::trim 0] }
+        strtrimLeft { return [gCmd $d 2 ::tcl::string::trimleft 0] }
+        strtrimRight { return [gCmd $d 2 ::tcl::string::trimright 0] }
+        strmatch { return [gCmd $d 2 ::tcl::string::match 0 [expr {[lindex $a 0] ne "+0" && [lindex $a 0] ne "0" ? {-nocase} : {}}]] }
+        regexp { return [gCmd $d 2 ::regexp 0 [expr {[lindex $a 0] ne "+0" && [lindex $a 0] ne "0" ? {-nocase --} : {--}}]] }
+        strrangeImm { return [gCmd $d 1 ::tcl::string::range 0 {} [list [string trimleft [lindex $a 0] .] [string trimleft [lindex $a 1] .]]] }
+        listRangeImm { return [gCmd $d 1 ::lrange 0 {} [list [string trimleft [lindex $a 0] .] [string trimleft [lindex $a 1] .]]] }
+        lindexMulti { return [gCmd $d [lindex $a 0] ::lindex 0] }
+        concatStk {
+            set n [lindex $a 0]; set slots {}; set rel ""
+            for {set k 0} {$k < $n} {incr k} { lappend slots s[expr {$d-$n+$k}]; append rel " Tcl_DecrRefCount(s[expr {$d-$n+$k}]);" }
+            return "\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; Tcl_Obj *r_ = Tcl_ConcatObj($n, ov_); Tcl_IncrRefCount(r_);$rel s[expr {$d-$n}] = r_; \}"
+        }
+        strmap {
+            return [string map $X {{ Tcl_Obj *mv_[2] = { @s3@, @s2@ }, *r_, *m_, *av_[2]; int e_; m_ = Tcl_NewListObj(2, mv_); Tcl_IncrRefCount(m_); av_[0] = m_; av_[1] = @s1@; e_ = tbc_cmdcall(interp, TBC_NM("::tcl::string::map"), 2, av_, 0, &r_); Tcl_DecrRefCount(m_); if (e_) goto @E@; Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); Tcl_DecrRefCount(@s3@); @s3@ = r_; }}]
+        }
+        listConcat {
+            return [string map $X {{ Tcl_Obj *r_; if (Tcl_IsShared(@s2@)) { r_ = Tcl_DuplicateObj(@s2@); Tcl_IncrRefCount(r_); if (Tcl_ListObjAppendList(interp, r_, @s1@) != TCL_OK) { Tcl_DecrRefCount(r_); goto @E@; } Tcl_DecrRefCount(@s2@); @s2@ = r_; } else { if (Tcl_ListObjAppendList(interp, @s2@, @s1@) != TCL_OK) goto @E@; } Tcl_DecrRefCount(@s1@); }}]
+        }
+        lsetFlat {
+            set n [expr {[lindex $a 0] - 2}]
+            set lst "s[expr {$d-1}]"; set val "s[expr {$d-2}]"; set idx0 [expr {$d-2-$n}]
+            set c "\{ Tcl_Obj *lst_ = $lst, *r_, *iv_\[[expr {$n + 1}]\] = {"
+            for {set k 0} {$k < $n} {incr k} { append c " s[expr {$idx0+$k}]," }
+            append c " NULL }; Tcl_DecrRefCount(lst_); r_ = TclLsetFlat(interp, lst_, $n, iv_, $val); if (!r_) \{ Tcl_IncrRefCount(lst_); goto [errLabel $P $pc $d]; \}"
+            for {set k [expr {$d-2}]} {$k >= $idx0} {incr k -1} { append c " Tcl_DecrRefCount(s$k);" }
+            append c " s$idx0 = r_; \}"
+            return $c
+        }
+        jumpTable {
+            lassign $a n tgts map
+            set c "\{ int kl_; const char *k_ = Tcl_GetStringFromObj(@s1@, &kl_);"
+            foreach {key off} $map {
+                set u [expr {$pc + $off}]
+                append c " if (kl_ == [cbytes $key] && !memcmp(k_, [cstring $key], kl_)) \{ Tcl_DecrRefCount(@s1@); goto G$u; \}"
+            }
+            append c " Tcl_DecrRefCount(@s1@); \}"
+            return [string map $X $c]
+        }
+        infoLevelNumber { return [string map $X {@sn@ = tbc_newint(((Interp *) interp)->varFramePtr->level);}] }
+        infoLevelArgs {
+            return [string map $X {{ int level_; CallFrame *fp_ = ((Interp *) interp)->varFramePtr, *rf_ = ((Interp *) interp)->rootFramePtr; Tcl_Obj *r_;
+                if (TclGetIntFromObj(interp, @s1@, &level_) != TCL_OK) goto @E@;
+                if (level_ <= 0) level_ += fp_->level;
+                for (; fp_->level != level_ && fp_ != rf_; fp_ = fp_->callerVarPtr) {}
+                if (fp_ == rf_) { Tcl_SetObjResult(interp, Tcl_ObjPrintf("bad level \"%s\"", Tcl_GetString(@s1@))); Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "STACK_LEVEL", Tcl_GetString(@s1@), NULL); goto @E@; }
+                r_ = Tcl_NewListObj(fp_->objc, fp_->objv); Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        currentNamespace {
+            return [string map $X {{ Namespace *ns_ = (Namespace *) TclGetCurrentNamespace(interp); @sn@ = (ns_ == (Namespace *) TclGetGlobalNamespace(interp)) ? Tcl_NewStringObj("::", 2) : Tcl_NewStringObj(ns_->fullName, (int) strlen(ns_->fullName)); Tcl_IncrRefCount(@sn@); }}]
+        }
+        loadArray1 - loadArray4 {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_vload(interp, loc_, @N@, NULL, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        loadArrayStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vload(interp, loc_, -1, @s2@, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        loadStk - loadScalarStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vload(interp, loc_, -1, @s1@, NULL); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        storeArray1 - storeArray4 - appendArray1 - appendArray4 - lappendArray1 - lappendArray4 {
+            set fl [gStoreFlags $op]
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]] @FL@ $fl]] {{ Tcl_Obj *r_ = tbc_vstore(interp, loc_, @N@, NULL, @s2@, @s1@, @FL@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        storeArrayStk - appendArrayStk - lappendArrayStk {
+            set fl [gStoreFlags $op]
+            return [string map [concat $X [list @FL@ $fl]] {{ Tcl_Obj *r_ = tbc_vstore(interp, loc_, -1, @s3@, @s2@, @s1@, @FL@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); Tcl_DecrRefCount(@s3@); @s3@ = r_; }}]
+        }
+        storeStk - storeScalarStk - appendStk - lappendStk {
+            set fl [gStoreFlags $op]
+            return [string map [concat $X [list @FL@ $fl]] {{ Tcl_Obj *r_ = tbc_vstore(interp, loc_, -1, @s2@, NULL, @s1@, @FL@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        incrArray1 {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_vincr(interp, loc_, @N@, NULL, @s2@, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        incrArray1Imm {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]] @IMM@ [lindex $a 1]]] {{ Tcl_Obj *i_ = tbc_newint(@IMM@), *r_ = tbc_vincr(interp, loc_, @N@, NULL, @s1@, i_); Tcl_DecrRefCount(i_); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        incrArrayStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vincr(interp, loc_, -1, @s3@, @s2@, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); Tcl_DecrRefCount(@s3@); @s3@ = r_; }}]
+        }
+        incrArrayStkImm {
+            return [string map [concat $X [list @IMM@ [lindex $a 0]]] {{ Tcl_Obj *i_ = tbc_newint(@IMM@), *r_ = tbc_vincr(interp, loc_, -1, @s2@, @s1@, i_); Tcl_DecrRefCount(i_); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        incrStk - incrScalarStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vincr(interp, loc_, -1, @s2@, NULL, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        incrStkImm - incrScalarStkImm {
+            return [string map [concat $X [list @IMM@ [lindex $a 0]]] {{ Tcl_Obj *i_ = tbc_newint(@IMM@), *r_ = tbc_vincr(interp, loc_, -1, @s1@, NULL, i_); Tcl_DecrRefCount(i_); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        lappendList {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_vlappend(interp, loc_, @N@, 0, NULL, NULL, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        lappendListArray {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_vlappend(interp, loc_, @N@, 1, NULL, @s2@, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        lappendListStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vlappend(interp, loc_, -1, 0, @s2@, NULL, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        lappendListArrayStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vlappend(interp, loc_, -1, 0, @s3@, @s2@, @s1@); if (!r_) goto @E@; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); Tcl_DecrRefCount(@s3@); @s3@ = r_; }}]
+        }
+        existScalar {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ @sn@ = tbc_vexist(interp, loc_, @N@, NULL, NULL) ? tbcOne : tbcZero; Tcl_IncrRefCount(@sn@); }}]
+        }
+        existArray {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ Tcl_Obj *r_ = tbc_vexist(interp, loc_, @N@, NULL, @s1@) ? tbcOne : tbcZero; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        existArrayStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vexist(interp, loc_, -1, @s2@, @s1@) ? tbcOne : tbcZero; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+        }
+        existStk {
+            return [string map $X {{ Tcl_Obj *r_ = tbc_vexist(interp, loc_, -1, @s1@, NULL) ? tbcOne : tbcZero; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); @s1@ = r_; }}]
+        }
+        unsetArray {
+            return [string map [concat $X [list @FL@ [expr {[lindex $a 0] ? "TCL_LEAVE_ERR_MSG" : "0"}] @N@ [operand [lindex $a 1]]]] {if (tbc_vunset(interp, loc_, @N@, NULL, @s1@, @FL@)) goto @E@; Tcl_DecrRefCount(@s1@);}]
+        }
+        unsetArrayStk {
+            return [string map [concat $X [list @FL@ [expr {[lindex $a 0] ? "TCL_LEAVE_ERR_MSG" : "0"}]]] {if (tbc_vunset(interp, loc_, -1, @s2@, @s1@, @FL@)) goto @E@; Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@);}]
+        }
+        unsetStk {
+            return [string map [concat $X [list @FL@ [expr {[lindex $a 0] ? "TCL_LEAVE_ERR_MSG" : "0"}]]] {if (tbc_vunset(interp, loc_, -1, @s1@, NULL, @FL@)) goto @E@; Tcl_DecrRefCount(@s1@);}]
+        }
+        arrayExistsImm {
+            return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {{ int r_ = tbc_arrexists(interp, loc_, @N@, NULL); if (r_ < 0) goto @E@; @sn@ = r_ ? tbcOne : tbcZero; Tcl_IncrRefCount(@sn@); }}]
+        }
+        arrayExistsStk {
+            return [string map $X {{ int r_ = tbc_arrexists(interp, loc_, -1, @s1@); if (r_ < 0) goto @E@; Tcl_DecrRefCount(@s1@); @s1@ = r_ ? tbcOne : tbcZero; Tcl_IncrRefCount(@s1@); }}]
+        }
+        lmap_collect {
+            # lmap: the collecting list lies below the loop's state (the nl value lists, the counters and the info object), the result is on top;
+            # the loop's step follows, and carries nl
+            set nl [lindex $PI($P,ins,$PI($P,next,$pc)) 1 1]
+            return "Tcl_ListObjAppendElement(NULL, s[expr {$d - 4 - $nl}], s[expr {$d - 1}]); Tcl_DecrRefCount(s[expr {$d - 1}]);"
+        }
+        foreach_start {
+            lassign $a n nl jo vl stepPc
+            set c "\{ long im_ = 0, nt_;"
+            set d0 [expr {$d - $nl}]
+            for {set i 0} {$i < $nl} {incr i} {
+                set nv [llength [lindex $vl $i]]
+                append c " \{ int ll_; Tcl_Obj *l_ = s[expr {$d0+$i}]; if (TclListObjLength(interp, l_, &ll_) != TCL_OK) goto @E@; if (Tcl_IsShared(l_)) \{ Tcl_Obj *c_ = TclListObjCopy(NULL, l_); Tcl_IncrRefCount(c_); Tcl_DecrRefCount(l_); s[expr {$d0+$i}] = c_; \} nt_ = (ll_ + [expr {$nv-1}]) / $nv; if (nt_ > im_) im_ = nt_; \}"
+            }
+            append c " \{ Tcl_Obj *c_ = Tcl_NewObj(); c_->internalRep.twoPtrValue.ptr1 = INT2PTR(0); c_->internalRep.twoPtrValue.ptr2 = INT2PTR(im_); Tcl_IncrRefCount(c_); s$d = c_; \} s[expr {$d+1}] = tbcEmpty; Tcl_IncrRefCount(tbcEmpty); \} goto G$stepPc;"
+            return [string map $X $c]
+        }
+        foreach_step {
+            lassign $a n nl jo vl stepPc
+            set d0 [expr {$d - $nl - 2}]
+            set c "\{ Tcl_Obj *c_ = s[expr {$d-2}]; long it_ = PTR2INT(c_->internalRep.twoPtrValue.ptr1); if (it_ < PTR2INT(c_->internalRep.twoPtrValue.ptr2)) \{ c_->internalRep.twoPtrValue.ptr1 = INT2PTR(it_ + 1);"
+            for {set i 0} {$i < $nl} {incr i} {
+                append c " \{ Tcl_Obj **el_; int ll_; TclListObjGetElements(interp, s[expr {$d0+$i}], &ll_, &el_);"
+                set j 0
+                foreach var [lindex $vl $i] {
+                    append c " \{ long ix_ = it_ * [llength [lindex $vl $i]] + $j; Tcl_Obj *v_ = ix_ >= ll_ ? NULL : el_\[ix_\], *r_; if (!v_) \{ v_ = Tcl_NewObj(); Tcl_IncrRefCount(v_); r_ = tbc_setloc(interp, loc_, $var, v_, TCL_LEAVE_ERR_MSG); Tcl_DecrRefCount(v_); \} else r_ = tbc_setloc(interp, loc_, $var, v_, TCL_LEAVE_ERR_MSG); if (!r_) goto @E@; \}"
+                    incr j
+                }
+                append c " \}"
+            }
+            append c " goto G[expr {$stepPc + $jo}]; \} \}"
+            return [string map $X $c]
+        }
+        foreach_end {
+            lassign $a n nl
+            set c ""
+            for {set k [expr {$d-1}]} {$k >= $d - $nl - 2} {incr k -1} { append c "Tcl_DecrRefCount(s$k); " }
+            return $c
+        }
+        pushResult { return [string map $X {{ @sn@ = tbc_takeres(interp); }}] }
+        pushReturnCode { return [string map $X {@sn@ = tbc_newint(rcg_);}] }
+        pushReturnOpts { return [string map $X {{ Tcl_Obj *o_ = Tcl_GetReturnOptions(interp, rcg_); Tcl_IncrRefCount(o_); @sn@ = o_; }}] }
+        break { return [string map $X {rcg_ = TCL_BREAK; goto @X@;}] }
+        continue { return [string map $X {rcg_ = TCL_CONTINUE; goto @X@;}] }
+        returnCodeBranch {
+            # five jumps follow; the result code selects one (offsets 1, 3, 5, 7, 9)
+            set c "\{ int code_; if (TclGetIntFromObj(NULL, s[expr {$d-1}], &code_) != TCL_OK) Tcl_Panic(\"returnCodeBranch: not a return code\"); if (code_ < TCL_ERROR || code_ > TCL_CONTINUE) code_ = TCL_CONTINUE + 1; Tcl_DecrRefCount(s[expr {$d-1}]); switch (code_) \{"
+            set k 1
+            foreach o {1 3 5 7 9} { append c " case $k: goto G[expr {$pc + $o}];"; incr k }
+            append c " default: goto G[expr {$pc + 9}]; \} \}"
+            return $c
+        }
+        returnImm - syntax {
+            lassign $a code level
+            return [string map [concat $X [list @CODE@ $code @LEVEL@ $level @CLR@ [expr {$op eq "syntax" ? "((Interp *) interp)->flags &= ~ERR_ALREADY_LOGGED; " : ""}]]] {{ int r_ = TclProcessReturn(interp, @CODE@, @LEVEL@, @s1@); if (r_ == TCL_OK) { Tcl_DecrRefCount(@s1@); } else { Tcl_SetObjResult(interp, @s2@); rcg_ = r_; @CLR@goto @X@; } }}]
+        }
+        returnStk {
+            return [string map $X {{ int r_ = Tcl_SetReturnOptions(interp, @s2@); if (r_ == TCL_OK) { Tcl_DecrRefCount(@s2@); @s2@ = @s1@; } else { if (r_ == TCL_ERROR) { Tcl_SetObjResult(interp, @s1@); Tcl_SetReturnOptions(interp, @s2@); } else { Tcl_SetObjResult(interp, @s1@); } rcg_ = r_; goto @X@; } }}]
+        }
+        variable {
+            set n [operand [lindex $a 0]]
+            return [string map [concat $X [list @N@ $n]] {{ Var *vp_; Var *o_ = TclObjLookupVarEx(interp, @s1@, NULL, (TCL_NAMESPACE_ONLY | TCL_LEAVE_ERR_MSG), "access", 1, 1, &vp_); if (!o_) goto @E@; TclSetVarNamespaceVar(o_); if (tbc_linkvars(interp, loc_, @N@, o_)) goto @E@; Tcl_DecrRefCount(@s1@); }}]
+        }
+        upvar {
+            set n [operand [lindex $a 0]]
+            return [string map [concat $X [list @N@ $n]] {{ CallFrame *fr_, *sv_; Var *vp_, *o_; Interp *ip_ = (Interp *) interp; if (TclObjGetFrame(interp, @s2@, &fr_) == -1) goto @E@; sv_ = ip_->varFramePtr; ip_->varFramePtr = fr_; o_ = TclObjLookupVarEx(interp, @s1@, NULL, TCL_LEAVE_ERR_MSG, "access", 1, 1, &vp_); ip_->varFramePtr = sv_; if (!o_) goto @E@; if (tbc_linkvars(interp, loc_, @N@, o_)) goto @E@; Tcl_DecrRefCount(@s1@); }}]
+        }
+        nsupvar {
+            set n [operand [lindex $a 0]]
+            return [string map [concat $X [list @N@ $n]] {{ Tcl_Namespace *ns_; Namespace *sv_; Var *vp_, *o_; Interp *ip_ = (Interp *) interp; if (TclGetNamespaceFromObj(interp, @s2@, &ns_) != TCL_OK) goto @E@; sv_ = ip_->varFramePtr->nsPtr; ip_->varFramePtr->nsPtr = (Namespace *) ns_; o_ = TclObjLookupVarEx(interp, @s1@, NULL, (TCL_NAMESPACE_ONLY | TCL_LEAVE_ERR_MSG | TCL_AVOID_RESOLVERS), "access", 1, 1, &vp_); ip_->varFramePtr->nsPtr = sv_; if (!o_) goto @E@; if (tbc_linkvars(interp, loc_, @N@, o_)) goto @E@; Tcl_DecrRefCount(@s1@); }}]
+        }
+        default { error "genG: no handler for $op" }
+    }
+}
+
+# ================================================================== the boxed code of a proc: one function, entered at any instruction
+# Locals live in the interpreter's own call frame (Var slots), the operand stack in C variables holding references, exactly as the
+# bytecode executor does it; the function runs inside the frame the interpreter built for the proc.  Typed code that gives up
+# writes its state into the frame and the stack array and enters here at the instruction it was executing.
+# jump to the handler of catch range r from an instruction with d operands on the stack: drop what lies above the stack depth the catch began at
+proc catchJump {P r d} {
+    global PI
+    set tg [dict get $r catch]
+    set from [dict get $r from]
+    set t $PI($P,depth,$from)
+    set c ""
+    for {set k [expr {$d - 1}]} {$k >= $t} {incr k -1} { append c "Tcl_DecrRefCount(s$k); " }
+    return "${c}goto G$tg;\n"
+}
+
+# The entries of the boxed functions that anything calls: the typed variants hand over at their deoptimisation points, call sites and error paths, each
+# with a literal entry number, and the module's own wrappers enter at 0.  Only those get a case in the entry switch (a case for every instruction would be
+# called for about 5% of them).  All typed code is emitted before the first boxed function, so the text so far holds every such call.
+proc entryCalled {cid pc} {
+    global out ENT
+    if {$pc == 0} { return 1 }
+    if {![info exists ENT]} {
+        array set ENT {}
+        foreach {all c n} [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] { set ENT($c,$n) 1 }
+    }
+    return [info exists ENT($cid,$pc)]
+}
+
+proc emitG {P} {
+    global PI
+    set cid [cident $P]
+    set maxd2 [expr {$PI($P,maxd) + 1}]
+    set fn "static int G_${cid}(Tcl_Interp *interp, int entryPc, Tcl_Obj **stk, int nstk)\n\{\n"
+    append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
+    for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
+    foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
+    for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    Tcl_Obj *ex${it}_ = NULL;\n" }
+    append fn "    switch (entryPc) \{\n"
+    foreach pc $PI($P,reach) {
+        set d $PI($P,depth,$pc)
+        if {[entryCalled $cid $pc]} {
+            append fn "    case $pc: "
+            for {set i 0} {$i < $d} {incr i} { append fn "s$i = stk\[$i\]; " }
+            append fn "goto G$pc;\n"
+        }
+        if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4} && [entryCalled $cid [expr {-$pc-1}]]} {
+            append fn "    case [expr {-$pc-1}]: "
+            for {set i 0} {$i < $d} {incr i} { append fn "s$i = stk\[$i\]; " }
+            append fn "rcg_ = tbc_rc; goto X$pc;\n"
+        }
+    }
+    append fn "    default: goto gf_0;\n    \}\n"
+    foreach pc $PI($P,reach) {
+        set d $PI($P,depth,$pc)
+        append fn "G$pc: ;  /* $PI($P,ins,$pc) */\n"
+        if {$pc in $PI($P,loopheads)} { append fn "    if (TBC_UNLIKELY(((++tbc_ticks & 63) == 0) && tbc_poll(interp))) goto GE$pc;\n" }
+        append fn "    [genG $P/ $pc $d]\n"
+    }
+    # what happens when an instruction ends with an error or another result code (rcg_): errors are logged in the errorInfo as the interpreter
+    # does it; with exception ranges around, the interpreter's exception processing follows, resolved statically for each instruction
+    # (ranges are known; only the result code is dynamic)
+    array set usedE {}
+    foreach {m kind n} [regexp -all -inline {\m(GE|X)(\d+)\M} $fn] { set usedE($n) 1 }
+    foreach pc $PI($P,reach) {
+        if {![info exists usedE($pc)]} continue
+        set d $PI($P,depth,$pc)
+        lassign $PI($P,ins,$pc) op a
+        set cleanup [switch $op { invokeStk1 - invokeStk4 - tailcall { lindex $a 0 } evalStk { expr 1 } invokeReplace { expr {[lindex $a 0] + 1} } invokeExpanded { expr {$d - [lindex $PI($P,mk,$pc) end]} } returnImm - syntax - returnStk { expr 2 } default { expr 0 } }]
+        lassign [expr {$PI($P,src,$pc) eq "" ? {-1 0} : $PI($P,src,$pc)}] so sl
+        set tos ""; for {set k 0} {$k < $d} {incr k} { append tos ", s$k" }
+        append fn "GE$pc: rcg_ = TCL_ERROR;\nX$pc: TBC_XLOG($pc, $so, $sl, $d$tos);\n"
+        if {![hasRanges $P]} { append fn "    goto gf_$d;\n"; continue }
+        set swStart [string length $fn]
+        append fn "    switch (rcg_) \{\n"
+        foreach {code mode} {TCL_BREAK 3 TCL_CONTINUE 4} {
+            if {![tbcCanBC $op $a]} continue
+            set r [findRange $PI($P,ranges) $pc $mode]
+            if {[info exists PI($P,drop,$pc,$mode)] && $r ne "" && [dict get $r type] ne "catch"} { set r "" }
+            append fn "    case $code: "
+            if {$r eq ""} { append fn "goto gf_$d;\n"; continue }
+            if {[dict get $r type] eq "catch"} {
+                append fn [catchJump $P $r $d]
+            } else {
+                for {set k [expr {$d - 1}]} {$k >= $d - $cleanup} {incr k -1} { append fn "Tcl_DecrRefCount(s$k); " }
+                set tg [dict get $r [expr {$mode == 3 ? "break" : "continue"}]]
+                append fn "rcg_ = TCL_OK; goto G$tg;\n"
+            }
+        }
+        set r [findRange $PI($P,ranges) $pc 1]
+        if {$r eq "" && [string length $fn] == $swStart + [string length "    switch (rcg_) \{\n"]} {
+            # nothing but the default: no switch
+            set fn "[string range $fn 0 [expr {$swStart - 1}]]    goto gf_$d;\n"
+        } else {
+            append fn "    default: "
+            if {$r eq ""} { append fn "goto gf_$d;\n" } else { append fn [catchJump $P $r $d] }
+            append fn "    \}\n"
+        }
+    }
+    for {set k $maxd2} {$k >= 1} {incr k -1} { append fn "gf_$k: Tcl_DecrRefCount(s[expr {$k-1}]);\n" }
+    append fn "gf_0: goto gexit;\ngok: rcg_ = TCL_OK;\ngexit:\n"
+    foreach it $PI($P,iters) { append fn "    if (dd$it) \{ Tcl_DictObjDone(&ds$it); Tcl_DecrRefCount(dd$it); \}\n" }
+    for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    if (ex${it}_) Tcl_DecrRefCount(ex${it}_);\n" }
+    append fn "    return rcg_;\n\}\n"
+    return $fn
+}
+
+# ================================================================== emitting one variant
+proc rettype {rk} { ctype [expr {$rk in {- U} ? "B" : $rk}] }
+
+proc emitVariant {key recursive} {
+    global VK PI FM FRM typedMode
+    lassign [keysplit $key] P sig
+    set cid [cident $P]
+    set kap $VK($key,kap)
+    set rk $VK($key,ret); if {$rk in {- U}} { set rk B }
+    set nv [llength $PI($P,vnames)]; set maxd $PI($P,maxd)
+    set maxd2 [expr {$maxd + 1}]
+    array unset FM [globEsc $key],*
+    array unset FRM [globEsc $key],*
+    # parameters
+    set plist {}
+    for {set v 0} {$v < $PI($P,nargs)} {incr v} { lappend plist "[ctype [string index $sig $v]] a$v" }
+    set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
+    append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
+    for {set v 0} {$v < $nv} {incr v} {
+        append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
+        switch [dict get $kap $v] { I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } }
+        if {$v in [flaggedOf $P] && [dict get $kap $v] in {I D}} { append fn " int g$v = 0; (void) g$v;" }
+        append fn "\n"
+    }
+    for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL; int64_t si$k = 0; double sd$k = 0; (void) s$k; (void) si$k; (void) sd$k;\n" }
+    append fn "@@VECDECLS@@"
+    if {$recursive} {
+        append fn "    if (TBC_UNLIKELY(rem < 0)) \{ tbc_depth_error(interp); tbc_st = 2; tbc_rc = TCL_ERROR; return rv; \}\n"
+    }
+    # arguments into locals
+    for {set v 0} {$v < $PI($P,nargs)} {incr v} {
+        set s [string index $sig $v]; set k [dict get $kap $v]
+        if {$k eq "F"} {
+            # (lives in the frame)
+        } elseif {$s eq $k} {
+            switch $k { I { append fn "    i$v = a$v;\n" } D { append fn "    d$v = a$v;\n" } B { append fn "    l$v = a$v; Tcl_IncrRefCount(l$v);\n" } }
+        } else {
+            switch $s { I { append fn "    l$v = tbc_newint(a$v);\n" } D { append fn "    l$v = tbc_newdbl(a$v);\n" } }
+        }
+    }
+    append fn "    TBC_HIT([cstring "V:$key"]);\n"
+    append fn "    goto [expr {[info exists VK($key,in,0)] && $typedMode ? "T0" : "redo_all"}];\n"
+
+    # ---- typed code
+    set tpcs {}
+    foreach pc $PI($P,reach) { if {$typedMode && [info exists VK($key,in,$pc)]} { lappend tpcs $pc } }
+    set stubs ""
+    foreach pc $tpcs {
+        set in $VK($key,in,$pc)
+        set r [stepT $key $pc $in]
+        set flow [dict get $r flow]; set out [dict get $r out]; set code [dict get $r code]
+        if {$flow eq "dead" && [info exists ::env(TBC_DEADOPS)]} { set cmdn ""; if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4}} { set nn [lindex $PI($P,ins,$pc) 1]; set ce [lindex $in [expr {[llength $in] - $nn}]]; if {[kd $ce] eq "L"} { set cmdn [lindex $PI($P,lits) [lt $ce]] } else { set cmdn "<dynamic>" } }; puts stderr "DEADOP [lindex $PI($P,ins,$pc) 0] $cmdn :: $key $pc [lindex $in end]" }
+        append fn "T$pc: ;  /* $PI($P,ins,$pc) */\n"
+        if {$pc in $PI($P,loopheads)} { append fn "    if (TBC_UNLIKELY(tbc_tick_due(interp))) goto D$pc;\n" }
+        switch $flow {
+            fall {
+                set nx $PI($P,next,$pc)
+                append fn "    $code [edgec $P $out $VK($key,in,$nx)]\n"
+            }
+            jump {
+                set tg [dict get $r tgt]
+                append fn "    [edgec $P $out $VK($key,in,$tg)] goto T$tg;\n"
+            }
+            cond {
+                set tg [dict get $r tgt]; set nx $PI($P,next,$pc)
+                set code [string map [list @TAKEN@ [edgec $P $out $VK($key,in,$tg)]] $code]
+                append fn "    $code [edgec $P $out $VK($key,in,$nx)]\n"
+            }
+            term { append fn "    $code\n" }
+            dead { append fn "    $code\n" }
+        }
+        append stubs [dict get $r stub]
+    }
+    # ---- fall-back stubs: leave typed mode at this instruction.  A function running in its own frame writes its state into that frame
+    # and continues in the boxed code; a function called directly (no frame) reports that the call must be made the ordinary way.
+    set usedD {}
+    foreach m [regexp -all -inline {goto D(\d+)} "$fn$stubs"] { if {![string match goto* $m]} { dict set usedD $m 1 } }
+    foreach pc $tpcs {
+        if {![dict exists $usedD $pc]} continue
+        set in $VK($key,in,$pc)
+        append fn "D$pc: ; TBC_HIT([cstring "D:$key:$pc"]); [enterG $key $pc $in "" [flushSet $P $pc]]\n"
+    }
+    append fn $stubs
+    # resume stubs of a proc with variables in the frame (see `fl`)
+    foreach fk [lsort [array names FRM [globEsc $key],*]] {
+        lassign [split [string range $fk [string length "$key,"] end] ,] fpc fm
+        append fn "FR${fpc}_$fm: ; TBC_HIT([cstring "R:$key:$fpc"]); [enterG $key $fpc $FRM($fk) "" [flushSet $P $fpc]]\n"
+    }
+
+    # ---- failure chains, exit
+    set masks {}
+    foreach k [array names FM [globEsc $key],*] { lappend masks [string range $k [string length "$key,"] end] }
+    foreach m [lsort -unique $masks] {
+        set bits [expr {"0x$m"}]
+        append fn "F$m: ;"
+        for {set p 63} {$p >= 0} {incr p -1} { if {$bits & (1 << $p)} { append fn " Tcl_DecrRefCount(s$p);" } }
+        append fn " goto redo_all;\n"
+    }
+    # an error in typed code, or a call that had to be made the ordinary way: the typed attempt had no effects, so the whole call is
+    # started again in the boxed code (which produces the error exactly as the interpreter would, with its error info), or, in a function
+    # that has no frame, the caller is told to make the call the ordinary way
+    append fn "redo_all:\n    if (!inframe) \{ tbc_st = 3; rc = TCL_OK; goto ret; \}\n    Tcl_ResetResult(interp); tbc_st = 0;\n"
+    append fn "    \{ int g_ = G_${cid}(interp, 0, NULL, 0); if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} \}\n"
+    append fn "ret:\n"
+    for {set v 0} {$v < $nv} {incr v} { append fn "    if (l$v) Tcl_DecrRefCount(l$v);[expr {[dict get $kap $v] eq "A" ? " free(av$v.p);" : [dict get $kap $v] eq "M" ? " tbc_imap_free(&mv$v);" : ""}]\n" }
+    append fn "early:\n    if (rc != TCL_OK) \{ tbc_st = 2; tbc_rc = rc; \}\n    return rv;\n\}\n"
+    # scratch vectors and maps of the stack slots are declared only where used (they would cost a zeroed frame on every call otherwise)
+    set decls ""
+    for {set k 0} {$k < $maxd2} {incr k} {
+        if {[string first "sv$k" $fn] >= 0} { append decls "    tbc_ivec sv$k = {NULL, 0}; (void) sv$k;\n" }
+        if {[string first "qv$k" $fn] >= 0} { append decls "    tbc_imap qv$k; memset(&qv$k, 0, sizeof qv$k);\n" }
+    }
+    set fn [string map [list @@VECDECLS@@ $decls] $fn]
+    return $fn
+}
+
+# ================================================================== driver
+# entry signatures
+set hints {}
+if {$hintFile ne ""} {
+    set f [open $hintFile]; set txt [read $f]; close $f
+    foreach l [split $txt \n] { if {[llength $l] >= 2} { dict set hints [lindex $l 0] [lrange $l 1 end] } }
+}
+# the `args` parameter is always a list: boxed
+proc fixSig {P sig} {
+    global PI
+    set i $PI($P,argsIdx)
+    if {$i >= 0 && [string length $sig] > $i} { set sig [string replace $sig $i $i B] }
+    return $sig
+}
+foreach P $translatable {
+    set k $PI($P,nargs)
+    newVariant $P [string repeat B $k]
+    set entries [list [string repeat B $k]]
+    if {$typedMode} {
+        set sigs [list [fixSig $P [string repeat I $k]]]
+        if {[dict exists $hints $P]} { set sigs [concat [lmap h [dict get $hints $P] {fixSig $P $h}] $sigs] }
+        foreach s [lsort -unique $sigs] {
+            if {[string length $s] != $k || [regexp {[^IDB]} $s]} continue
+            newVariant $P $s
+            if {$s ne [string repeat B $k]} { lappend entries $s }
+        }
+    }
+    set ENTRIES($P) $entries
+}
+
+# fixpoint over all variants: result kinds and the set of variants (discovered through direct calls)
+set round 0
+while 1 {
+    set changed 0
+    foreach key $variants { if {[analyze $key]} { set changed 1 } }
+    if {!$changed} {
+        # results that never became known (functions that never return normally) are boxed
+        foreach key $variants { if {$VK($key,ret) in {- U}} { set VK($key,ret) B; set changed 1 } }
+        if {!$changed} break
+    }
+    if {[incr round] > 50} { error "type analysis did not converge" }
+}
+
+# which variants can be re-entered through their own calls (need the recursion-depth guard)?
+foreach key $variants { set edges($key) {} }
+foreach key $variants {
+    lassign [keysplit $key] P sig
+    foreach pc [array names VK [globEsc $key],in,*] {
+        set pc [string range $pc [string length "$key,in,"] end]
+        set r [stepT $key $pc $VK($key,in,$pc)]
+        foreach c [dict get $r calls] { lappend edges($key) [lindex $c 0]/[lindex $c 1] }
+    }
+}
+proc reaches {from to} {
+    global edges
+    set seen {}; set todo $edges($from)
+    while {[llength $todo]} {
+        set x [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {$x eq $to} { return 1 }
+        if {$x in $seen} continue
+        lappend seen $x
+        set todo [concat $todo $edges($x)]
+    }
+    return 0
+}
+foreach key $variants { set REC($key) [reaches $key $key] }
+
+# ---- output
+if {[info commands ::tbc::fingerprint] eq ""} { error "translate.tcl must run under tcl-aot-sh, a tclsh with tbc::fingerprint linked in (tools/translator-shell.c)" }
+set out "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: [llength $translatable] procs, [llength $variants] typed variants.\n * Do not edit. */\n#include \"tbc_hook.h\"\n\n"
+foreach P $translatable {
+    set cid [cident $P]
+    append out "static int tbc_valid_$cid = 0;\n"
+    set i 0
+    foreach l $PI($P,lits) { append out "static Tcl_Obj *L_[cident $P]_$i;\n"; incr i }
+}
+append out "\n"
+proc vproto {key} {
+    global PI VK
+    lassign [keysplit $key] P sig
+    set plist {}
+    for {set v 0} {$v < $PI($P,nargs)} {incr v} { lappend plist [ctype [string index $sig $v]] }
+    return "[rettype $VK($key,ret)] V_[cident $P]_${sig}(Tcl_Interp *, int, int[expr {[llength $plist] ? ", " : ""}][join $plist {, }]);\n"
+}
+proc gproto {P} { return "int G_[cident $P](Tcl_Interp *, int, Tcl_Obj **, int);\n" }
+foreach key $variants { append out "static [vproto $key]" }
+foreach P $translatable { append out "static [gproto $P]" }
+append out "\n"
+foreach key $variants {
+    set t [emitVariant $key $REC($key)]
+    append out $t "\n"
+    lassign [keysplit $key] P sig
+    append VTXT($P) $t "\n"
+}
+foreach P $translatable { set t [emitG $P]; append out $t "\n"; set GTXT($P) $t }
+set outAfterG [string length $out]
+
+proc entryCall {cid s cargs rk ind} {
+    set call "V_${cid}_${s}(interp, tbc_maxdepth - ((Interp *) interp)->numLevels + TBC_REMK, 1[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }])"
+    switch $rk {
+        I { return "${ind}\{ int64_t r_ = $call; if (tbc_st) return tbc_finish(interp); Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); return TCL_OK; \}\n" }
+        D { return "${ind}\{ double r_ = $call; if (tbc_st) return tbc_finish(interp); Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); return TCL_OK; \}\n" }
+        default { return "${ind}\{ Tcl_Obj *r_ = $call; if (tbc_st) return tbc_finish(interp); Tcl_SetObjResult(interp, r_); Tcl_DecrRefCount(r_); return TCL_OK; \}\n" }
+    }
+}
+
+# the entry of a compiled body: the interpreter has set up the frame and bound the arguments; pick a typed variant if they fit
+foreach P $translatable {
+    set cid [cident $P]; set k $PI($P,nargs)
+    set sigs [lsort -unique $ENTRIES($P)]
+    set e "static int tbc_nat_${cid}(Tcl_Interp *interp, Proc *procPtr)\n\{\n    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    Tcl_Obj *objv\[[expr {$k+1}]\];\n    (void) procPtr;\n    objv\[0\] = NULL;\n"
+    for {set v 0} {$v < $k} {incr v} { append e "    objv\[[expr {$v+1}]\] = loc_\[$v\].value.objPtr;\n" }
+    append e "    tbc_maxdepth = Tcl_SetRecursionLimit(interp, 0);\n"
+    set generic [string repeat B $k]
+    foreach s $sigs {
+        if {$s eq $generic} continue
+        set key $P/$s
+        set decl ""; set tests {}; set cargs {}
+        for {set v 0} {$v < $k} {incr v} {
+            switch [string index $s $v] {
+                I { append decl " int64_t a$v;"; lappend tests "tbc_arg_int(objv\[[expr {$v+1}]\], &a$v)" }
+                D { append decl " double a$v;"; lappend tests "tbc_arg_dbl(objv\[[expr {$v+1}]\], &a$v)" }
+                B { lappend tests 1; append decl " Tcl_Obj *a$v = objv\[[expr {$v+1}]\];" }
+            }
+            lappend cargs a$v
+        }
+        set rk $VK($key,ret)
+        append e "    \{$decl\n        if ([expr {[llength $tests] ? [join $tests { && }] : 1}]) \{\n"
+        append e [entryCall $cid $s $cargs $rk "            "]
+        append e "        \}\n    \}\n"
+    }
+    set gcargs {}
+    for {set v 0} {$v < $k} {incr v} { lappend gcargs "objv\[[expr {$v+1}]\]" }
+    append e [entryCall $cid $generic $gcargs $VK($P/$generic,ret) "    "]
+    append e "\}\n\n"
+    append out $e
+}
+# canonical argument list (names, defaults) as the interpreter's Proc holds it: name, or name \003 default, joined by \002
+proc canonArgs {P} {
+    set r {}
+    foreach a [info args $P] { if {[info default $P $a d]} { lappend r "$a\003$d" } else { lappend r $a } }
+    join $r "\002"
+}
+foreach P $translatable {
+    set cid [cident $P]
+    set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+    set fp [tbc::fingerprint $P]
+    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0 \};\n"
+}
+# the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled
+if {[llength $refusedProcs]} {
+    append out "static const TbcRefused tbc_refused_$initName\[\] = \{\n"
+    foreach pr $refusedProcs {
+        lassign $pr P why
+        set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+        append out "    \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], [cstring $why] \},\n"
+    }
+    append out "\};\n"
+}
+set regId 0
+append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_build(interp) != TCL_OK) return TCL_ERROR;\n    tbc_rt_init();\n    tbc_capture_builtins(interp);\n    tbc_install(interp);\n"
+foreach P $translatable {
+    set i 0
+    foreach l $PI($P,lits) {
+        set e [lindex $PI($P,litd) $i]
+        if {$e ne ""} { append out "    L_[cident $P]_$i = tbc_lit_d($e);\n" } else { append out "    L_[cident $P]_$i = tbc_lit([cstring $l], [cbytes $l]);\n" }
+        incr i
+    }
+    append out "    tbc_register(interp, &tbc_e_[cident $P], [incr regId]);\n"
+}
+if {[llength $refusedProcs]} { append out "    tbc_register_refused(tbc_refused_$initName, [llength $refusedProcs]);\n" }
+append out "#ifdef TBC_COV\n    Tcl_CreateObjCommand(interp, \"::tbc_coverage\", tbc_cov_cmd, NULL, NULL);\n#endif\n"
+append out "    return TCL_OK;\n\}\n"
+
+if {$splitN > 0} {
+    # the same code in several files: what is shared between them has external linkage and is declared in a header; the typed code and the boxed code are
+    # in files of their own (so that they can be compiled at different optimisation levels, and in parallel)
+    set base [file rootname $outFile]; set tail [file tail $base]
+    set hdr "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: the shared declarations of the split module $initName. Do not edit. */\n#ifndef TBC_[string toupper [cident $initName]]_H\n#define TBC_[string toupper [cident $initName]]_H\n#include \"tbc_hook.h\"\n\n"
+    foreach P $translatable {
+        set cid [cident $P]
+        append hdr "extern int tbc_valid_$cid;\n"
+        for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append hdr "extern Tcl_Obj *L_${cid}_$i;\n" }
+    }
+    foreach key $variants { append hdr [vproto $key] }
+    foreach P $translatable { append hdr [gproto $P] }
+    append hdr "\n#endif\n"
+    set f [open $base.h w]; puts -nonewline $f $hdr; close $f
+    # the files of the typed code and of the boxed code: contiguous runs of procs of about equal size
+    proc splitGroups {texts n} {
+        upvar $texts T
+        global translatable
+        set total 0; foreach P $translatable { incr total [string length $T($P)] }
+        set groups {}; set cur {}; set acc 0; set want [expr {($total + $n - 1) / $n}]
+        foreach P $translatable {
+            lappend cur $P; incr acc [string length $T($P)]
+            if {$acc >= $want && [llength $groups] < $n - 1} { lappend groups $cur; set cur {}; set acc 0 }
+        }
+        if {[llength $cur]} { lappend groups $cur }
+        return $groups
+    }
+    set files {}
+    foreach {kind arr} {v VTXT g GTXT} {
+        set i 0
+        foreach grp [splitGroups $arr $splitN] {
+            incr i
+            set txt "/* Generated by tcl-aot (translate.tcl): part $i of the [expr {$kind eq "v" ? "typed" : "boxed"}] code of $initName. Do not edit. */\n#define TBC_SPLIT_USER 1\n#include \"$tail.h\"\n\n"
+            foreach P $grp {
+                if {$kind eq "v"} { append txt $VTXT($P) } else { append txt $GTXT($P) "\n" }
+            }
+            # the definitions have external linkage here (they are declared in the header); the static helper tables inside functions keep theirs
+            set txt [string map {"\nstatic int V_" "\nint V_" "\nstatic int64_t V_" "\nint64_t V_" "\nstatic double V_" "\ndouble V_" "\nstatic Tcl_Obj * V_" "\nTcl_Obj * V_" "\nstatic int G_" "\nint G_"} $txt]
+            set fname ${base}_${kind}${i}.c
+            set f [open $fname w]; puts -nonewline $f $txt; close $f
+            lappend files $fname
+        }
+    }
+    set init "/* Generated by tcl-aot (translate.tcl): the tables and Init of $initName (and the entry wrappers). Do not edit. */\n#define TBC_SPLIT_OWNER 1\n#include \"$tail.h\"\n\n"
+    foreach P $translatable {
+        set cid [cident $P]
+        append init "int tbc_valid_$cid = 0;\n"
+        for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append init "Tcl_Obj *L_${cid}_$i;\n" }
+    }
+    append init "\n" [string range $out $outAfterG end]
+    set f [open $outFile w]; puts -nonewline $f $init; close $f
+    puts "tcl-aot: split into [llength $files] code files + $base.h + $outFile"
+} else {
+    set f [open $outFile w]; puts -nonewline $f $out; close $f
+}
+puts "tcl-aot: [llength $translatable] of [llength $procNames] procs compiled, [llength $variants] variants"
+foreach key $variants { puts "  $key  ret=$VK($key,ret)  kinds=[dict values $VK($key,kap)]  [expr {$REC($key) ? "recursive" : ""}]" }

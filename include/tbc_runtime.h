@@ -1,0 +1,1029 @@
+/* tbc_runtime.h -- runtime support for the C that translate.tcl generates from Tcl 8.6 bytecode.
+ *
+ * Boxed code keeps the bytecode's operand stack in C variables s0..sN and a proc's locals in l0..lN or in the interpreter's call frame, all
+ * Tcl_Obj pointers, and follows the interpreter's reference-counting rules (the stack and each variable own one reference).  Integer and double
+ * arithmetic has inline fast paths; everything else (strings that look like numbers, bignums, errors) goes through Tcl's own ::tcl::mathop
+ * commands, so results and error messages are the interpreter's.  Typed code keeps integers and doubles in C variables and leaves for the boxed
+ * code (the D labels of the generated functions) when an assumption fails.
+ *
+ * A few internal Tcl functions are used (declared below, or in tclInt.h through tbc_hook.h); they are plain exported symbols of a statically
+ * linked libtcl.  Because of that a generated module is valid for one Tcl release only; tbc_check_build refuses to load it into another.
+ */
+#ifndef TBC_RUNTIME_H
+#define TBC_RUNTIME_H
+
+#include <tcl.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+
+extern Tcl_Obj *TclLsetList(Tcl_Interp *, Tcl_Obj *listPtr, Tcl_Obj *indexArgPtr, Tcl_Obj *valuePtr);
+extern Tcl_Obj *TclLindexList(Tcl_Interp *, Tcl_Obj *listPtr, Tcl_Obj *argPtr);
+extern int TclIncrObj(Tcl_Interp *, Tcl_Obj *valuePtr, Tcl_Obj *incrPtr);
+extern void TclExprFloatError(Tcl_Interp *, double value);   /* "domain error" for NaN results, as expr raises */
+
+#define TBC_INLINE static inline __attribute__((always_inline))
+#define TBC_UNLIKELY(x) __builtin_expect(!!(x), 0)
+
+/* The state the compiled code shares.  A module in one file keeps it static.  A module split over several files (translate.tcl -split) defines it in one of them
+ * (TBC_SPLIT_OWNER, the file with the module's Init) and the others declare it (TBC_SPLIT_USER). */
+#if defined(TBC_SPLIT_OWNER)
+# define TBC_SHARED
+#elif defined(TBC_SPLIT_USER)
+# define TBC_SHARED extern
+#else
+# define TBC_SHARED static
+#endif
+TBC_SHARED const Tcl_ObjType *tbcInt, *tbcWide, *tbcDouble, *tbcString, *tbcList;
+TBC_SHARED Tcl_Obj *tbcZero, *tbcOne, *tbcEmpty;
+enum { TBC_ADD, TBC_SUB, TBC_MULT, TBC_DIV, TBC_MOD, TBC_LT, TBC_LE, TBC_GT, TBC_GE, TBC_EQ, TBC_NEQ, TBC_BAND, TBC_BOR, TBC_BXOR, TBC_SHL, TBC_SHR, TBC_POW, TBC_NEG, TBC_POS, TBC_BNOT, TBC_LNOT, TBC_NOPS };
+TBC_SHARED Tcl_Obj *tbcMathop[TBC_NOPS];
+
+static void tbc_rt_init(void) {
+    static int done;
+    static const char *const names[TBC_NOPS] = { "::tcl::mathop::+", "::tcl::mathop::-", "::tcl::mathop::*", "::tcl::mathop::/",
+        "::tcl::mathop::%", "::tcl::mathop::<", "::tcl::mathop::<=", "::tcl::mathop::>", "::tcl::mathop::>=", "::tcl::mathop::==",
+        "::tcl::mathop::!=", "::tcl::mathop::&", "::tcl::mathop::|", "::tcl::mathop::^", "::tcl::mathop::<<", "::tcl::mathop::>>",
+        "::tcl::mathop::**", "::tcl::mathop::-", "::tcl::mathop::+", "::tcl::mathop::~", "::tcl::mathop::!" };
+    int i;
+    if (done) return;
+    done = 1;
+    tbcInt = Tcl_GetObjType("int");
+    tbcWide = Tcl_GetObjType("wideInt");
+    tbcDouble = Tcl_GetObjType("double");
+    tbcString = Tcl_GetObjType("string");
+    tbcList = Tcl_GetObjType("list");
+    if (!tbcWide) tbcWide = (const Tcl_ObjType *) &tbcWide;   /* a type no object has; keeps "typePtr == NULL" from matching */
+    tbcZero = Tcl_NewIntObj(0); Tcl_IncrRefCount(tbcZero);
+    tbcOne = Tcl_NewIntObj(1); Tcl_IncrRefCount(tbcOne);
+    tbcEmpty = Tcl_NewObj(); Tcl_IncrRefCount(tbcEmpty);
+    for (i = 0; i < TBC_NOPS; i++) { tbcMathop[i] = Tcl_NewStringObj(names[i], -1); Tcl_IncrRefCount(tbcMathop[i]); }
+}
+
+/* A literal from the bytecode's literal table: a string object that keeps its string form; numbers get their numeric form too,
+ * as they would the first time the interpreter used them, so the fast paths see them. */
+static Tcl_Obj *tbc_lit_d(double d) { Tcl_Obj *o = Tcl_NewDoubleObj(d); Tcl_IncrRefCount(o); return o; }
+static Tcl_Obj *tbc_lit(const char *s, int len) {
+    Tcl_Obj *o = Tcl_NewStringObj(s, len);
+    Tcl_WideInt w;
+    double d;
+    Tcl_IncrRefCount(o);
+    if (len > 0) {
+        if (Tcl_GetWideIntFromObj(NULL, o, &w) != TCL_OK) (void) Tcl_GetDoubleFromObj(NULL, o, &d);
+    }
+    return o;
+}
+
+/* ---- numbers ---- */
+
+/* an object that is not (yet) a number by type may still hold one as text (a list element, a substring...): the interpreter parses it the
+ * first time an instruction needs it and keeps the number; so do we -- with its own parser, so the same strings are numbers */
+static __attribute__((noinline)) int tbc_cvt_int(Tcl_Obj *o) {
+    ClientData ptr;
+    int type;
+    if (o->typePtr == tbcDouble || o->typePtr == tbcList) return 0;         /* (a list would only be re-parsed to fail: not a number) */
+    if (TclGetNumberFromObj(NULL, o, &ptr, &type) != TCL_OK) return 0;
+    return o->typePtr == tbcInt || o->typePtr == tbcWide;
+}
+TBC_INLINE int tbc_isint(Tcl_Obj *o) { return o->typePtr == tbcInt || o->typePtr == tbcWide || tbc_cvt_int(o); }
+TBC_INLINE Tcl_WideInt tbc_wide(Tcl_Obj *o) { return o->typePtr == tbcInt ? (Tcl_WideInt) o->internalRep.longValue : o->internalRep.wideValue; }
+
+/* 1: integer in *w, 2: double in *d, 0: anything else (strings, lists, bignums...) */
+static __attribute__((noinline)) int tbc_num_text(Tcl_Obj *o, Tcl_WideInt *w, double *d) {
+    ClientData ptr;
+    int type;
+    if (o->typePtr == tbcList) return 0;
+    if (TclGetNumberFromObj(NULL, o, &ptr, &type) != TCL_OK) return 0;
+    if (type == TCL_NUMBER_LONG) { *w = (Tcl_WideInt) *(const long *) ptr; return 1; }
+    if (type == TCL_NUMBER_WIDE) { *w = *(const Tcl_WideInt *) ptr; return 1; }
+    if (type == TCL_NUMBER_DOUBLE) { *d = *(const double *) ptr; return 2; }
+    return 0;
+}
+TBC_INLINE int tbc_num(Tcl_Obj *o, Tcl_WideInt *w, double *d) {
+    const Tcl_ObjType *t = o->typePtr;
+    if (t == tbcInt) { *w = (Tcl_WideInt) o->internalRep.longValue; return 1; }
+    if (t == tbcWide) { *w = o->internalRep.wideValue; return 1; }
+    if (t == tbcDouble) { *d = o->internalRep.doubleValue; return 2; }
+    return tbc_num_text(o, w, d);
+}
+
+/* Result of a binary operation replaces *pa (the stack slot holding the left operand); the right operand's reference is
+ * released.  A temporary (unshared) left operand is overwritten in place, like the interpreter does. */
+/* an integer value in an object, as the interpreter's TclSetLongObj / TclNewLongObj macros do it (Tcl_SetWideIntObj is a call and tests the range) */
+TBC_INLINE void tbc_setint(Tcl_Obj *o, Tcl_WideInt r) {
+    TclInvalidateStringRep(o);
+    TclFreeIntRep(o);
+    if (sizeof(long) == sizeof(Tcl_WideInt) || r == (long) r) { o->internalRep.longValue = (long) r; o->typePtr = tbcInt; }
+    else { o->internalRep.wideValue = r; o->typePtr = tbcWide; }
+}
+TBC_INLINE Tcl_Obj *tbc_mkint(Tcl_WideInt r) {
+    Tcl_Obj *o;
+    TclNewObj(o);
+    o->bytes = NULL;
+    if (sizeof(long) == sizeof(Tcl_WideInt) || r == (long) r) { o->internalRep.longValue = (long) r; o->typePtr = tbcInt; }
+    else { o->internalRep.wideValue = r; o->typePtr = tbcWide; }
+    return o;
+}
+TBC_INLINE void tbc_putint(Tcl_Obj **pa, Tcl_Obj *a, Tcl_Obj *b, Tcl_WideInt r) {
+    if (!Tcl_IsShared(a)) {
+        tbc_setint(a, r);
+    } else {
+        Tcl_Obj *n = tbc_mkint(r);
+        Tcl_IncrRefCount(n);
+        Tcl_DecrRefCount(a);
+        *pa = n;
+    }
+    Tcl_DecrRefCount(b);
+}
+TBC_INLINE void tbc_putdbl(Tcl_Obj **pa, Tcl_Obj *a, Tcl_Obj *b, double r) {
+    if (!Tcl_IsShared(a)) {
+        Tcl_SetDoubleObj(a, r);
+    } else {
+        Tcl_Obj *n = Tcl_NewDoubleObj(r);
+        Tcl_IncrRefCount(n);
+        Tcl_DecrRefCount(a);
+        *pa = n;
+    }
+    Tcl_DecrRefCount(b);
+}
+TBC_INLINE void tbc_putbool(Tcl_Obj **pa, Tcl_Obj *a, Tcl_Obj *b, int v) {
+    Tcl_Obj *r = v ? tbcOne : tbcZero;
+    Tcl_IncrRefCount(r);
+    Tcl_DecrRefCount(a);
+    *pa = r;
+    Tcl_DecrRefCount(b);
+}
+
+/* the interpreter's result object, taken over (it keeps its reference) and replaced by a fresh empty one: what the interpreter's own
+ * instructions do after a command; Tcl_ResetResult would also clear the error code and error info [Tcl bug 804681] */
+TBC_INLINE Tcl_Obj *tbc_takeres(Tcl_Interp *interp) {
+    Interp *ip = (Interp *) interp;
+    Tcl_Obj *r = ip->objResultPtr, *n = Tcl_NewObj();
+    Tcl_IncrRefCount(n);
+    ip->objResultPtr = n;
+    return r;
+}
+/* the command frame of the bytecode that is running (the stub of the proc, whose location tables are the original body's): point it at the
+ * instruction that is being executed, as the interpreter does before it invokes a command, so that `info frame` and the line numbers of
+ * scripts run from here are the original's.  Commands are invoked with the same flags as the interpreter's invoke instruction. */
+#define TBC_EV (TCL_EVAL_NOERR | TCL_EVAL_SOURCE_IN_FRAME)
+TBC_INLINE void tbc_setpc(Tcl_Interp *interp, int pc) {
+    CmdFrame *cf = ((Interp *) interp)->cmdFramePtr;
+    if (cf && cf->type == TCL_LOCATION_BC) cf->data.tebc.pc = (char *) ((ByteCode *) cf->data.tebc.codePtr)->codeStart + pc;
+}
+
+/* The interpreter looks for asynchronous handlers, cancellation and limit expiry every 64 instructions; compiled code does so at each pass
+ * through a loop head (every 64th: a loop is the only way to run for long without making a call) */
+/* the log of an error in the boxed code: the live stack slots are the words of the command that failed */
+#define TBC_XLOG(pc, so, sl, d, ...) do { if (rcg_ == TCL_ERROR) { Tcl_Obj *t_[(d) + 1] = { NULL, ##__VA_ARGS__ }; tbc_logerr(interp, pc, so, sl, &t_[d]); } } while (0)
+TBC_SHARED unsigned tbc_ticks;
+TBC_INLINE int tbc_tick_due(Tcl_Interp *interp) {
+    Interp *iPtr = (Interp *) interp;
+    return ((++tbc_ticks & 63) == 0) && (TclAsyncReady(iPtr) || TclCanceled(iPtr) || TclLimitReady(iPtr->limit));
+}
+/* run what is due; nonzero if that raised an error */
+static int tbc_poll(Tcl_Interp *interp) {
+    Interp *iPtr = (Interp *) interp;
+    if (TclAsyncReady(iPtr) && Tcl_AsyncInvoke(interp, TCL_OK) == TCL_ERROR) return 1;
+    if (TclCanceled(iPtr) && Tcl_Canceled(interp, TCL_LEAVE_ERR_MSG) == TCL_ERROR) return 1;
+    if (TclLimitReady(iPtr->limit) && Tcl_LimitCheck(interp) == TCL_ERROR) return 1;
+    return 0;
+}
+
+#ifdef TBC_HOOK
+/* the interpreter's own instruction for an operator, run on the operands (b is NULL for a unary operator): 0 and *res (referenced) on success,
+ * 1 on error (the interpreter's error, as the instruction raises it), -1 if this is not available */
+static int tbc_tebc(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, Tcl_Obj **res);
+static int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b);
+#endif
+/* The general case, by calling ::tcl::mathop::<op> exactly as a script would.  On error the operands stay where they are. */
+static int tbc_slow(Tcl_Interp *interp, int op, Tcl_Obj **pa, Tcl_Obj *b) {
+    Tcl_Obj *objv[3], *r;
+    int rc;
+#ifdef TBC_HOOK
+    if (tbc_bigop(op, pa, b) == 0) return 0;
+    rc = tbc_tebc(interp, op, *pa, b, &r);
+    if (rc >= 0) {
+        if (rc) return 1;
+        Tcl_DecrRefCount(*pa); Tcl_DecrRefCount(b); *pa = r;
+        return 0;
+    }
+#endif
+    objv[0] = tbcMathop[op]; objv[1] = *pa; objv[2] = b;
+    rc = Tcl_EvalObjv(interp, 3, objv, TCL_EVAL_NOERR);
+    if (rc != TCL_OK) return 1;
+    r = tbc_takeres(interp);
+    if (r->typePtr == tbcDouble && r->internalRep.doubleValue != r->internalRep.doubleValue) {   /* NaN: expr raises, mathop does not */
+        TclExprFloatError(interp, r->internalRep.doubleValue);
+        Tcl_DecrRefCount(r);
+        return 1;
+    }
+    Tcl_DecrRefCount(*pa);
+    Tcl_DecrRefCount(b);
+    *pa = r;
+    return 0;
+}
+
+/* The unary operators (-, +, ~, !): the common cases here, the rest by the mathop command, which raises the interpreter's errors.  The operand
+ * stays in place on error. */
+static int tbc_slow1(Tcl_Interp *interp, int op, Tcl_Obj **pa) {
+    Tcl_Obj *objv[2], *r;
+#ifdef TBC_HOOK
+    {
+        int rc1 = tbc_tebc(interp, op, *pa, NULL, &r);
+        if (rc1 >= 0) {
+            if (rc1) return 1;
+            Tcl_DecrRefCount(*pa); *pa = r;
+            return 0;
+        }
+    }
+#endif
+    objv[0] = tbcMathop[op]; objv[1] = *pa;
+    if (Tcl_EvalObjv(interp, 2, objv, TCL_EVAL_NOERR) != TCL_OK) return 1;
+    r = tbc_takeres(interp);
+    if (r->typePtr == tbcDouble && r->internalRep.doubleValue != r->internalRep.doubleValue) { TclExprFloatError(interp, r->internalRep.doubleValue); Tcl_DecrRefCount(r); return 1; }
+    Tcl_DecrRefCount(*pa);
+    *pa = r;
+    return 0;
+}
+static int tbc_un(Tcl_Interp *interp, int op, Tcl_Obj **pa) {
+    Tcl_Obj *a = *pa, *r = NULL;
+    Tcl_WideInt x = 0;
+    double dx = 0;
+    int ta = tbc_num(a, &x, &dx);
+    switch (op) {
+    case TBC_NEG:
+        if (ta == 1 && x != INT64_MIN) r = tbc_mkint(-x);
+        else if (ta == 2 && dx == dx) r = Tcl_NewDoubleObj(-dx);
+        break;
+    case TBC_POS:
+        if (ta == 1 || (ta == 2 && dx == dx)) return 0;                  /* the operand itself stays */
+        break;
+    case TBC_BNOT:
+        if (ta == 1) r = tbc_mkint(~x);
+        break;
+    case TBC_LNOT:
+        if (ta == 1) r = x == 0 ? tbcOne : tbcZero;
+        else if (ta == 2 && dx == dx) r = dx == 0.0 ? tbcOne : tbcZero;
+        break;
+    }
+    if (!r) return tbc_slow1(interp, op, pa);
+    Tcl_IncrRefCount(r);
+    Tcl_DecrRefCount(a);
+    *pa = r;
+    return 0;
+}
+
+#define TBC_2P53 (((Tcl_WideInt) 1) << 53)
+
+/* Returns 0 on success, nonzero on error (nothing consumed). */
+TBC_INLINE int tbc_bin(Tcl_Interp *interp, int op, Tcl_Obj **pa, Tcl_Obj *b) {
+    Tcl_Obj *a = *pa;
+    Tcl_WideInt x = 0, y = 0, r;
+    double dx = 0, dy = 0;
+    int ta = tbc_num(a, &x, &dx), tb = tbc_num(b, &y, &dy);
+    if (op >= TBC_BAND) {                                       /* bitwise operators and **: only machine integers are done here */
+        if (ta == 1 && tb == 1) {
+            switch (op) {
+            case TBC_BAND: tbc_putint(pa, a, b, x & y); return 0;
+            case TBC_BOR: tbc_putint(pa, a, b, x | y); return 0;
+            case TBC_BXOR: tbc_putint(pa, a, b, x ^ y); return 0;
+            case TBC_SHL:
+                if (y >= 0 && y < 64) { r = (Tcl_WideInt) ((uint64_t) x << y); if ((r >> y) == x) { tbc_putint(pa, a, b, r); return 0; } }
+                else if (y >= 64 && x == 0) { tbc_putint(pa, a, b, 0); return 0; }
+                break;
+            case TBC_SHR:
+                if (y >= 0) { r = y >= 64 ? (x < 0 ? -1 : 0) : (x >> y); tbc_putint(pa, a, b, r); return 0; }
+                break;
+            case TBC_POW:
+                if (y == 1) { Tcl_DecrRefCount(b); return 0; }                   /* x**1 is x itself, text and all */
+                if (y >= 0) {
+                    Tcl_WideInt base = x, acc = 1, e = y;
+                    int ok = 1;
+                    while (e) {
+                        if ((e & 1) && __builtin_mul_overflow(acc, base, &acc)) { ok = 0; break; }
+                        e >>= 1;
+                        if (e && __builtin_mul_overflow(base, base, &base)) { ok = 0; break; }
+                    }
+                    if (ok) { tbc_putint(pa, a, b, acc); return 0; }
+                }
+                break;
+            }
+        }
+        return tbc_slow(interp, op, pa, b);
+    }
+    if (ta == 1 && tb == 1) {
+        switch (op) {
+        case TBC_ADD: if (!__builtin_add_overflow(x, y, &r)) { tbc_putint(pa, a, b, r); return 0; } break;
+        case TBC_SUB: if (!__builtin_sub_overflow(x, y, &r)) { tbc_putint(pa, a, b, r); return 0; } break;
+        case TBC_MULT: if (!__builtin_mul_overflow(x, y, &r)) { tbc_putint(pa, a, b, r); return 0; } break;
+        case TBC_DIV:
+            if (y != 0 && y != -1) {
+                r = x / y;
+                if ((x % y != 0) && ((x < 0) != (y < 0))) r--;      /* Tcl rounds toward minus infinity */
+                tbc_putint(pa, a, b, r); return 0;
+            }
+            break;
+        case TBC_MOD:
+            if (y != 0 && y != -1) {
+                r = x % y;
+                if (r != 0 && ((r < 0) != (y < 0))) r += y;         /* the result takes the divisor's sign */
+                tbc_putint(pa, a, b, r); return 0;
+            }
+            break;
+        case TBC_LT: tbc_putbool(pa, a, b, x < y); return 0;
+        case TBC_LE: tbc_putbool(pa, a, b, x <= y); return 0;
+        case TBC_GT: tbc_putbool(pa, a, b, x > y); return 0;
+        case TBC_GE: tbc_putbool(pa, a, b, x >= y); return 0;
+        case TBC_EQ: tbc_putbool(pa, a, b, x == y); return 0;
+        case TBC_NEQ: tbc_putbool(pa, a, b, x != y); return 0;
+        }
+    } else if (ta && tb) {                                          /* at least one double */
+        if (ta == 1) {
+            if (op >= TBC_LT && (x > TBC_2P53 || x < -TBC_2P53)) goto slow;     /* not exactly representable: let Tcl compare */
+            dx = (double) x;
+        }
+        if (tb == 1) {
+            if (op >= TBC_LT && (y > TBC_2P53 || y < -TBC_2P53)) goto slow;
+            dy = (double) y;
+        }
+        {   /* a NaN result is an error in expr: leave it to the slow path, which reports it */
+            double dr;
+            switch (op) {
+            case TBC_ADD: dr = dx + dy; if (dr == dr) { tbc_putdbl(pa, a, b, dr); return 0; } goto slow;
+            case TBC_SUB: dr = dx - dy; if (dr == dr) { tbc_putdbl(pa, a, b, dr); return 0; } goto slow;
+            case TBC_MULT: dr = dx * dy; if (dr == dr) { tbc_putdbl(pa, a, b, dr); return 0; } goto slow;
+            case TBC_DIV: if (dy != 0.0) { dr = dx / dy; if (dr == dr) { tbc_putdbl(pa, a, b, dr); return 0; } } goto slow;
+            default: break;
+            }
+        }
+        switch (op) {
+        case TBC_LT: tbc_putbool(pa, a, b, dx < dy); return 0;
+        case TBC_LE: tbc_putbool(pa, a, b, dx <= dy); return 0;
+        case TBC_GT: tbc_putbool(pa, a, b, dx > dy); return 0;
+        case TBC_GE: tbc_putbool(pa, a, b, dx >= dy); return 0;
+        case TBC_EQ: tbc_putbool(pa, a, b, dx == dy); return 0;
+        case TBC_NEQ: tbc_putbool(pa, a, b, dx != dy); return 0;
+        }
+    }
+    if (op >= TBC_LT && op <= TBC_NEQ && (!ta || !tb)) {            /* a comparison with something that is not a number: the interpreter compares the strings */
+        ClientData p1, p2;
+        int t1, t2;
+        if (TclCheckEmptyString(a) > 0 || TclCheckEmptyString(b) > 0 || TclGetNumberFromObj(NULL, a, &p1, &t1) != TCL_OK
+                || TclGetNumberFromObj(NULL, b, &p2, &t2) != TCL_OK) {
+            int m = TclStringCmp(a, b, op == TBC_EQ || op == TBC_NEQ, 0, -1);
+            tbc_putbool(pa, a, b, op == TBC_LT ? m < 0 : op == TBC_LE ? m <= 0 : op == TBC_GT ? m > 0 : op == TBC_GE ? m >= 0 : op == TBC_EQ ? m == 0 : m != 0);
+            return 0;
+        }
+    }
+slow:
+    return tbc_slow(interp, op, pa, b);
+}
+
+/* Truth value for a conditional jump; TCL_OK or TCL_ERROR (message in the interpreter, as for `if {$x}`). */
+TBC_INLINE int tbc_truth(Tcl_Interp *interp, Tcl_Obj *o, int *res) {
+    const Tcl_ObjType *t = o->typePtr;
+    if (t == tbcInt) { *res = o->internalRep.longValue != 0; return TCL_OK; }
+    if (t == tbcWide) { *res = o->internalRep.wideValue != 0; return TCL_OK; }
+    if (t == tbcDouble) { *res = o->internalRep.doubleValue != 0.0; return TCL_OK; }
+    return Tcl_GetBooleanFromObj(interp, o, res);
+}
+
+/* ---- variables ---- */
+
+static void tbc_unset_err(Tcl_Interp *interp, const char *name) {
+    Tcl_SetObjResult(interp, Tcl_ObjPrintf("can't read \"%s\": no such variable", name));
+    Tcl_SetErrorCode(interp, "TCL", "READ", "VARNAME", NULL);
+}
+
+/* incr by an immediate or by an integer object; *pv is the variable's object.  Returns 0 or nonzero on error. */
+TBC_INLINE int tbc_incr(Tcl_Interp *interp, Tcl_Obj **pv, Tcl_WideInt imm, Tcl_Obj *incObj) {
+    Tcl_Obj *o = *pv;
+    Tcl_WideInt w, step = imm;
+    if (!o) {                                                       /* incr of an unset variable creates it */
+        if (incObj && Tcl_GetWideIntFromObj(interp, incObj, &step) != TCL_OK) return 1;
+        o = Tcl_NewWideIntObj(step);
+        Tcl_IncrRefCount(o);
+        *pv = o;
+        return 0;
+    }
+    if (incObj) {
+        if (!tbc_isint(incObj)) goto slow;
+        step = tbc_wide(incObj);
+    }
+    if (tbc_isint(o) && !__builtin_add_overflow(tbc_wide(o), step, &w)) {
+        if (!Tcl_IsShared(o)) {
+            Tcl_SetWideIntObj(o, w);
+        } else {
+            Tcl_Obj *n = Tcl_NewWideIntObj(w);
+            Tcl_IncrRefCount(n);
+            Tcl_DecrRefCount(o);
+            *pv = n;
+        }
+        return 0;
+    }
+slow:
+    {
+        Tcl_Obj *inc = incObj, *n;
+        int rc;
+        if (!inc) { inc = Tcl_NewWideIntObj(imm); Tcl_IncrRefCount(inc); }
+        if (Tcl_IsShared(o)) {
+            n = Tcl_DuplicateObj(o);
+            Tcl_IncrRefCount(n);
+            Tcl_DecrRefCount(o);
+            *pv = o = n;
+        }
+        rc = TclIncrObj(interp, o, inc);
+        if (!incObj) Tcl_DecrRefCount(inc);
+        return rc != TCL_OK;
+    }
+}
+
+/* append: *pv is the variable's object (NULL if unset), v the value on top of the stack.  Returns 0 or nonzero on error. */
+TBC_INLINE int tbc_append(Tcl_Obj **pv, Tcl_Obj *v) {
+    Tcl_Obj *o = *pv;
+    if (!o) {
+        *pv = v;
+        Tcl_IncrRefCount(v);
+        return 0;
+    }
+    if (Tcl_IsShared(o)) {
+        Tcl_Obj *n = Tcl_DuplicateObj(o);
+        Tcl_IncrRefCount(n);
+        Tcl_DecrRefCount(o);
+        *pv = o = n;
+    }
+    Tcl_AppendObjToObj(o, v);
+    return 0;
+}
+
+/* ---- lists, strings, dicts ---- */
+
+/* lindex list index: the result carries a reference.  NULL on error. */
+TBC_INLINE Tcl_Obj *tbc_lindex(Tcl_Interp *interp, Tcl_Obj *list, Tcl_Obj *idx) {
+    if (tbc_isint(idx)) {
+        int n;
+        Tcl_Obj **v;
+        Tcl_WideInt w = tbc_wide(idx);
+        if (Tcl_ListObjGetElements(interp, list, &n, &v) != TCL_OK) return NULL;
+        {
+            Tcl_Obj *r;
+            /* outside the list Tcl's own index rules apply (an index is a 32-bit quantity: 4294967295 is -1, -4294967295 is 1, and
+             * anything beyond is a "bad index" error) */
+            if (w < 0 || w >= n) return TclLindexList(interp, list, idx);
+            r = v[w];
+            Tcl_IncrRefCount(r);
+            return r;
+        }
+    }
+    return TclLindexList(interp, list, idx);
+}
+
+/* strcat as the interpreter's INST_STR_CONCAT1 does it (tclExecute.c): all-byte-array operands give a byte array, anything else a string built with one
+ * allocation; when nothing but the first operand has any content the result is the first operand itself.  The result has a reference count of 1. */
+static Tcl_Obj *tbc_concat(int n, Tcl_Obj **v) {
+    int i, len, first, app = 0, onlyb = 1;
+    Tcl_Obj *r;
+    char *p;
+    const char *b;
+    for (i = 0; i < n; i++) {
+        Tcl_Obj *o = v[i];
+        if (o->typePtr != &tclByteArrayType && o->bytes != tclEmptyStringRep) { onlyb = 0; break; }
+        if (o->typePtr == &tclByteArrayType && o->bytes != NULL) { onlyb = 0; break; }
+    }
+    if (onlyb) {
+        for (i = 1; i < n; i++) if (v[i]->bytes != tclEmptyStringRep) { Tcl_GetByteArrayFromObj(v[i], &len); app += len; }
+    } else {
+        for (i = 1; i < n; i++) { (void) Tcl_GetStringFromObj(v[i], &len); app += len; }
+    }
+    if (app < 0) Tcl_Panic("max size for a Tcl value (%d bytes) exceeded", INT_MAX);
+    if (app == 0) { Tcl_IncrRefCount(v[0]); return v[0]; }
+    if (onlyb) {
+        const unsigned char *fb = Tcl_GetByteArrayFromObj(v[0], &first);
+        if (first + app < 0) Tcl_Panic("max size for a Tcl value (%d bytes) exceeded", INT_MAX);
+        r = Tcl_NewObj();
+        p = (char *) Tcl_SetByteArrayLength(r, first + app);
+        memcpy(p, fb, (size_t) first);
+        p += first;
+        for (i = 1; i < n; i++) if (v[i]->bytes != tclEmptyStringRep) { b = (const char *) Tcl_GetByteArrayFromObj(v[i], &len); memcpy(p, b, (size_t) len); p += len; }
+    } else {
+        b = Tcl_GetStringFromObj(v[0], &first);
+        if (first + app < 0) Tcl_Panic("max size for a Tcl value (%d bytes) exceeded", INT_MAX);
+        r = Tcl_NewObj();
+        p = (char *) Tcl_Alloc((unsigned) (first + app + 1));
+        r->bytes = p;
+        r->length = first + app;
+        memcpy(p, b, (size_t) first);
+        p += first;
+        for (i = 1; i < n; i++) { b = Tcl_GetStringFromObj(v[i], &len); memcpy(p, b, (size_t) len); p += len; }
+        *p = '\0';
+    }
+    Tcl_IncrRefCount(r);
+    return r;
+}
+
+/* dict incr by an immediate: *pd is the variable's dict (NULL if unset), key the key object.  Returns 0 or nonzero on error. */
+static int tbc_dict_incr(Tcl_Interp *interp, Tcl_Obj **pd, Tcl_Obj *key, Tcl_WideInt imm) {
+    Tcl_Obj *dict = *pd, *val = NULL;
+    int fresh = 0;
+    if (!dict) { dict = Tcl_NewObj(); fresh = 1; }
+    else if (Tcl_IsShared(dict)) { dict = Tcl_DuplicateObj(dict); fresh = 1; }
+    if (Tcl_DictObjGet(interp, dict, key, &val) != TCL_OK) goto fail;
+    if (!val) {
+        if (Tcl_DictObjPut(interp, dict, key, Tcl_NewWideIntObj(imm)) != TCL_OK) goto fail;
+    } else if (tbc_isint(val)) {
+        Tcl_WideInt w;
+        if (!__builtin_add_overflow(tbc_wide(val), imm, &w)) {
+            if (Tcl_DictObjPut(interp, dict, key, Tcl_NewWideIntObj(w)) != TCL_OK) goto fail;
+            goto stored;
+        }
+        goto slow;
+    } else {
+        Tcl_Obj *nv, *inc;
+        int rc;
+    slow:
+        nv = Tcl_DuplicateObj(val);
+        Tcl_IncrRefCount(nv);
+        inc = Tcl_NewWideIntObj(imm);
+        Tcl_IncrRefCount(inc);
+        rc = TclIncrObj(interp, nv, inc);
+        Tcl_DecrRefCount(inc);
+        if (rc == TCL_OK) rc = Tcl_DictObjPut(interp, dict, key, nv);
+        Tcl_DecrRefCount(nv);
+        if (rc != TCL_OK) goto fail;
+    }
+stored:
+    if (fresh) {
+        Tcl_IncrRefCount(dict);
+        if (*pd) Tcl_DecrRefCount(*pd);
+        *pd = dict;
+    }
+    return 0;
+fail:
+    if (fresh) { Tcl_IncrRefCount(dict); Tcl_DecrRefCount(dict); }
+    return 1;
+}
+
+
+/* ===================================================================================================================
+ * Typed variants.
+ *
+ * Each translated proc is compiled to one C function per argument-type signature (I = int64, D = double, B = Tcl_Obj*).
+ * Inside, values the translator can prove are integers or doubles live in plain C variables; whenever something unexpected
+ * happens (overflow, a non-numeric value, a redefined callee...) the function boxes its live values and continues in the
+ * ordinary boxed code at the same instruction ("deoptimisation"), so results are always the interpreter's.
+ *
+ * A typed function returns its result in the C return value (int64_t, double or Tcl_Obj*), and reports anything else through
+ * tbc_st: 0 = normal; 1 = the function deoptimised and its result is the boxed object in tbc_box (callers expecting a typed
+ * result must then continue in boxed code); 2 = error (Tcl return code in tbc_rc, message already in the interpreter).
+ * Single interpreter, single thread.
+ * ================================================================================================================= */
+
+#include <inttypes.h>
+
+TBC_SHARED int tbc_st, tbc_rc;
+TBC_SHARED Tcl_Obj *tbc_box;
+TBC_SHARED int tbc_depth, tbc_maxdepth;
+#ifndef TBC_REMK
+#define TBC_REMK 0
+#endif
+
+#define TBC_2P53 (((Tcl_WideInt) 1) << 53)
+
+TBC_INLINE Tcl_Obj *tbc_ref(Tcl_Obj *o) { Tcl_IncrRefCount(o); return o; }
+TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) { Tcl_Obj *o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); return o; }
+TBC_INLINE Tcl_Obj *tbc_newdbl(double d) { Tcl_Obj *o = Tcl_NewDoubleObj(d); Tcl_IncrRefCount(o); return o; }
+
+static void tbc_depth_error(Tcl_Interp *interp) {
+    Tcl_SetObjResult(interp, Tcl_NewStringObj("too many nested evaluations (infinite loop?)", -1));
+    Tcl_SetErrorCode(interp, "TCL", "LIMIT", "STACK", NULL);
+}
+
+/* After a typed function returned with tbc_st != 0, from the command entry point. */
+static int tbc_finish(Tcl_Interp *interp) {
+    if (tbc_st == 1) {
+        Tcl_SetObjResult(interp, tbc_box);
+        Tcl_DecrRefCount(tbc_box);
+        tbc_box = NULL;
+        tbc_st = 0;
+        return TCL_OK;
+    }
+    tbc_st = 0;
+    return tbc_rc;
+}
+
+/* Arguments: only values whose string form is what we would print for the number (so passing a typed value on and
+ * re-boxing it later cannot change what a script sees). */
+static int tbc_parse_canon(const char *s, int len, int64_t *out) {
+    int neg = 0, i = 0;
+    uint64_t v = 0;
+    if (len <= 0 || len > 20) return 0;
+    if (s[0] == '-') { neg = 1; i = 1; if (len == 1) return 0; }
+    if (s[i] == '0') { if (len - i != 1 || neg) return 0; *out = 0; return 1; }
+    for (; i < len; i++) {
+        unsigned c = (unsigned) ((unsigned char) s[i]) - '0';
+        if (c > 9) return 0;
+        if (v > (UINT64_MAX - c) / 10) return 0;
+        v = v * 10 + c;
+    }
+    if (neg) { if (v > (uint64_t) INT64_MAX + 1) return 0; *out = (int64_t) (0 - v); }
+    else { if (v > (uint64_t) INT64_MAX) return 0; *out = (int64_t) v; }
+    return 1;
+}
+TBC_INLINE int tbc_arg_int(Tcl_Obj *o, int64_t *w) {
+    const Tcl_ObjType *t = o->typePtr;
+    if (t == tbcInt || t == tbcWide) {
+        if (o->bytes == NULL) { *w = tbc_wide(o); return 1; }
+        return tbc_parse_canon(o->bytes, o->length, w);
+    }
+    if ((t == NULL || t == tbcString) && o->bytes != NULL) return tbc_parse_canon(o->bytes, o->length, w);
+    return 0;
+}
+TBC_INLINE int tbc_arg_dbl(Tcl_Obj *o, double *d) {
+    if (o->typePtr == tbcDouble && o->bytes == NULL && o->internalRep.doubleValue == o->internalRep.doubleValue) {
+        *d = o->internalRep.doubleValue;
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- lists ---- */
+
+/* lindex with an integer index; the result carries a reference.  NULL on error. */
+TBC_INLINE Tcl_Obj *tbc_lindex_i(Tcl_Interp *interp, Tcl_Obj *list, int64_t i) {
+    int n;
+    Tcl_Obj **v, *r;
+    if (Tcl_ListObjGetElements(interp, list, &n, &v) != TCL_OK) return NULL;
+    if (i < 0 || i >= n) {
+        Tcl_Obj *io = tbc_newint(i);
+        r = TclLindexList(interp, list, io);
+        Tcl_DecrRefCount(io);
+        return r;
+    }
+    r = v[i];
+    Tcl_IncrRefCount(r);
+    return r;
+}
+
+/* lindex list end-k */
+TBC_INLINE Tcl_Obj *tbc_lindex_end(Tcl_Interp *interp, Tcl_Obj *list, int64_t k) {
+    int n;
+    Tcl_Obj **v, *r;
+    if (Tcl_ListObjGetElements(interp, list, &n, &v) != TCL_OK) return NULL;
+    r = (n - 1 - k >= 0) ? v[n - 1 - k] : tbcEmpty;
+    Tcl_IncrRefCount(r);
+    return r;
+}
+
+/* lset with an integer index.  The caller has dropped the stack's reference to the list, so the variable's is the only one.
+ * An unshared list without a string form is updated in place; anything else goes to Tcl's own lset.  The result carries a
+ * reference; NULL on error. */
+TBC_INLINE Tcl_Obj *tbc_lset_i(Tcl_Interp *interp, Tcl_Obj *list, int64_t i, Tcl_Obj *val) {
+    if (list->typePtr == tbcList && list->bytes == NULL && !Tcl_IsShared(list)) {
+        int n;
+        Tcl_Obj **v;
+        if (Tcl_ListObjGetElements(interp, list, &n, &v) == TCL_OK && i >= 0 && i < n) {
+            Tcl_Obj *old = v[i];
+            if (old != val) {
+                v[i] = val;
+                Tcl_IncrRefCount(val);
+                Tcl_DecrRefCount(old);
+            }
+            Tcl_IncrRefCount(list);
+            return list;
+        }
+    }
+    {
+        Tcl_Obj *io = tbc_newint(i), *r = TclLsetList(interp, list, io, val);
+        Tcl_DecrRefCount(io);
+        return r;
+    }
+}
+
+/* ---- strings ---- */
+
+TBC_INLINE int tbc_fmt_i64(char *buf, int64_t w) {
+    char tmp[24];
+    int n = 0, len = 0;
+    uint64_t u = w < 0 ? (uint64_t) 0 - (uint64_t) w : (uint64_t) w;
+    do { tmp[n++] = (char) ('0' + u % 10); u /= 10; } while (u);
+    if (w < 0) buf[len++] = '-';
+    while (n) buf[len++] = tmp[--n];
+    return len;
+}
+
+/* append to the string in a variable (NULL = unset) */
+TBC_INLINE void tbc_append_bytes(Tcl_Obj **pv, const char *s, int len) {
+    Tcl_Obj *o = *pv;
+    if (!o) { o = Tcl_NewStringObj(s, len); Tcl_IncrRefCount(o); *pv = o; return; }
+    if (Tcl_IsShared(o)) {
+        Tcl_Obj *n = Tcl_DuplicateObj(o);
+        Tcl_IncrRefCount(n);
+        Tcl_DecrRefCount(o);
+        *pv = o = n;
+    }
+    Tcl_AppendToObj(o, s, len);
+}
+TBC_INLINE void tbc_append_i(Tcl_Obj **pv, int64_t w) {
+    char buf[24];
+    int n = tbc_fmt_i64(buf, w);
+    tbc_append_bytes(pv, buf, n);
+}
+
+/* building a string from parts (strcat) with one allocation for the result in the common case */
+typedef struct { char *p; int n, cap; char buf[120]; } tbc_cat_t;
+TBC_INLINE void tbc_cat_init(tbc_cat_t *c) { c->p = c->buf; c->n = 0; c->cap = (int) sizeof c->buf; }
+static void tbc_cat_grow(tbc_cat_t *c, int need) {
+    int cap = c->cap * 2;
+    char *np;
+    while (cap < c->n + need) cap *= 2;
+    np = (char *) Tcl_Alloc((unsigned) cap);
+    memcpy(np, c->p, (size_t) c->n);
+    if (c->p != c->buf) Tcl_Free(c->p);
+    c->p = np;
+    c->cap = cap;
+}
+TBC_INLINE void tbc_cat_bytes(tbc_cat_t *c, const char *s, int len) {
+    if (TBC_UNLIKELY(c->n + len > c->cap)) tbc_cat_grow(c, len);
+    memcpy(c->p + c->n, s, (size_t) len);
+    c->n += len;
+}
+TBC_INLINE void tbc_cat_i(tbc_cat_t *c, int64_t w) {
+    char buf[24];
+    int n = tbc_fmt_i64(buf, w);
+    tbc_cat_bytes(c, buf, n);
+}
+TBC_INLINE void tbc_cat_o(tbc_cat_t *c, Tcl_Obj *o) {
+    int len;
+    const char *s = Tcl_GetStringFromObj(o, &len);
+    tbc_cat_bytes(c, s, len);
+}
+TBC_INLINE Tcl_Obj *tbc_cat_done(tbc_cat_t *c) {
+    Tcl_Obj *o = Tcl_NewStringObj(c->p, c->n);
+    if (c->p != c->buf) Tcl_Free(c->p);
+    Tcl_IncrRefCount(o);
+    return o;
+}
+
+/* ---- dicts ---- */
+
+TBC_INLINE int tbc_dict_exists(Tcl_Obj *dict, Tcl_Obj *key) {
+    Tcl_Obj *v = NULL;
+    return Tcl_DictObjGet(NULL, dict, key, &v) == TCL_OK && v != NULL;
+}
+
+/* dict incr by an immediate (compare tbc_dict_incr above): updates an unshared integer value in place, as the interpreter does */
+static int tbc_dict_incr2(Tcl_Interp *interp, Tcl_Obj **pd, Tcl_Obj *key, Tcl_WideInt imm) {
+    Tcl_Obj *dict = *pd, *val = NULL;
+    int fresh = 0;
+    if (dict && !Tcl_IsShared(dict) && dict->bytes == NULL && Tcl_DictObjGet(NULL, dict, key, &val) == TCL_OK && val != NULL &&
+            tbc_isint(val) && !Tcl_IsShared(val)) {
+        Tcl_WideInt w;
+        if (!__builtin_add_overflow(tbc_wide(val), imm, &w)) { Tcl_SetWideIntObj(val, w); return 0; }
+    }
+    (void) fresh;
+    return tbc_dict_incr(interp, pd, key, imm);
+}
+
+
+
+/* ---- expr's operand policy (INST_TRY_CVT_TO_NUMERIC) ---- */
+extern int TclGetNumberFromObj(Tcl_Interp *, Tcl_Obj *, ClientData *, int *);
+#define TBC_NUM_LONG 1
+#define TBC_NUM_WIDE 2
+#define TBC_NUM_BIG 3
+#define TBC_NUM_DOUBLE 4
+#define TBC_NUM_NAN 5
+
+/* A numeric-looking value is replaced by the number itself, whose string form is then the canonical one ("0x10" -> 16,
+ * "1e15" -> 1000000000000000.0); anything else is left alone.  NaN is an error, as in expr.  Returns 0, or nonzero on error. */
+static int tbc_trycvt(Tcl_Interp *interp, Tcl_Obj **ps) {
+    Tcl_Obj *o = *ps, *n;
+    ClientData p;
+    int type;
+    if (o->bytes != NULL && o->length == 0) return 0;
+    if (TclGetNumberFromObj(NULL, o, &p, &type) != TCL_OK) return 0;
+    if (type == TBC_NUM_NAN) { TclExprFloatError(interp, *(const double *) p); return 1; }
+    if (o->bytes == NULL) return 0;                                  /* already formatted from the number */
+    switch (type) {
+    case TBC_NUM_LONG: n = Tcl_NewWideIntObj((Tcl_WideInt) *(const long *) p); break;
+    case TBC_NUM_WIDE: n = Tcl_NewWideIntObj(*(const Tcl_WideInt *) p); break;
+    case TBC_NUM_DOUBLE: n = Tcl_NewDoubleObj(*(const double *) p); break;
+    default: {                                                       /* bignum: let ::tcl::mathop::+ rebuild it */
+        Tcl_Obj *objv[3];
+        int rc;
+        objv[0] = tbcMathop[TBC_ADD]; objv[1] = o; objv[2] = tbcZero;
+        rc = Tcl_EvalObjv(interp, 3, objv, TCL_EVAL_NOERR);
+        if (rc != TCL_OK) return 1;
+        n = tbc_takeres(interp);
+        Tcl_DecrRefCount(o);
+        *ps = n;
+        return 0;
+    }
+    }
+    Tcl_IncrRefCount(n);
+    Tcl_DecrRefCount(o);
+    *ps = n;
+    return 0;
+}
+
+
+/* Overflow-checked 64-bit multiply.  On wasm32 the compiler's builtin becomes a call to a 128-bit multiply routine; operands that
+ * both fit in 32 bits (the common case) cannot overflow, so test for that first. */
+#ifdef __wasm__
+TBC_INLINE int tbc_mul_ovf(int64_t a, int64_t b, int64_t *r) {
+    if (((uint64_t) a + UINT64_C(0x80000000)) < UINT64_C(0x100000000) && ((uint64_t) b + UINT64_C(0x80000000)) < UINT64_C(0x100000000)) {
+        *r = (int64_t) ((uint64_t) a * (uint64_t) b);
+        return 0;
+    }
+    return __builtin_mul_overflow(a, b, r);
+}
+#else
+#define tbc_mul_ovf(a, b, r) __builtin_mul_overflow((a), (b), (r))
+#endif
+
+/* The boxed arithmetic helper, out of line, for the generic (boxed) code: it is the cold path, and expanding the full fast path at
+ * every site would make the C functions several times larger. */
+static __attribute__((noinline)) int tbc_bin_g(Tcl_Interp *interp, int op, Tcl_Obj **pa, Tcl_Obj *b) { return tbc_bin(interp, op, pa, b); }
+/* one function per operator, for the frame-based code: the operator is a constant inside, so the dispatch on it and the paths of the other operators
+ * are gone (the generic one above stays for the tools that pass it as a value) */
+#define TBC_BINOP_FN(NAME) static __attribute__((noinline)) int tbc_bin_##NAME(Tcl_Interp *interp, Tcl_Obj **pa, Tcl_Obj *b) { return tbc_bin(interp, TBC_##NAME, pa, b); }
+TBC_BINOP_FN(ADD) TBC_BINOP_FN(SUB) TBC_BINOP_FN(MULT) TBC_BINOP_FN(DIV) TBC_BINOP_FN(MOD)
+TBC_BINOP_FN(LT) TBC_BINOP_FN(LE) TBC_BINOP_FN(GT) TBC_BINOP_FN(GE) TBC_BINOP_FN(EQ) TBC_BINOP_FN(NEQ)
+TBC_BINOP_FN(BAND) TBC_BINOP_FN(BOR) TBC_BINOP_FN(BXOR) TBC_BINOP_FN(SHL) TBC_BINOP_FN(SHR) TBC_BINOP_FN(POW)
+
+/* dict get with a missing key: Tcl's error */
+static void tbc_dict_nokey(Tcl_Interp *interp, Tcl_Obj *key) {
+    Tcl_SetObjResult(interp, Tcl_ObjPrintf("key \"%s\" not known in dictionary", Tcl_GetString(key)));
+    Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "DICT", Tcl_GetString(key), NULL);
+}
+/* lappend to a variable (NULL = unset): unshared lists are extended in place; returns nonzero on error */
+static int tbc_lappend(Tcl_Interp *interp, Tcl_Obj **pv, Tcl_Obj *elem) {
+    Tcl_Obj *o = *pv;
+    if (!o) { o = Tcl_NewListObj(0, NULL); Tcl_IncrRefCount(o); *pv = o; }
+    else if (Tcl_IsShared(o)) { Tcl_Obj *d = Tcl_DuplicateObj(o); Tcl_IncrRefCount(d); Tcl_DecrRefCount(o); o = d; *pv = o; }
+    if (Tcl_ListObjAppendElement(interp, o, elem) != TCL_OK) { Tcl_SetErrorCode(interp, "TCL", "WRITE", "VARNAME", NULL); return 1; }
+    return 0;
+}
+
+/* Typed int vector: a list local that provably holds only integers and never leaves the proc is kept as a raw int64 array.  It is
+ * turned into a real Tcl list (tbc_ivec_list) the moment typed code gives up (deoptimisation), so Tcl semantics are unchanged. */
+typedef struct { int64_t *p; int64_t n; } tbc_ivec;
+#define TBC_IVEC_MAX (INT64_C(1) << 26)
+static tbc_ivec tbc_ivec_new(int64_t n, int64_t v) {
+    tbc_ivec a = {NULL, 0};
+    if (n < 0 || n > TBC_IVEC_MAX) return a;
+    a.p = v == 0 ? (int64_t *) calloc((size_t) (n ? n : 1), sizeof(int64_t)) : (int64_t *) malloc((size_t) (n ? n : 1) * sizeof(int64_t));
+    if (!a.p) return a;
+    a.n = n;
+    if (v != 0) { int64_t i; for (i = 0; i < n; i++) a.p[i] = v; }
+    return a;
+}
+/* A list object (one reference) with the vector's contents; take != 0 releases the vector. */
+static Tcl_Obj *tbc_ivec_list(tbc_ivec *a, int take) {
+    Tcl_Obj *l;
+    int64_t i;
+    l = Tcl_NewListObj(0, NULL);
+    for (i = 0; i < a->n; i++) Tcl_ListObjAppendElement(NULL, l, Tcl_NewWideIntObj(a->p[i]));
+    Tcl_IncrRefCount(l);
+    if (take) { free(a->p); a->p = NULL; a->n = 0; }
+    return l;
+}
+/* Typed string -> int map: a dict local that holds integer values only and never leaves the proc.  Entries keep their insertion order, as
+ * a Tcl dict does; keys are shared Tcl_Obj references compared by their string form.  tbc_imap_dict turns it into a real dict. */
+typedef struct { Tcl_Obj **keys; int64_t *vals; uint64_t *hs; int32_t *tab; size_t n, cap, tcap; } tbc_imap;
+static void tbc_imap_free(tbc_imap *m) {
+    size_t i;
+    for (i = 0; i < m->n; i++) Tcl_DecrRefCount(m->keys[i]);
+    free(m->keys); free(m->vals); free(m->hs); free(m->tab);
+    memset(m, 0, sizeof *m);
+}
+static int tbc_imap_init(tbc_imap *m) {
+    memset(m, 0, sizeof *m);
+    m->cap = 16; m->tcap = 32;
+    m->keys = (Tcl_Obj **) malloc(m->cap * sizeof(Tcl_Obj *));
+    m->vals = (int64_t *) malloc(m->cap * sizeof(int64_t));
+    m->hs = (uint64_t *) malloc(m->cap * sizeof(uint64_t));
+    m->tab = (int32_t *) calloc(m->tcap, sizeof(int32_t));
+    if (!m->keys || !m->vals || !m->hs || !m->tab) { free(m->keys); free(m->vals); free(m->hs); free(m->tab); memset(m, 0, sizeof *m); return 0; }
+    return 1;
+}
+TBC_INLINE uint64_t tbc_hash(const char *s, int len) {
+    uint64_t h = UINT64_C(1469598103934665603);
+    int i;
+    for (i = 0; i < len; i++) { h ^= (unsigned char) s[i]; h *= UINT64_C(1099511628211); }
+    return h ^ (h >> 29);
+}
+TBC_INLINE int64_t tbc_imap_find(const tbc_imap *m, const char *s, int len, uint64_t h) {
+    size_t mask = m->tcap - 1, i = (size_t) h & mask;
+    for (;;) {
+        int32_t e = m->tab[i];
+        if (!e) return -1;
+        e--;
+        if (m->hs[e] == h) {
+            int kl;
+            const char *ks = Tcl_GetStringFromObj(m->keys[e], &kl);
+            if (kl == len && memcmp(ks, s, (size_t) len) == 0) return e;
+        }
+        i = (i + 1) & mask;
+    }
+}
+TBC_INLINE int tbc_imap_has(const tbc_imap *m, const char *s, int len) { return tbc_imap_find(m, s, len, tbc_hash(s, len)) >= 0; }
+static int tbc_imap_grow(tbc_imap *m) {
+    size_t ncap = m->cap * 2, ntcap = m->tcap * 2, i;
+    Tcl_Obj **nk = (Tcl_Obj **) realloc(m->keys, ncap * sizeof(Tcl_Obj *));
+    int64_t *nv;
+    uint64_t *nh;
+    int32_t *nt;
+    if (!nk) return 0;
+    m->keys = nk;
+    nv = (int64_t *) realloc(m->vals, ncap * sizeof(int64_t));
+    if (!nv) return 0;
+    m->vals = nv;
+    nh = (uint64_t *) realloc(m->hs, ncap * sizeof(uint64_t));
+    if (!nh) return 0;
+    m->hs = nh;
+    m->cap = ncap;
+    nt = (int32_t *) calloc(ntcap, sizeof(int32_t));
+    if (!nt) return 0;
+    for (i = 0; i < m->n; i++) {
+        size_t j = (size_t) m->hs[i] & (ntcap - 1);
+        while (nt[j]) j = (j + 1) & (ntcap - 1);
+        nt[j] = (int32_t) (i + 1);
+    }
+    free(m->tab);
+    m->tab = nt; m->tcap = ntcap;
+    return 1;
+}
+/* dict incr by an immediate.  key: the key object when one exists (else NULL: one is made when the key is new).  Returns 1, changing
+ * nothing, if the sum overflows or memory runs out (the caller then falls back to the generic code). */
+static int tbc_imap_incr(tbc_imap *m, const char *s, int len, Tcl_Obj *key, int64_t imm) {
+    uint64_t h = tbc_hash(s, len);
+    int64_t e = tbc_imap_find(m, s, len, h);
+    size_t j;
+    if (e >= 0) {
+        int64_t r;
+        if (__builtin_add_overflow(m->vals[e], imm, &r)) return 1;
+        m->vals[e] = r;
+        return 0;
+    }
+    if (m->n >= (size_t) INT32_MAX / 2) return 1;
+    if ((m->n + 1) * 2 > m->tcap || m->n == m->cap) { if (!tbc_imap_grow(m)) return 1; }
+    if (key) Tcl_IncrRefCount(key); else { key = Tcl_NewStringObj(s, len); Tcl_IncrRefCount(key); }
+    m->keys[m->n] = key; m->vals[m->n] = imm; m->hs[m->n] = h;
+    j = (size_t) h & (m->tcap - 1);
+    while (m->tab[j]) j = (j + 1) & (m->tcap - 1);
+    m->tab[j] = (int32_t) (m->n + 1);
+    m->n++;
+    return 0;
+}
+/* a dict object (one reference) with the map's contents; take != 0 releases the map */
+static Tcl_Obj *tbc_imap_dict(tbc_imap *m, int take) {
+    Tcl_Obj *d = Tcl_NewDictObj();
+    size_t i;
+    for (i = 0; i < m->n; i++) Tcl_DictObjPut(NULL, d, m->keys[i], Tcl_NewWideIntObj(m->vals[i]));
+    Tcl_IncrRefCount(d);
+    if (take) tbc_imap_free(m);
+    return d;
+}
+static int tbc_imap_get(const tbc_imap *m, const char *s, int len, int64_t *out) {
+    int64_t e = tbc_imap_find(m, s, len, tbc_hash(s, len));
+    if (e < 0) return 0;
+    *out = m->vals[e];
+    return 1;
+}
+/* the key of a stack slot as bytes (a boxed value, or an integer formatted into buf) */
+TBC_INLINE const char *tbc_key_obj(Tcl_Obj *o, int *len) { return Tcl_GetStringFromObj(o, len); }
+
+/* Typed code uses the built-in command only while it has not been redefined (rename, proc, namespace shadowing). */
+TBC_SHARED Tcl_ObjCmdProc *tbc_orig_lrepeat;
+static void tbc_capture_builtins(Tcl_Interp *interp) {
+    Tcl_CmdInfo ci;
+    if (!tbc_orig_lrepeat && Tcl_GetCommandInfo(interp, "lrepeat", &ci)) tbc_orig_lrepeat = ci.objProc;
+}
+static int tbc_is_lrepeat(Tcl_Interp *interp) {
+    Tcl_CmdInfo ci;
+    return tbc_orig_lrepeat && Tcl_GetCommandInfo(interp, "lrepeat", &ci) && ci.objProc == tbc_orig_lrepeat;
+}
+
+/* Coverage counters (compile with -DTBC_COV): how often each typed variant is entered and each deoptimisation point is taken. */
+#ifdef TBC_COV
+static struct { const char *name; long hits; } tbc_cov[8192];
+TBC_SHARED int tbc_cov_n;
+#define TBC_HIT(nm) do { static int idx_ = -1; if (idx_ < 0) { idx_ = tbc_cov_n++; tbc_cov[idx_].name = (nm); } tbc_cov[idx_].hits++; } while (0)
+static int tbc_cov_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+    Tcl_Obj *r = Tcl_NewObj();
+    int i;
+    (void) cd; (void) objc; (void) objv;
+    for (i = 0; i < tbc_cov_n; i++) {
+        Tcl_ListObjAppendElement(NULL, r, Tcl_NewStringObj(tbc_cov[i].name, -1));
+        Tcl_ListObjAppendElement(NULL, r, Tcl_NewWideIntObj(tbc_cov[i].hits));
+    }
+    Tcl_SetObjResult(interp, r);
+    return TCL_OK;
+}
+#else
+#define TBC_HIT(nm) ((void) 0)
+#endif
+
+#endif
