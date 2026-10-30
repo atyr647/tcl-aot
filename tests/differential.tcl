@@ -288,6 +288,13 @@ foreach x $tfxs {
     lappend calls "tfx_r1 [list $x]" "tfx_r1b [list $x]" "tfx_r2 [list $x]" "tfx_r3 [list $x]"
 }
 foreach x {-1 0 1 2 3 5 9} { lappend calls [list tf_cond_var $x] [list tf_cond_var2 $x] }
+foreach x {abc {} 12 {a b}} { lappend calls [list tfx_eff $x] }
+foreach n {0 1 5 40 300} { lappend calls [list tr_basic $n] [list tr_order $n] [list tr_order_get $n] [list tr_grow $n] [list tr_pair [expr {$n % 12}]] [list tr_caller $n] }
+foreach k {1 2 x {} 07 -1} { lappend calls [list tr_missing_elem $k] [list tr_missing_array $k] [list tr_incr_new $k] [list tr_exists $k] [list tr_catch $k] }
+foreach v {1 -3 abc {} 0x10 1.5 { 7 } 9223372036854775807 12345678901234567890} { lappend calls [list tr_incr_text $v] [list tr_shared $v] [list tr_deopt_late $v] [list tr_err_after $v] [list tr_double $v] }
+foreach k {1 x} { foreach d {1 -5 0 abc 3.0 9223372036854775807} { lappend calls [list tr_incr_var $k $d] } }
+lappend calls tr_incr_overflow tr_overwrite tr_keys tr_trace tr_unset tr_scalar_clash {tr_rec 6}
+proc tfx_eff {s} { set ::tfx_g 0; set rc [catch {tfx_eff_caller $s} m]; list $rc $m $::tfx_g }
 # traces on the variables typed code works on
 lappend calls {set ::tflog {}; set ::tfv 1; trace add variable ::tfv write tf_tr; set r [tf_ups_incimm tfv 3]; trace remove variable ::tfv write tf_tr; list $r $::tflog}
 lappend calls {set ::tflog {}; set ::tfv 1; trace add variable ::tfv read tf_tr; set r [tf_ups_incimm tfv 3]; trace remove variable ::tfv read tf_tr; list $r $::tflog}

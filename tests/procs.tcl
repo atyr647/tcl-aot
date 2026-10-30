@@ -1154,3 +1154,81 @@ proc tbx_llen {x n} {
 proc tbx_map {l} { set r {}; foreach w $l { lappend r [string map {a 1 b 22} $w] }; return $r }
 proc tbx_concat {a b} { return [list {*}$a {*}$b] }
 proc tbx_concat_loop {n} { set r {}; for {set i 0} {$i < $n} {incr i} { set r [list {*}$r $i {*}[list $i $i]] }; return $r }
+
+# a proc without variables in the frame that calls one with effects, then fails: the effect must happen once
+proc tfx_eff_bump {} { global tfx_g; incr tfx_g; return $tfx_g }
+proc tfx_eff_caller {s} {
+    set a [tfx_eff_bump]
+    set r [string index $s end-x]
+    return [list $a $r]
+}
+
+# ---- arrays that are compiled locals and are only read and written element by element (kept natively by typed code)
+proc tr_basic {n} {
+    for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i * 3}] }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $a($i) }
+    return $s
+}
+proc tr_missing_elem {k} { set a(1) 5; return $a($k) }
+proc tr_missing_array {k} { return $a($k) }
+proc tr_incr_new {k} { incr a($k) 4; incr a($k); return $a($k) }
+proc tr_incr_text {v} { set a(x) $v; incr a(x) 2; return $a(x) }
+proc tr_incr_var {k d} { set a($k) 10; incr a($k) $d; return $a($k) }
+proc tr_incr_overflow {} { set a(1) 9223372036854775800; incr a(1) 10; return $a(1) }
+proc tr_order {n} {
+    for {set i 0} {$i < $n} {incr i} { set a([expr {($i * 7) % 23}]) $i }
+    set a(zeta) 1; set a(alpha) 2; set a() 3; set a(a,b) 4
+    return [array names a]
+}
+proc tr_order_get {n} {
+    for {set i 0} {$i < $n} {incr i} { set a([expr {($i * 5) % 31}]) [expr {$i * $i}] }
+    return [array get a]
+}
+proc tr_shared {x} {
+    set a(1) $x; set a(2) $x
+    incr a(1)
+    return [list $a(1) $a(2) $x]
+}
+proc tr_overwrite {} { set a(k) 1; set a(k) abc; set a(k) 2.5; set a(k) {x y}; return $a(k) }
+proc tr_exists {k} { set a(1) 1; return [list [info exists a($k)] [info exists a(2)]] }
+proc tr_keys {} {
+    set a() e; set a(a,b) c; set a(ünï) u; set a(0123456789012345678901234567890123456789) long
+    set a(0123456789012345678901234567890123456788) long2
+    return [list $a() $a(a,b) $a(ünï) $a(0123456789012345678901234567890123456789) $a(0123456789012345678901234567890123456788)]
+}
+proc tr_catch {k} {
+    set a(1) 1
+    set rc [catch {set x $a($k)} m]
+    set a($k) 7
+    return [list $rc $m $a($k) [array size a]]
+}
+proc tr_trace {} {
+    set ::trlog {}
+    set a(1) 5
+    trace add variable a write tr_tracecb
+    set a(1) 6; set a(2) 7
+    trace remove variable a write tr_tracecb
+    return [list $::trlog [lsort [array names a]]]
+}
+proc tr_tracecb {args} { lappend ::trlog $args }
+proc tr_unset {} { set a(1) 1; set a(2) 2; unset a(1); return [array names a] }
+proc tr_scalar_clash {} { set a(1) 1; return [info exists a] }
+proc tr_grow {n} {
+    for {set i 0} {$i < $n} {incr i} { set a(k$i) $i }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $a(k$i) }
+    return [list $s [array size a]]
+}
+proc tr_rec {n} { set a(0) $n; if {$n > 0} { set a(1) [tr_rec [expr {$n - 1}]] } else { set a(1) 0 }; return [expr {$a(0) + $a(1)}] }
+proc tr_pair {n} {
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set m($i,$j) [expr {$i * $j}] } }
+    set t 0
+    for {set i 0} {$i < $n} {incr i} { incr t $m($i,$i) }
+    return $t
+}
+proc tr_double {x} { set a(0) [expr {$x * 1.5}]; set a(1) [expr {$x + 1}]; return [list $a(0) $a(1)] }
+proc tr_callee {x} { set t($x) $x; return $t($x) }
+proc tr_caller {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [tr_callee $i] }; return $s }
+proc tr_deopt_late {x} { set a(1) 1; set a(2) $x; set r [string index abc $x]; return [list $r [lsort [array names a]]] }
+proc tr_err_after {x} { set a(1) 1; set b [expr {$x + 1}]; set a(2) $b; return [array get a] }

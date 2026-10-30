@@ -337,6 +337,137 @@ TBC_INLINE int tbc_tainc(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *key, in
     *out = sum;
     return 1;
 }
+static Tcl_Obj *tbc_vstore(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, Tcl_Obj *key, Tcl_Obj *val, int flags);
+/* ---- arrays held natively (kind R).  An array that is a compiled local and is touched only by element loads, stores, increments and tests cannot be seen
+ * by anything else while typed code runs, so typed code keeps it in a table of its own.  The table remembers the order in which the elements were made;
+ * tbc_rflush writes them into the frame in that order when typed code gives up, which gives the hash table the interpreter would have built. */
+typedef struct {
+    uint64_t h;
+    Tcl_Obj *val;
+    int len;
+    union { char s[28]; char *p; } k;		/* the key's bytes: inline up to 27, else allocated */
+} tbc_rent;
+typedef struct { tbc_rent *e; int32_t *tab; size_t n, cap, tcap; } tbc_rmap;
+TBC_INLINE const char *tbc_rkey(const tbc_rent *r) { return r->len < (int) sizeof r->k.s ? r->k.s : r->k.p; }
+static void tbc_rfree(tbc_rmap *m) {
+    size_t i;
+    for (i = 0; i < m->n; i++) {
+        if (m->e[i].len >= (int) sizeof m->e[i].k.s) free(m->e[i].k.p);
+        Tcl_DecrRefCount(m->e[i].val);
+    }
+    free(m->e); free(m->tab);
+    memset(m, 0, sizeof *m);
+}
+TBC_INLINE tbc_rent *tbc_rfind(const tbc_rmap *m, const char *s, int len, uint64_t h) {
+    size_t mask, i;
+    if (!m->tcap) return NULL;
+    mask = m->tcap - 1; i = (size_t) h & mask;
+    for (;;) {
+        int32_t e = m->tab[i];
+        tbc_rent *r;
+        if (!e) return NULL;
+        r = &m->e[e - 1];
+        if (r->h == h && r->len == len && memcmp(tbc_rkey(r), s, (size_t) len) == 0) return r;
+        i = (i + 1) & mask;
+    }
+}
+static int tbc_rgrow(tbc_rmap *m) {
+    size_t ncap = m->cap ? m->cap * 2 : 16, ntcap = m->tcap ? m->tcap * 2 : 32, i;
+    tbc_rent *ne = (tbc_rent *) realloc(m->e, ncap * sizeof *ne);
+    int32_t *nt;
+    if (!ne) return 0;
+    m->e = ne;
+    m->cap = ncap;
+    nt = (int32_t *) calloc(ntcap, sizeof(int32_t));
+    if (!nt) return 0;
+    for (i = 0; i < m->n; i++) {
+        size_t j = (size_t) m->e[i].h & (ntcap - 1);
+        while (nt[j]) j = (j + 1) & (ntcap - 1);
+        nt[j] = (int32_t) (i + 1);
+    }
+    free(m->tab);
+    m->tab = nt; m->tcap = ntcap;
+    return 1;
+}
+/* a new element; val is a reference the table then owns.  0 when memory runs out (nothing changed) */
+static int tbc_radd(tbc_rmap *m, const char *s, int len, uint64_t h, Tcl_Obj *val) {
+    tbc_rent *r;
+    size_t j;
+    if (m->n >= (size_t) INT32_MAX / 2) return 0;
+    if ((m->n + 1) * 2 > m->tcap || m->n == m->cap) { if (!tbc_rgrow(m)) return 0; }
+    r = &m->e[m->n];
+    r->h = h; r->val = val; r->len = len;
+    if (len < (int) sizeof r->k.s) memcpy(r->k.s, s, (size_t) len);
+    else { r->k.p = (char *) malloc((size_t) len); if (!r->k.p) return 0; memcpy(r->k.p, s, (size_t) len); }
+    j = (size_t) h & (m->tcap - 1);
+    while (m->tab[j]) j = (j + 1) & (m->tcap - 1);
+    m->tab[j] = (int32_t) (m->n + 1);
+    m->n++;
+    return 1;
+}
+/* element := val (a reference is taken).  0 when memory runs out */
+static int tbc_rset(tbc_rmap *m, const char *s, int len, Tcl_Obj *val) {
+    uint64_t h = tbc_hash(s, len);
+    tbc_rent *r = tbc_rfind(m, s, len, h);
+    if (r) { Tcl_Obj *old = r->val; Tcl_IncrRefCount(val); r->val = val; Tcl_DecrRefCount(old); return 1; }
+    Tcl_IncrRefCount(val);
+    if (tbc_radd(m, s, len, h, val)) return 1;
+    Tcl_DecrRefCount(val);
+    return 0;
+}
+/* element := the integer w, into the object the element holds when nothing else refers to it (as the interpreter's incr does) */
+static int tbc_rseti(tbc_rmap *m, const char *s, int len, int64_t w) {
+    uint64_t h = tbc_hash(s, len);
+    tbc_rent *r = tbc_rfind(m, s, len, h);
+    Tcl_Obj *o;
+    if (r) {
+        o = r->val;
+        if (!Tcl_IsShared(o)) { tbc_setint(o, w); return 1; }
+        r->val = tbc_mkint(w); Tcl_IncrRefCount(r->val); Tcl_DecrRefCount(o);
+        return 1;
+    }
+    o = tbc_mkint(w); Tcl_IncrRefCount(o);
+    if (tbc_radd(m, s, len, h, o)) return 1;
+    Tcl_DecrRefCount(o);
+    return 0;
+}
+/* the element's value (not referenced), NULL if there is none */
+TBC_INLINE Tcl_Obj *tbc_rget(const tbc_rmap *m, const char *s, int len) {
+    tbc_rent *r = tbc_rfind(m, s, len, tbc_hash(s, len));
+    return r ? r->val : NULL;
+}
+TBC_INLINE int tbc_rhas(const tbc_rmap *m, const char *s, int len) { return tbc_rfind(m, s, len, tbc_hash(s, len)) != NULL; }
+/* element += imm (an element that is not there yet becomes imm); *out is the new value.  0, changing nothing, when the value is not an integer, the sum
+ * overflows or memory runs out: the boxed code then does it, with the interpreter's error */
+static int tbc_rinc(tbc_rmap *m, const char *s, int len, int64_t imm, int64_t *out) {
+    uint64_t h = tbc_hash(s, len);
+    tbc_rent *r = tbc_rfind(m, s, len, h);
+    int64_t sum = imm;
+    Tcl_Obj *o;
+    if (r) {
+        o = r->val;
+        if (!tbc_isint(o) || __builtin_add_overflow((int64_t) tbc_wide(o), imm, &sum)) return 0;
+        if (!Tcl_IsShared(o)) tbc_setint(o, sum);
+        else { r->val = tbc_mkint(sum); Tcl_IncrRefCount(r->val); Tcl_DecrRefCount(o); }
+        *out = sum;
+        return 1;
+    }
+    o = tbc_mkint(sum); Tcl_IncrRefCount(o);
+    if (!tbc_radd(m, s, len, h, o)) { Tcl_DecrRefCount(o); return 0; }
+    *out = sum;
+    return 1;
+}
+/* write the elements into the array that is compiled local idx, in the order they were made, and empty the table */
+static void tbc_rflush(Tcl_Interp *interp, Var *loc, int idx, tbc_rmap *m) {
+    size_t i;
+    for (i = 0; i < m->n; i++) {
+        Tcl_Obj *k = Tcl_NewStringObj(tbc_rkey(&m->e[i]), m->e[i].len);
+        Tcl_IncrRefCount(k);
+        (void) tbc_vstore(interp, loc, idx, NULL, k, m->e[i].val, TCL_LEAVE_ERR_MSG);
+        Tcl_DecrRefCount(k);
+    }
+    tbc_rfree(m);
+}
 /* ---- array elements and variables named on the stack: the generic paths of INST_LOAD_ARRAY*, INST_STORE_*, INST_INCR_*, INST_EXIST_*,
  * INST_UNSET_*.  idx >= 0: the array is the compiled local idx and key names the element; idx < 0: the variable (or, with a key, the array
  * element) is named by name on the stack.  Results are not referenced. */

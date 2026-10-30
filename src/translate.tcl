@@ -216,6 +216,9 @@ proc tbcCanBC {op a} {
     return [expr {$op in {invokeStk1 invokeStk4 evalStk tailcall invokeReplace invokeExpanded returnStk break continue}}]
 }
 
+# the instructions that work on an element of an array that is a compiled local, and that typed code can do on a native table (kind R)
+set tbcRops {loadArray1 loadArray4 storeArray1 storeArray4 incrArray1 incrArray1Imm existArray}
+
 # variables read and written by an instruction
 proc usedef {op a} {
     switch -- $op {
@@ -572,6 +575,22 @@ proc prepare {P} {
             unsetArray { lappend fv [operand [lindex $a 1]] }
         }
     }
+    # arrays that only element loads, stores, increments and tests touch (and that are not arguments) are kept by typed code in a table of its own and
+    # written into the frame, element by element in the order they were made, when typed code gives up (kind R).  Nothing else can see such an array
+    # while typed code runs, so they do not make a proc impure.
+    set rv {}
+    foreach pc $reach {
+        lassign $ins($pc) op a
+        if {$op in $::tbcRops} { lappend rv [operand [lindex $a 0]] }
+    }
+    set rv [lsort -integer -unique [lmap v $rv {expr {$v < $nargs ? [continue] : $v}}]]
+    foreach pc $reach {
+        lassign $ins($pc) op a
+        if {$op in $::tbcRops} continue
+        foreach v [concat {*}[usedef $op $a]] { set rv [lsearch -all -inline -not -exact $rv $v] }
+    }
+    set PI($P,rvars) $rv
+    set fv [lmap v $fv {expr {$v in $rv ? [continue] : $v}}]
     set PI($P,fvars) [lsort -integer -unique $fv]
     if {[llength $fv]} { set pure 0 }
     set PI($P,csafe) $csafe
@@ -776,7 +795,7 @@ proc newVariant {P sig} {
     lappend variants $key
     set kap {}
     for {set v 0} {$v < [llength $PI($P,vnames)]} {incr v} {
-        dict set kap $v [expr {$v in $PI($P,fvars) ? "F" : $v < $PI($P,nargs) ? [string index $sig $v] : "-"}]
+        dict set kap $v [expr {$v in $PI($P,fvars) ? "F" : $v in $PI($P,rvars) ? "R" : $v < $PI($P,nargs) ? [string index $sig $v] : "-"}]
     }
     set VK($key,kap) $kap; set VK($key,ret) "-"; set VK($key,calls) {}
     return $key
@@ -1213,6 +1232,14 @@ proc stepT {key pc in} {
         }
         loadArray1 - loadArray4 {
             set v [operand [lindex $a 0]]
+            if {[kap $key $v] eq "R"} {
+                set e [lindex $in $top]
+                if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                set kb [keyArgs $P $top $e]
+                if {$kb eq ""} { return $dead }
+                lassign $kb kpre kptr klen krel
+                return [R fall [lreplace $in $top $top B] "\{ $kpre Tcl_Obj *o_ = tbc_rget(&rv$v, $kptr, $klen); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_);$krel s$top = o_; \}"]
+            }
             if {[kap $key $v] ne "F"} { return $dead }
             set e [lindex $in $top]
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
@@ -1223,6 +1250,22 @@ proc stepT {key pc in} {
         }
         storeArray1 - storeArray4 {
             set v [operand [lindex $a 0]]
+            if {[kap $key $v] eq "R"} {
+                set pk [expr {$d-2}]; set pv [expr {$d-1}]
+                set ek [lindex $in $pk]; set ev [lindex $in $pv]
+                set base [lrange $in 0 [expr {$pk-1}]]
+                if {"U" in [list [kd $ek] [kd $ev]]} { return [R fall [list {*}$base U] ""] }
+                set kb [keyArgs $P $pk $ek]
+                if {$kb eq ""} { return $dead }
+                lassign $kb kpre kptr klen krel
+                set ok [fvalue $P $pv $ev "tbc_rset(&rv$v, $kptr, $klen, @V@)" "tbc_rseti(&rv$v, $kptr, $klen, @I@)"]
+                if {$ok eq ""} { return $dead }
+                lassign $ok vpre call vrel
+                switch [kd $ev] {
+                    I { set mv "si$pk = si$pv;" } D { set mv "sd$pk = sd$pv;" } B { set mv "s$pk = s$pv;" } default { set mv "" }
+                }
+                return [R fall [list {*}$base $ev] "\{ $kpre $vpre if (TBC_UNLIKELY(!($call))) \{$vrel goto D$pc; \}$vrel$krel $mv \}"]
+            }
             if {[kap $key $v] ne "F"} { return $dead }
             set pk [expr {$d-2}]; set pv [expr {$d-1}]
             set ek [lindex $in $pk]; set ev [lindex $in $pv]
@@ -1241,6 +1284,14 @@ proc stepT {key pc in} {
         }
         incrArray1Imm {
             set v [operand [lindex $a 0]]; set imm [lindex $a 1]
+            if {[kap $key $v] eq "R"} {
+                set e [lindex $in $top]
+                if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                set kb [keyArgs $P $top $e]
+                if {$kb eq ""} { return $dead }
+                lassign $kb kpre kptr klen krel
+                return [R fall [lreplace $in $top $top I] "\{ $kpre int64_t w_; if (TBC_UNLIKELY(!tbc_rinc(&rv$v, $kptr, $klen, INT64_C($imm), &w_))) goto D$pc;$krel si$top = w_; \}"]
+            }
             if {[kap $key $v] ne "F"} { return $dead }
             set e [lindex $in $top]
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
@@ -1251,6 +1302,18 @@ proc stepT {key pc in} {
         }
         incrArray1 {
             set v [operand [lindex $a 0]]
+            if {[kap $key $v] eq "R"} {
+                set pk [expr {$d-2}]; set pi [expr {$d-1}]
+                set ek [lindex $in $pk]; set ei [lindex $in $pi]
+                set base [lrange $in 0 [expr {$pk-1}]]
+                if {"U" in [list [kd $ek] [kd $ei]]} { return [R fall [list {*}$base U] ""] }
+                set kb [keyArgs $P $pk $ek]
+                lassign [operandOf $P $pc $pi $ei] ci gi xi
+                if {$kb eq "" || $ci ne "I"} { return $dead }
+                lassign $kb kpre kptr klen krel
+                set irel ""; if {[kd $ei] eq "B"} { set irel " Tcl_DecrRefCount(s$pi);" }
+                return [R fall [list {*}$base I] "\{ $kpre int64_t w_; $gi if (TBC_UNLIKELY(!tbc_rinc(&rv$v, $kptr, $klen, $xi, &w_))) goto D$pc;$irel$krel si$pk = w_; \}"]
+            }
             if {[kap $key $v] ne "F"} { return $dead }
             set pk [expr {$d-2}]; set pi [expr {$d-1}]
             set ek [lindex $in $pk]; set ei [lindex $in $pi]
@@ -1265,6 +1328,14 @@ proc stepT {key pc in} {
         }
         existArray {
             set v [operand [lindex $a 0]]
+            if {[kap $key $v] eq "R"} {
+                set e [lindex $in $top]
+                if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                set kb [keyArgs $P $top $e]
+                if {$kb eq ""} { return $dead }
+                lassign $kb kpre kptr klen krel
+                return [R fall [lreplace $in $top $top I] "\{ $kpre int r_ = tbc_rhas(&rv$v, $kptr, $klen);$krel si$top = r_; \}"]
+            }
             if {[kap $key $v] ne "F"} { return $dead }
             set e [lindex $in $top]
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
@@ -1518,14 +1589,24 @@ proc defaultConst {d} {
     return ""
 }
 
+# can typed code of P have changed state that a restart of the call in the boxed code would repeat?  Its own frame variables, or the effects of a
+# callee that is not pure.
+proc resumable {P} {
+    global PI
+    if {[llength $PI($P,fvars)]} { return 1 }
+    foreach c $PI($P,callees) { if {![info exists PI($c,pure)] || !$PI($c,pure)} { return 1 } }
+    return 0
+}
+
 # failure label (releasing the boxed slots of state `st`)
 proc fl {key st} {
     global FM FRM PI
     lassign [keysplit $key] P sig
     set m [maskOf $st]
-    if {[llength $PI($P,fvars)] && [info exists ::stepPC]} {
-        # a proc with variables in the frame can have changed state before this point, so it cannot start the whole call over in the boxed code: it
-        # goes on there at this instruction (the boxed code then repeats the failing step, which raises the error with its error info)
+    if {[resumable $P] && [info exists ::stepPC]} {
+        # a proc with variables in the frame, or one that calls a proc with effects, can have changed state before this point, so it cannot start the
+        # whole call over in the boxed code: it goes on there at this instruction (the boxed code then repeats the failing step, which raises the
+        # error with its error info)
         set pc $::stepPC
         set FRM($key,$pc,$m) $st
         return FR${pc}_$m
@@ -1683,6 +1764,7 @@ proc enterG {key gpc slots pre flush} {
     lassign [keysplit $key] P sig
     set c "if (TBC_UNLIKELY(!inframe)) \{ tbc_st = 3; rc = TCL_OK; goto [flAll $key $slots]; \} $pre"
     append c [boxLocals $key $flush $slots]
+    foreach v $::PI($P,rvars) { append c " tbc_rflush(interp, loc_, $v, &rv$v);" }
     set vs $flush
     foreach e $slots { if {[kd $e] in {A M}} { lappend vs [lt $e] } }
     foreach v [lsort -integer -unique $vs] { append c " if (l$v) tbc_flushr(interp, loc_, $v, l$v);" }
@@ -2563,7 +2645,7 @@ proc emitVariant {key recursive} {
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
-        switch [dict get $kap $v] { I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } }
+        switch [dict get $kap $v] { I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
         if {$v in [flaggedOf $P] && [dict get $kap $v] in {I D}} { append fn " int g$v = 0; (void) g$v;" }
         append fn "\n"
     }
@@ -2654,7 +2736,7 @@ proc emitVariant {key recursive} {
     append fn "redo_all:\n    if (!inframe) \{ tbc_st = 3; rc = TCL_OK; goto ret; \}\n    Tcl_ResetResult(interp); tbc_st = 0;\n"
     append fn "    \{ int g_ = G_${cid}(interp, 0, NULL, 0); if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} \}\n"
     append fn "ret:\n"
-    for {set v 0} {$v < $nv} {incr v} { append fn "    if (l$v) Tcl_DecrRefCount(l$v);[expr {[dict get $kap $v] eq "A" ? " free(av$v.p);" : [dict get $kap $v] eq "M" ? " tbc_imap_free(&mv$v);" : ""}]\n" }
+    for {set v 0} {$v < $nv} {incr v} { append fn "    if (l$v) Tcl_DecrRefCount(l$v);[expr {[dict get $kap $v] eq "A" ? " free(av$v.p);" : [dict get $kap $v] eq "M" ? " tbc_imap_free(&mv$v);" : [dict get $kap $v] eq "R" ? " tbc_rfree(&rv$v);" : ""}]\n" }
     append fn "early:\n    if (rc != TCL_OK) \{ tbc_st = 2; tbc_rc = rc; \}\n    return rv;\n\}\n"
     # scratch vectors and maps of the stack slots are declared only where used (they would cost a zeroed frame on every call otherwise)
     set decls ""
