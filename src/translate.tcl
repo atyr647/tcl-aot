@@ -665,6 +665,11 @@ proc prepare {P} {
         lappend cls $c
     }
     set PI($P,lcls) $cls
+    # evidence of floating-point numbers: a double literal, or a call of a function that gives a double (see wpol)
+    set fl 0
+    foreach c $cls { if {$c eq "D"} { set fl 1; break } }
+    if {!$fl} { foreach s $PI($P,lits) { if {[regexp {^(?:::)?tcl::mathfunc::(?:double|sqrt|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|log|log10|fmod|hypot|floor|ceil)$} $s]} { set fl 1; break } } }
+    set PI($P,floaty) $fl
 }
 
 set refusedProcs {}
@@ -765,12 +770,22 @@ if {$census} { foreach P $translatable { puts "OK $P" }; exit 0 }
 
 proc kd {e} { string index $e 0 }
 proc lt {e} { set i [string first : $e]; expr {$i < 0 ? "" : [string range $e [expr {$i+1}] end]} }
+# W: a number that carries its own tag (integer or double): in the stack slots and the variables of a proc that uses floating-point numbers (the "W policy",
+# wpol), where an integer-or-double result must not be a guess.  Slot p of kind W holds the tag in sw<p>, the integer in si<p>, the double in sd<p>; a variable v
+# the tag in wt<v>, i<v> and d<v>.
+set curWpol 0
+proc wpol {P} {
+    global PI
+    if {$PI($P,hasYield)} { return 0 }
+    return [expr {[info exists ::env(TBC_FORCE_WPOLICY)] || $PI($P,floaty)}]
+}
 proc jd {a b} {
     if {$a eq $b} { return $a }
     set ka [kd $a]; set kb [kd $b]
     if {$ka eq "U"} { return $b }
     if {$kb eq "U"} { return $a }
     if {$ka eq $kb && $ka in {I D}} { return $ka }
+    if {$::curWpol && $ka in {I D W} && $kb in {I D W}} { return W }
     return B
 }
 proc jk {a b} {
@@ -778,6 +793,8 @@ proc jk {a b} {
     if {$a eq "F" || $b eq "F"} { return F }
     if {$a in {- U}} { return $b }
     if {$b in {- U}} { return $a }
+    if {$::curWpol && $a in {I D W} && $b in {I D W}} { return W }
+    if {$::curWpol && (($a eq "S" && $b in {I D W}) || ($b eq "S" && $a in {I D W}))} { return W }
     # S: a boxed value that is loaded from an array or a list into a variable that is used as a number (see specStore): an integer variable if it is stored integers
     # as well, else boxed
     if {$a eq "S" && $b in {S I}} { return [expr {$b eq "I" ? "I" : "S"}] }
@@ -809,6 +826,7 @@ proc boxe {P p e} {
             return "({ Tcl_Obj *c_ = Tcl_NewObj(); c_->internalRep.twoPtrValue.ptr1 = INT2PTR(fit_[lt $e]); c_->internalRep.twoPtrValue.ptr2 = INT2PTR(fmax_[lt $e]); Tcl_IncrRefCount(c_); c_; })"
         }
         K { return "tbc_newkey(kb$p, kl$p)" }
+        W { return "(sw$p ? tbc_newdbl(sd$p) : tbc_newint(si$p))" }
         N { return "tbc_ivec_list(&sv$p, 1)" }
         M {
             switch $::boxMode {
@@ -844,6 +862,7 @@ proc boxLocals {key live slots} {
     set c ""
     foreach v [lsort -integer -unique $vs] {
         switch [kap $key $v] {
+            W { append c " l$v = (wt$v ? tbc_newdbl(d$v) : tbc_newint(i$v));" }
             I { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newint(i$v);" } D { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newdbl(d$v);" } A { append c " l$v = tbc_ivec_list(&av$v, 1);" } M { append c " l$v = tbc_imap_dict(&mv$v, 1);" }
         }
     }
@@ -854,6 +873,7 @@ proc edgec1 {P from to} {
     for {set p 0} {$p < [llength $from]} {incr p} {
         set f [lindex $from $p]; set t [lindex $to $p]
         if {[kd $t] eq "B" && [kd $f] ne "B"} { append c [boxc $P $p $f] " " }
+        if {[kd $t] eq "W" && [kd $f] in {I D}} { append c "sw$p = [expr {[kd $f] eq "D"}]; " }
     }
     return $c
 }
@@ -945,6 +965,7 @@ proc stepT {key pc in} {
             set e [lindex $in $top]
             switch [kd $e] {
                 I { set c "si$d = si$top;" } D { set c "sd$d = sd$top;" } B { set c "s$d = s$top; Tcl_IncrRefCount(s$d);" }
+                W { set c "sw$d = sw$top; si$d = si$top; sd$d = sd$top;" }
                 default { set c "" }
             }
             return [R fall [list {*}$in $e] $c]
@@ -955,6 +976,7 @@ proc stepT {key pc in} {
                 F { return [R fall [list {*}$in B] "\{ Tcl_Obj *o_ = tbc_tld(loc_, $v); if (TBC_UNLIKELY(!o_)) goto D$pc; s$d = o_; Tcl_IncrRefCount(s$d); \}"] }
                 I { return [R fall [list {*}$in I] "si$d = i$v;"] }
                 D { return [R fall [list {*}$in D] "sd$d = d$v;"] }
+                W { return [R fall [list {*}$in W] "sw$d = wt$v; si$d = i$v; sd$d = d$v;"] }
                 - { return [R fall [list {*}$in U] ""] }
                 A { return [R fall [list {*}$in A:$v] ""] }
                 M { return [R fall [list {*}$in M:$v] ""] }
@@ -990,6 +1012,9 @@ proc stepT {key pc in} {
             }
             set sk [expr {$k eq "L" || $k in {A N M Q} ? "B" : $k}]
             if {$k eq "B" && [specStore $P $pc $v]} {
+                if {[kap $key $v] eq "W"} {
+                    return [R fall $in "if (TBC_UNLIKELY(!tbc_wload_canon(s$top, &wt$v, &i$v, &d$v))) goto D$pc;" stores [list [list $v S]]]
+                }
                 if {[kap $key $v] eq "I"} {
                     # (the value is checked: anything but an integer is stored by the boxed code, which is what the hand-over does)
                     return [R fall $in "if (TBC_UNLIKELY(!tbc_arg_int(s$top, &i$v))) goto D$pc;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" stores [list [list $v S]]]
@@ -997,6 +1022,14 @@ proc stepT {key pc in} {
                 set sk S
             }
             switch [kap $key $v] {
+                W {
+                    switch $k {
+                        I { set c "wt$v = 0; i$v = si$top;" }
+                        D { set c "wt$v = 1; d$v = sd$top;" }
+                        W { set c "wt$v = sw$top; i$v = si$top; d$v = sd$top;" }
+                        default { return [R dead {} "goto D$pc;" stores [list [list $v $sk]]] }
+                    }
+                }
                 I { set c "i$v = si$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
                 D { set c "d$v = sd$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
                 default {
@@ -1017,6 +1050,9 @@ proc stepT {key pc in} {
             if {[kap $key $v] eq "B"} {
                 return [R fall [list {*}$in I] "\{ int64_t w_; if (TBC_UNLIKELY(!l$v || !tbc_incr_local(&l$v, INT64_C($imm), &w_))) goto D$pc; si$d = w_; \}" stores [list [list $v B]]]
             }
+            if {[kap $key $v] eq "W"} {
+                return [R fall [list {*}$in I] "\{ int64_t t_; if (TBC_UNLIKELY(wt$v || __builtin_add_overflow(i$v, INT64_C($imm), &t_))) goto D$pc; i$v = t_; si$d = t_; \}" stores [list [list $v W]]]
+            }
             if {[kap $key $v] ni {I -}} { return [R dead {} "goto D$pc;" stores [list [list $v I]]] }
             return [R fall [list {*}$in I] "\{ int64_t t_; if (TBC_UNLIKELY(__builtin_add_overflow(i$v, INT64_C($imm), &t_))) goto D$pc; i$v = t_; si$d = t_; \}" stores [list [list $v I]]]
         }
@@ -1034,6 +1070,10 @@ proc stepT {key pc in} {
                 lassign [operandOf $P $pc $top $e] ce ge xe
                 set rel ""; if {[kd $e] eq "B"} { set rel " Tcl_DecrRefCount(s$top);" }
                 return [R fall [lreplace $in $top $top I] "\{ int64_t w_; $ge if (TBC_UNLIKELY(!l$v || !tbc_incr_local(&l$v, $xe, &w_))) goto D$pc;$rel si$top = w_; \}" stores [list [list $v B]]]
+            }
+            if {[kap $key $v] eq "W"} {
+                if {[kd $e] ne "I"} { return [R dead {} "goto D$pc;" stores [list [list $v W]]] }
+                return [R fall [lreplace $in $top $top I] "\{ int64_t t_; if (TBC_UNLIKELY(wt$v || __builtin_add_overflow(i$v, si$top, &t_))) goto D$pc; i$v = t_; si$top = t_; \}" stores [list [list $v W]]]
             }
             if {[kap $key $v] ni {I -} || [kd $e] ni {I U B}} { return [R dead {} "goto D$pc;" stores [list [list $v I]]] }
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v I]]] }
@@ -1055,6 +1095,7 @@ proc stepT {key pc in} {
             switch [kd $e] {
                 I { set c "if (${neg}(si$top != 0)) \{ @TAKEN@ goto T$tgt; \}" }
                 D { set c "if (${neg}(sd$top != 0.0)) \{ @TAKEN@ goto T$tgt; \}" }
+                W { set c "\{ int t_; if (sw$top) \{ if (TBC_UNLIKELY(sd$top != sd$top)) goto D$pc; t_ = (sd$top != 0.0); \} else t_ = (si$top != 0); if (${neg}t_) \{ @TAKEN@ goto T$tgt; \} \}" }
                 U { set c "" }
                 B {
                     set c "\{ int t_; if (TBC_UNLIKELY(tbc_truth(interp, s$top, &t_) != TCL_OK)) goto [fl $key $in]; Tcl_DecrRefCount(s$top); if (${neg}t_) \{ @TAKEN@ goto T$tgt; \} \}"
@@ -1072,8 +1113,9 @@ proc stepT {key pc in} {
                 return [R term {} "rv = [boxe $P $top $e];$rel rc = TCL_OK; goto ret;" ret B]
             }
             set k [kd $e]; set rk $VK($key,ret)
+            if {$rk eq "W"} { set rk B }
             if {$k eq "U"} { return [R term {} "" ret U] }
-            set sk [expr {$k eq "L" ? "B" : $k}]
+            set sk [expr {$k eq "L" || $k eq "W" ? "B" : $k}]
             if {$rk in {- U}} { set rk $sk }
             if {$rk eq "B"} {
                 if {$k eq "B"} { set c "rv = s$top;" } else { set c "[boxc $P $top $e] rv = s$top;" }
@@ -1871,6 +1913,7 @@ proc operandOf {P pc p e} {
         D { return [list D "" sd$p] }
         B { return [list I "if (TBC_UNLIKELY(!tbc_isint(s$p))) goto D$pc;" "tbc_wide(s$p)"] }
         U { return [list U "" ""] }
+        W { return [list I "if (TBC_UNLIKELY(sw$p)) goto D$pc;" si$p] }
         L {
             # an integer written non-canonically (0xFF, 010, 1_000 is not one): the operation reads its value, the string is not kept
             set lit [lindex $::PI($P,lits) [lt $e]]
@@ -1884,6 +1927,58 @@ proc operandOf {P pc p e} {
         default { return [list X "" ""] }
     }
 }
+# An arithmetic or comparison instruction of the W policy: the operands are integers, doubles, tagged numbers (W) or objects that are numbers (loaded as W: anything
+# else, and bignums, NaN, hand over to the boxed code).  The result of + - * / is W, that of % and of the comparisons an integer.  The integer operation is the one
+# of the integer path (overflow and zero divisors hand over), the double operation that of the double path.
+proc stepArithW {P pc op in d} {
+    set pa [expr {$d-2}]; set pb [expr {$d-1}]
+    set ea [lindex $in $pa]; set eb [lindex $in $pb]
+    set base [lrange $in 0 [expr {$pa-1}]]
+    set guards ""; set rel ""
+    foreach {tag p e} [list a $pa $ea b $pb $eb] {
+        switch [kd $e] {
+            I { set T($tag) 0; set IV($tag) si$p; set DV($tag) "((double) si$p)" }
+            D { set T($tag) 1; set IV($tag) 0; set DV($tag) sd$p }
+            W { set T($tag) sw$p; set IV($tag) si$p; set DV($tag) "(sw$p ? sd$p : (double) si$p)" }
+            B {
+                append guards " if (TBC_UNLIKELY(!tbc_wload(s$p, &sw$p, &si$p, &sd$p))) goto D$pc;"
+                append rel " Tcl_DecrRefCount(s$p);"
+                set T($tag) sw$p; set IV($tag) si$p; set DV($tag) "(sw$p ? sd$p : (double) si$p)"
+            }
+            L {
+                lassign [operandOf $P $pc $p $e] cl gl xl
+                if {$cl ne "I"} { return [R dead {} "goto D$pc;"] }
+                set T($tag) 0; set IV($tag) $xl; set DV($tag) "((double) ($xl))"
+            }
+            U { return [R fall [list {*}$base U] ""] }
+            default { return [R dead {} "goto D$pc;"] }
+        }
+    }
+    set decl "int ta_ = $T(a), tb_ = $T(b); int64_t ia_ = (ta_ ? 0 : $IV(a)), ib_ = (tb_ ? 0 : $IV(b)), ir_; double da_ = $DV(a), db_ = $DV(b), dr_; (void) ir_; (void) dr_;"
+    set cmp {lt < le <= gt > ge >= eq == neq !=}
+    switch $op {
+        add - sub - mult {
+            set bi [dict get {add __builtin_add_overflow sub __builtin_sub_overflow mult tbc_mul_ovf} $op]
+            set sym [dict get {add + sub - mult *} $op]
+            set c "\{$guards $decl if (!ta_ && !tb_) \{ if (TBC_UNLIKELY(${bi}(ia_, ib_, &ir_))) goto D$pc; sw$pa = 0; si$pa = ir_; \} else \{ dr_ = da_ $sym db_; if (TBC_UNLIKELY(dr_ != dr_)) goto D$pc; sw$pa = 1; sd$pa = dr_; \}$rel \}"
+            return [R fall [list {*}$base W] $c]
+        }
+        div {
+            set c "\{$guards $decl if (!ta_ && !tb_) \{ if (TBC_UNLIKELY(ib_ == 0 || (ia_ == INT64_MIN && ib_ == -1))) goto D$pc; ir_ = ia_ / ib_; if (ia_ % ib_ != 0 && ((ia_ < 0) != (ib_ < 0))) ir_--; sw$pa = 0; si$pa = ir_; \} else \{ if (TBC_UNLIKELY(db_ == 0.0)) goto D$pc; dr_ = da_ / db_; if (TBC_UNLIKELY(dr_ != dr_)) goto D$pc; sw$pa = 1; sd$pa = dr_; \}$rel \}"
+            return [R fall [list {*}$base W] $c]
+        }
+        mod {
+            set c "\{$guards $decl if (TBC_UNLIKELY(ta_ || tb_ || ib_ == 0)) goto D$pc; if (ib_ == -1) ir_ = 0; else \{ ir_ = ia_ % ib_; if (ir_ != 0 && ((ir_ < 0) != (ib_ < 0))) ir_ += ib_; \}$rel si$pa = ir_; \}"
+            return [R fall [list {*}$base I] $c]
+        }
+        default {
+            set sym [dict get $cmp $op]
+            set c "\{$guards $decl if (!ta_ && !tb_) \{ ir_ = (ia_ $sym ib_); \} else \{ if (TBC_UNLIKELY((!ta_ && (ia_ > TBC_2P53 || ia_ < -TBC_2P53)) || (!tb_ && (ib_ > TBC_2P53 || ib_ < -TBC_2P53)))) goto D$pc; ir_ = (da_ $sym db_); \}$rel si$pa = ir_; \}"
+            return [R fall [list {*}$base I] $c]
+        }
+    }
+}
+
 proc stepArith {P pc op in d} {
     set pa [expr {$d-2}]; set pb [expr {$d-1}]
     set ea [lindex $in $pa]; set eb [lindex $in $pb]
@@ -1911,6 +2006,7 @@ proc stepArith {P pc op in d} {
     if {[kd $eb] eq "B"} { append rel " Tcl_DecrRefCount(s$pb);" }
     set guards "$ga $gb"
     set cmp {lt < le <= gt > ge >= eq == neq !=}
+    if {$::curWpol && ([kd $ea] eq "W" || [kd $eb] eq "W" || [kd $ea] eq "B" || [kd $eb] eq "B")} { return [stepArithW $P $pc $op $in $d] }
     if {$ca eq "I" && $cb eq "I"} {
         switch $op {
             add - sub - mult {
@@ -1986,6 +2082,16 @@ proc stepBit {P pc op in d} {
 }
 proc stepUnary {P pc op in d} {
     set p [expr {$d-1}]; set e [lindex $in $p]
+    if {$op in {uminus uplus not} && ([kd $e] eq "W" || ($::curWpol && [kd $e] eq "B"))} {
+        set base [lrange $in 0 [expr {$p-1}]]
+        set load ""; set rel ""
+        if {[kd $e] eq "B"} { set load "if (TBC_UNLIKELY(!tbc_wload(s$p, &sw$p, &si$p, &sd$p))) goto D$pc;"; set rel " Tcl_DecrRefCount(s$p);" }
+        switch $op {
+            uplus { return [R fall [list {*}$base W] "\{ $load$rel \}"] }
+            uminus { return [R fall [list {*}$base W] "\{ $load if (sw$p) \{ sd$p = -sd$p; \} else \{ if (TBC_UNLIKELY(si$p == INT64_MIN)) goto D$pc; si$p = -si$p; \}$rel \}"] }
+            not { return [R fall [list {*}$base I] "\{ int64_t r_; $load if (sw$p) \{ if (TBC_UNLIKELY(sd$p != sd$p)) goto D$pc; r_ = (sd$p == 0.0); \} else r_ = (si$p == 0);$rel si$p = r_; \}"] }
+        }
+    }
     lassign [operandOf $P $pc $p $e] ca ga xa
     set base [lrange $in 0 [expr {$p-1}]]
     if {$ca eq "X"} { return [R dead {} "goto D$pc;"] }
@@ -2356,9 +2462,23 @@ proc frameSeed {P pc in} {
     return [list $nx $st]
 }
 
+# Instructions that take a tagged number (W) on the stack as it is; for any other instruction the W slots it consumes are made objects on the edge into it.
+set wAware {add sub mult div mod lt le gt ge eq neq bitand bitor bitxor lshift rshift uminus uplus bitnot not jumpTrue1 jumpTrue4 jumpFalse1 jumpFalse4
+    storeScalar1 storeScalar4 pop dup done incrScalar1}
+proc wnorm {P out sop} {
+    global PI wAware
+    if {[lsearch -exact $out W] < 0 || $sop in $wAware} { return $out }
+    lassign $PI($P,ins,$sop) op a
+    set pops [lindex [effect $op $a [llength $out] [lindex $PI($P,mk,$sop) end]] 0]
+    set n [llength $out]
+    for {set i [expr {max($n - $pops, 0)}]} {$i < $n} {incr i} { if {[kd [lindex $out $i]] eq "W"} { set out [lreplace $out $i $i B] } }
+    return $out
+}
+
 proc analyze {key} {
     global VK PI variants
     lassign [keysplit $key] P sig
+    set ::curWpol [wpol $P]
     set nvar [llength $PI($P,vnames)]
     set nbefore [llength $variants]
     set oldret $VK($key,ret)
@@ -2402,10 +2522,12 @@ proc analyze {key} {
                 multi { set succs [concat [dict get $r tgts] [list $PI($P,next,$pc)]] }
             }
             foreach s $succs {
+                set outs $out
+                if {$::curWpol} { set outs [wnorm $P $out $s] }
                 if {![info exists IN($s)]} {
-                    set IN($s) $out; lappend work $s
+                    set IN($s) $outs; lappend work $s
                 } else {
-                    set j [jstate $IN($s) $out]
+                    set j [jstate $IN($s) $outs]
                     if {$j ne $IN($s)} { set IN($s) $j; lappend work $s }
                 }
             }
@@ -2414,8 +2536,8 @@ proc analyze {key} {
         set kap $VK($key,kap)
         set nk $kap
         foreach s $stores { lassign $s v k; dict set nk $v [jk [dict get $nk $v] $k] }
-        foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M}} { dict set nk $v B } }
-        foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M}} { dict set nk $v B } }
+        foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M W}} { dict set nk $v B } }
+        foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M W}} { dict set nk $v B } }
         if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M}} { dict set nk $v B } } }
         if {$nk eq $kap} {
             set pending 0
@@ -2428,6 +2550,7 @@ proc analyze {key} {
     foreach k [array names IN] { set VK($key,in,$k) $IN($k) }
     set rk $VK($key,ret)
     foreach r $rets { set rk [jk $rk [expr {$r eq "L" ? "B" : $r}]] }
+    if {$rk eq "W"} { set rk B }
     set VK($key,ret) $rk
     return [expr {$rk ne $oldret || [llength $variants] != $nbefore}]
 }
@@ -3157,7 +3280,7 @@ proc resumePoints {key} {
             if {$inner} continue
             set ok 1
             foreach e $VK($key,in,$pc) { if {[kd $e] ni {I D B T}} { set ok 0; break } }
-            foreach v $PI($P,may,$pc) { if {[dict get $kap $v] ni {I D B F}} { set ok 0; break } }
+            foreach v $PI($P,may,$pc) { if {[dict get $kap $v] ni {I D B F W}} { set ok 0; break } }
             if {$ok} { lappend pts $pc }
         }
     }
@@ -3218,6 +3341,9 @@ proc resumePrologue {key} {
                         append chk " if (!vp_->value.objPtr || !${conv}(vp_->value.objPtr, &$var)) goto giveup; \}\n"
                     }
                 }
+                W {
+                    append chk " if (!vp_->value.objPtr || !tbc_wload_canon(vp_->value.objPtr, &wt$v, &i$v, &d$v)) goto giveup; \}\n"
+                }
                 B {
                     append chk " \}\n"
                     append ld "    \{ Var *vp_ = &loc_\[$v\]; if (vp_->value.objPtr) \{ l$v = vp_->value.objPtr; Tcl_IncrRefCount(l$v); \} \}\n"
@@ -3247,6 +3373,7 @@ proc resumePrologue {key} {
 proc emitVariant {key recursive {resume 0}} {
     global VK PI FM FRM typedMode
     lassign [keysplit $key] P sig
+    set ::curWpol [wpol $P]
     set cid [cident $P]
     set kap $VK($key,kap)
     set rk $VK($key,ret); if {$rk in {- U}} { set rk B }
@@ -3267,11 +3394,11 @@ proc emitVariant {key recursive {resume 0}} {
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
-        switch [dict get $kap $v] { I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
+        switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
         if {$v in [flaggedOf $P] && [dict get $kap $v] in {I D}} { append fn " int g$v = 0; (void) g$v;" }
         append fn "\n"
     }
-    for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL; int64_t si$k = 0; double sd$k = 0; (void) s$k; (void) si$k; (void) sd$k;\n" }
+    for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL; int64_t si$k = 0; double sd$k = 0; (void) s$k; (void) si$k; (void) sd$k;[expr {[wpol $P] ? " int sw$k = 0; (void) sw$k;" : ""}]\n" }
     foreach pc $PI($P,reach) { if {[lindex $PI($P,ins,$pc) 0] eq "foreach_step"} { set sp [lindex $PI($P,ins,$pc) 1 4]; append fn "    long fit_$sp = 0, fmax_$sp = 0; (void) fit_$sp; (void) fmax_$sp;\n" } }
     append fn "@@VECDECLS@@"
     if {$recursive && !$resume} {
@@ -3288,6 +3415,9 @@ proc emitVariant {key recursive {resume 0}} {
         set s [string index $sig $v]; set k [dict get $kap $v]
         if {$k eq "F"} {
             # (lives in the frame)
+        } elseif {$k eq "W"} {
+            # (an integer or double argument of a variable that holds either)
+            switch $s { I { append fn "    wt$v = 0; i$v = a$v;\n" } D { append fn "    wt$v = 1; d$v = a$v;\n" } }
         } elseif {$s eq $k} {
             switch $k { I { append fn "    i$v = a$v;\n" } D { append fn "    d$v = a$v;\n" } B { append fn "    l$v = a$v; Tcl_IncrRefCount(l$v);\n" } }
         } else {

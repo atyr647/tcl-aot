@@ -55,3 +55,15 @@ TCL
 out=$(TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/e.tcl" "$tmp/e.c" Emptytest 2>&1)
 if echo "$out" | grep -q -E '^DEADOP (eq|neq) '; then echo "typed: FAILED, == against the empty string hands over:"; echo "$out" | grep -E '^DEADOP (eq|neq) '; exit 1; fi
 echo "typed: == and != against the empty string stay in typed code: ok"
+
+# a proc that uses floating-point numbers keeps a loop over a list of numbers of either kind in typed code: its sums are tagged numbers (W), and the first addition does not
+# hand over; a proc with no sign of floating-point numbers keeps its integer variables
+cat > "$tmp/w.tcl" <<'TCL'
+proc tw_sum {l} { set sum 0; set sumsq 0.0; foreach v $l { set sum [expr {$sum + $v}]; set sumsq [expr {$sumsq + $v * $v}] }; list $sum $sumsq }
+proc tw_int {l} { set sum 0; foreach v $l { set sum [expr {$sum + $v}] }; return $sum }
+TCL
+out=$(env -u TBC_FORCE_WPOLICY TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/w.tcl" "$tmp/w.c" Wtest 2>&1)
+if echo "$out" | grep -q -E '^DEADOP add .*tw_sum'; then echo "typed: FAILED, the sum of a list of numbers hands over:"; echo "$out" | grep -E '^DEADOP add'; exit 1; fi
+echo "$out" | grep -E '::tw_sum/B ' | grep -q ' W ' || { echo "typed: FAILED, tw_sum has no tagged number variable:"; echo "$out" | grep tw_sum; exit 1; }
+echo "$out" | grep -E '::tw_int/B ' | grep -q ' W' && { echo "typed: FAILED, an integer-only proc got tagged numbers:"; echo "$out" | grep tw_int; exit 1; }
+echo "typed: sums of numbers of either kind stay in typed code as tagged numbers (floating-point procs only): ok"

@@ -1658,3 +1658,18 @@ proc sm_loop {l} { set n 0; foreach s $l { if {[string match *a* $s]} { incr n }
 # regexp as an instruction (no variables, no options but -nocase): matches, no match, an invalid pattern, patterns with classes and anchors
 proc rx_test {p s} { list [regexp $p $s] [regexp -nocase $p $s] [regexp -- {^[0-9]+$} $s] [regexp {a.c} $s] }
 proc rx_loop {l} { set n 0; foreach s $l { if {[regexp {^a} $s]} { incr n }; if {[regexp -nocase {B+} $s]} { incr n 10 } }; return $n }
+
+# numbers that are integers or doubles at run time (the tagged kind W of procs that use floating-point numbers)
+proc wf_add {a b} { expr {$a + $b} }
+proc wf_sum {l} { set sum 0; set sumsq 0.0; foreach v $l { set sum [expr {$sum + $v}]; set sumsq [expr {$sumsq + $v * $v}] }; list $sum $sumsq }
+proc wf_mean {l} { set s 0; set n 0; foreach v $l { set s [expr {$s + $v}]; incr n }; if {$n == 0} { return 0 }; expr {$s / double($n)} }
+proc wf_cmp {a b} { list [expr {$a < $b}] [expr {$a == $b}] [expr {$a + $b * 0.5}] [expr {-$a}] [expr {!$a}] [expr {$a / $b}] [expr {$a - $b}] [expr {$a * $b}] [expr {$a >= $b}] [expr {$a != $b}] }
+proc wf_mod {a b} { list [expr {$a % $b}] [expr {$a + 0.0}] }
+proc wf_loop {n} { set x 1; set y 0.5; for {set i 0} {$i < $n} {incr i} { set x [expr {$x * 1.5 + $i}]; set y [expr {$y - $x / 3}]; if {$x > 1e6} { break } }; list $x $y }
+proc wf_pass {l} { set t 0; foreach v $l { set t [wf_add $t $v] }; return $t }
+proc wf_ret {x} { set r 0; if {$x > 0} { set r [expr {$x * 0.5}] }; return $r }
+proc wf_incr {n} { set c 0; set f 0.5; for {set i 0} {$i < $n} {incr i} { incr c; set f [expr {$f + $c}] }; list $c $f }
+proc wf_cond {l} { set k 0; set m 0.0; foreach v $l { if {$v > 2} { incr k }; if {$v * 1.0 != $v} { set m [expr {$m + $v}] } }; list $k $m }
+proc wf_neg {l} { set r {}; foreach v $l { lappend r [expr {-$v}] [expr {+$v}] [expr {$v - 0.0}] }; return $r }
+proc wf_store {n} { for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i * 0.5}]; set b $a($i); set c [expr {$b + 1}] }; list [array size a] [expr {$n ? $c : 0}] }
+proc wf_keep {x} { set v $x; set w [expr {$v + 0.5}]; list $v $w }

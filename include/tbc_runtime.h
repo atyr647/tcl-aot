@@ -110,6 +110,17 @@ TBC_INLINE int tbc_num(Tcl_Obj *o, Tcl_WideInt *w, double *d) {
     return tbc_num_text(o, w, d);
 }
 
+/* an object that holds a finite number, as a tagged number (the kind W of the translator): 1 with *tag 0 and *iv, or *tag 1 and *dv; or 0 (text that is not a number, a
+ * bignum, NaN) */
+TBC_INLINE int tbc_wload(Tcl_Obj *o, int *tag, int64_t *iv, double *dv) {
+    Tcl_WideInt w;
+    double x;
+    int k = tbc_num(o, &w, &x);
+    if (k == 1) { *tag = 0; *iv = (int64_t) w; return 1; }
+    if (k == 2 && x == x) { *tag = 1; *dv = x; return 1; }
+    return 0;
+}
+
 /* ---- math functions (tcl::mathfunc::*) in typed code ---- */
 
 /* an object that holds a finite number, as a double: 1 and *d set, or 0 (text that is not a number, a bignum, NaN) */
@@ -853,6 +864,14 @@ TBC_INLINE int tbc_arg_dbl(Tcl_Obj *o, double *d) {
         *d = o->internalRep.doubleValue;
         return 1;
     }
+    return 0;
+}
+
+/* the same for a value that is going to live in a typed variable: it must come back as it was (see tbc_arg_int): an integer in its canonical form, a double without a
+ * string form of its own */
+TBC_INLINE int tbc_wload_canon(Tcl_Obj *o, int *tag, int64_t *iv, double *dv) {
+    if (tbc_arg_int(o, iv)) { *tag = 0; return 1; }
+    if (tbc_arg_dbl(o, dv)) { *tag = 1; return 1; }
     return 0;
 }
 

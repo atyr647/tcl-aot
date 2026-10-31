@@ -263,6 +263,13 @@ foreach s $smv { lappend calls [list sm_loop [list $s $s]] }
 # regexp as an instruction
 foreach p {a b+ {^a} {[0-9]} {(} {a{2}} {\d} {*a} {} {.} {\u00e9}} { foreach s {abc {} 12345 ABC "\u00e9a" {a b} aabbcc 1.5} { lappend calls [list rx_test $p $s] } }
 foreach l {{} {a b} {abc Bcd {} bbb} {a A b B}} { lappend calls [list rx_loop $l] }
+# numbers that are integers or doubles at run time
+set wfl [list {} {1 2 3} {1.5 2.5} {1 2.5 3} {0.1 0.2 0.3} {7.90 8} {0x10 1.5} {1e3 2} abc {1 abc 2} {9223372036854775807 1} {9223372036854775807 1.0} {-5 5} {inf 1} {nan 1} {" 5" 2} {100000000000000000000 1} {0 0.0} {5} {5.0} {-0.0 1}]
+foreach l $wfl { lappend calls [list wf_sum $l] [list wf_mean $l] [list wf_pass $l] [list wf_cond $l] [list wf_neg $l] }
+set wfv {0 1 -1 3 7 2.5 -2.5 0.0 1e300 abc {} 0x10 " 5" 9223372036854775807 -9223372036854775808 100000000000000000000 inf nan}
+foreach a $wfv { foreach b {0 1 -2 2.5 0.0 abc 9223372036854775807} { lappend calls [list wf_cmp $a $b] [list wf_mod $a $b] } }
+foreach n {0 1 3 10 100 1000} { lappend calls [list wf_loop $n] [list wf_incr $n] [list wf_store $n] }
+foreach x {0 1 -1 2.5 -2.5 abc {} 9223372036854775807} { lappend calls [list wf_ret $x] [list wf_keep $x] }
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}
