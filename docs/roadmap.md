@@ -31,15 +31,6 @@ An item moves out of this file when it is measured, tested and written up there.
 * **Hand-over at every instruction, for the callee side**: the forced hand-over test covers typed to boxed; the other direction (boxed to typed at a loop head) does
   not exist yet and is the same entry point as above.
 
-## Entering typed code again from boxed code
-
-When typed code hands over (a bignum operand, a value of the wrong kind), the rest of that call runs boxed, even if a hot loop follows.  tcllib's crc32 does this on
-every call: `signbit` is 2^63, so `~$signbit>>7` is bignum arithmetic and the byte loop that follows runs boxed (1.06x the interpreter, against 4.7x for the
-same loop when typed).  The resume entry that exists for coroutines (`V_<proc>_RE`, decision 20) can be entered from the boxed code at a loop head: it checks the
-locals against the kinds the typed variant assumes and goes on boxed if they do not match.  What it needs: the entry points at loop heads, a flag so that a hand-over
-from the re-entered code does not re-enter again (otherwise every iteration nests another frame), and a limit on retries when the check keeps failing.
-(decision 21)
-
 ## Replaced commands
 
 Checked at proc entry (decisions 19).  Not shown for every case: a replacement made by a proc while it is itself running and using the built-in

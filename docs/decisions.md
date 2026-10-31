@@ -399,3 +399,17 @@ Two defects found on the way, both fixed:
 * The entry after a yield (decision 20) skipped the variables typed code keeps in the frame.  A proc that links a variable to one of its own (`upvar 0 y x`) after
   typed code has handed over, and then yields, returned a stale value for `y` when typed code was entered again: `ty_same` fails without the check.  The check is now
   made by both entries.
+
+Checked: the full `tests/run.sh` passes on this tree (differential 13591 calls in four modes, forced hand-over 6 configurations, `tests/osr.sh`, `tests/typed.sh`, fuzz typed
+seeds 1-3 and boxed seeds 1-2, valgrind 13552 calls, 0 mismatches).  The earlier commit of this change (80406ea) was a work-in-progress snapshot made while that run was
+pending.
+
+## 24. Two things that were measured or reasoned about and not built
+
+* **Eliminating the overflow check of integer additions** (for example `incr i` in a counting loop).  Upper bound: every `__builtin_add_overflow` in the generated code of
+  the benchmark file replaced by a plain add, timed with the same module: `int_loop` 16.2 ms to 15.6 ms, `arr_sieve` 70.2 ms to 68.0 ms, the others within noise.
+  At most 0-4%; the analysis that proves a counter cannot overflow would be code that can be wrong for that gain.
+* **Calling the C procedure of a pure built-in directly** (`string first`, `lrange`, ...) instead of through the interpreter's command dispatch (about 350 instructions
+  per call).  It would cut the dispatch share (estimated 1.6-7% of the eleven workloads, up to 2x on a loop that does nothing but call such commands, `str_ops`
+  1.45x).  It changes what a program can observe: `info cmdcount` would not count the call, execution traces and `interp limit command` would not see it, and the
+  interpreter's checks between commands would be skipped, unless the call repeated each of them (which is most of the dispatch cost).  Not done.
