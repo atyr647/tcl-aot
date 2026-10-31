@@ -608,3 +608,23 @@ Full-suite result for decision 31: the whole of `tests/run.sh` from a snapshot o
 typed, osr, hot, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind, 0 mismatches.  The change leaves the typed code as it was (the descriptions are only
 read when a module is built with `-DTBC_COV`), so the run with the forced tagged-number policy was not repeated.
 
+## 32. Comparisons of objects that are not integers stay in typed code
+
+`tbc::hot` (decision 31) over the 21 workloads of decisions 19 and 28 counted 168664 hand-overs at instructions, of which about 28% were comparisons: `eq`/`neq` of objects that are not integers
+(`struct::list::Lequal`, `[lindex $a 0] == $a` with `$a` a list: 32400 events), and `==`/`!=` against a text literal (`textutil::adjust::Justification`, `$x == "plain"`: 8800 events; `textutil::trim::MakeStr`,
+`"$pos" == "left"`: 1600).  Typed code took the operands of a comparison to be integers (or doubles) and handed over for anything else; a text literal had no kind at all.
+
+* **Change.**  A comparison (`< <= > >= == !=`) with an object operand, or with an operand that has no numeric kind (a text literal), takes the interpreter's rule through the same generic compare the boxed code
+  uses (`tbc_cmpo`): two numbers are compared as numbers, anything else as strings.  Where the old code would have handed over because an object is not an integer it jumps to that compare instead; the integer
+  and double paths are unchanged.  The result is an integer like any comparison's.  An error (none that a comparison can raise, an interrupted evaluation aside) hands over as before, with the operands untouched.
+* **Measured** (instruction counts net of start-up, results equal, 21 workloads, against the commit before): `struct::list` 2008.9M to 1940.8M compiled (3.4% fewer; interpreter / compiled 0.99x to 1.02x); the other
+  20 within 0.1M of before (`textutil` +0.1%).  `Lequal` no longer appears among the hand-over sites.  A hand-over before a comparison was cheap (the rest of the proc ran boxed, as it did before typed code existed),
+  so the gain is small where the proc does little else.
+* **Tests:** `cm_*` procs (text and number literals, orderings of text, lists, the `Lequal` recursion, counting and minimum loops over lists of mixed values, mixed integer/double/text/bignum/NaN/Inf/empty/unicode
+  operands: 1020 more calls in the differential test, and the forced hand-over and forced tagged-number runs); `tests/typed.sh` (`DEADOP` lists no comparison for a proc comparing objects and text literals; it
+  failed on the commit before) and `tests/hot.sh` (a proc comparing text and lists records no hand-over; failed before).  The cases of `cm_eqrec` with NaN were left out: NaN is not equal to itself, so the
+  recursion never ends in the interpreter either (and ends in the recursion-limit edge of decision 4).
+
+Full-suite result: the whole of `tests/run.sh` from a snapshot of `38ec990`, exit 0 (16703 calls in the differential test in four modes, forced hand-over at three rates and two seeds, guard, typed, osr, hot, nest cap, capture,
+pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The quick suite also ran with `TBC_FORCE_WPOLICY=1`: 0 mismatches.
+
