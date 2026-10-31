@@ -670,6 +670,33 @@ proc prepare {P} {
     foreach c $cls { if {$c eq "D"} { set fl 1; break } }
     if {!$fl} { foreach s $PI($P,lits) { if {[regexp {^(?:::)?tcl::mathfunc::(?:double|sqrt|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|log|log10|fmod|hypot|floor|ceil)$} $s]} { set fl 1; break } } }
     set PI($P,floaty) $fl
+    # a proc without such a sign that does arithmetic can still meet doubles in the data: it gets a second version with tagged numbers (key <proc>/BB..w), used once an object
+    # operand has turned out to be a double (see wadapt in tbc_runtime.h)
+    # (not one that uses bit operations or %, which are errors for a double: checksums, ciphers and number theory work on integers, and the second version would be code that is
+    # never used there)
+    set ar 0; set intonly 0
+    foreach pc $reach {
+        set o [lindex $ins($pc) 0]
+        if {$o in {add sub mult div}} { set ar 1 }
+        if {$o in {mod bitand bitor bitxor lshift rshift bitnot}} { set intonly 1 }
+    }
+    # (and one whose arithmetic is on data: a variable that is assigned an expression of itself, `set sum [expr {$sum + $x}]`, or an operand that is a foreach variable)
+    set data 0
+    if {$ar && !$intonly} {
+        set fvs {}
+        foreach pc $reach { lassign $ins($pc) o a; if {$o eq "foreach_step"} { foreach v [concat {*}[lindex $a 3]] { lappend fvs $v } } }
+        set loaded {}; set sawA 0; set dflag 0
+        foreach pc $reach {
+            lassign $ins($pc) o a
+            switch -- $o {
+                startCommand { set loaded {}; set sawA 0; set dflag 0 }
+                loadScalar1 - loadScalar4 { set v [operand [lindex $a 0]]; lappend loaded $v; if {$v in $fvs} { set dflag 1 } }
+                add - sub - mult - div { set sawA 1; if {$dflag} { set data 1 } }
+                storeScalar1 - storeScalar4 { if {$sawA && [operand [lindex $a 0]] in $loaded} { set data 1 } }
+            }
+        }
+    }
+    set PI($P,wadapt) [expr {!$fl && $data && !$hasYield && [llength $PI($P,loopheads)] && ![info exists ::env(TBC_FORCE_WPOLICY)]}]
 }
 
 set refusedProcs {}
@@ -778,6 +805,11 @@ proc wpol {P} {
     global PI
     if {$PI($P,hasYield)} { return 0 }
     return [expr {[info exists ::env(TBC_FORCE_WPOLICY)] || $PI($P,floaty)}]
+}
+# the policy of one variant: the static one of the proc, or the tagged-number version of a proc that adapts (its key ends in w)
+proc wpolK {key} {
+    lassign [keysplit $key] P sig
+    return [expr {[wpol $P] || [string match *w $sig]}]
 }
 proc jd {a b} {
     if {$a eq $b} { return $a }
@@ -1877,7 +1909,7 @@ proc defaultConst {d} {
 proc resumable {P {key ""}} {
     global PI
     # (the typed variant the boxed code enters at a loop head can never start the call over: the boxed code has run)
-    if {[llength $PI($P,fvars)] || $PI($P,hasYield) || ($key ne "" && [info exists ::OSRKEY] && [dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key)} { return 1 }
+    if {[llength $PI($P,fvars)] || $PI($P,hasYield) || ($key ne "" && [info exists ::OSRKEY] && (([dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key) || ([dict exists $::OSRKEYW $P] && [dict get $::OSRKEYW $P] eq $key)))} { return 1 }
     foreach c $PI($P,callees) { if {![info exists PI($c,pure)] || !$PI($c,pure)} { return 1 } }
     return 0
 }
@@ -1911,7 +1943,13 @@ proc operandOf {P pc p e} {
     switch [kd $e] {
         I { return [list I "" si$p] }
         D { return [list D "" sd$p] }
-        B { return [list I "if (TBC_UNLIKELY(!tbc_isint(s$p))) goto D$pc;" "tbc_wide(s$p)"] }
+        B {
+            if {$::PI($P,wadapt) && !$::curWpol} {
+                # (an object that is a double, where an integer was assumed: the proc will use its tagged-number version from now on)
+                return [list I "if (TBC_UNLIKELY(!tbc_isint(s$p))) { tbc_wnote(&tbc_wp_[cident $P], s$p); goto D$pc; }" "tbc_wide(s$p)"]
+            }
+            return [list I "if (TBC_UNLIKELY(!tbc_isint(s$p))) goto D$pc;" "tbc_wide(s$p)"]
+        }
         U { return [list U "" ""] }
         W { return [list I "if (TBC_UNLIKELY(sw$p)) goto D$pc;" si$p] }
         L {
@@ -2211,7 +2249,7 @@ proc stepInvoke {key pc in d n} {
             if {$rk in {- U}} { set outk U } else { set outk $rk }
             set rtype [ctype [expr {$outk eq "U" ? "B" : $outk}]]
             set rvar [svar [expr {$outk eq "U" ? "B" : $outk}] $q]
-            set c "if (TBC_UNLIKELY(!tbc_valid_$cid)) \{ tbc_st = 3; goto C$pc; \} \{ $rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]); if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $rvar = r_; \}"
+            set c "if (TBC_UNLIKELY(!tbc_valid_$cid[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}])) \{ tbc_st = 3; goto C$pc; \} \{ $rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]); if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $rvar = r_; \}"
             # post-call stub: error, or a boxed result because the callee fell back to its generic code
             set nextpc $PI($P,next,$pc)
             # a callee that had to leave typed mode reports it (tbc_st 3): the call is then made the ordinary way, with boxed arguments
@@ -2472,8 +2510,9 @@ set wAware {add sub mult div mod lt le gt ge eq neq bitand bitor bitxor lshift r
     storeScalar1 storeScalar4 pop dup done incrScalar1}
 proc wnorm {P out sop} {
     global PI wAware
-    if {[lsearch -exact $out W] < 0 || $sop in $wAware} { return $out }
+    if {[lsearch -exact $out W] < 0} { return $out }
     lassign $PI($P,ins,$sop) op a
+    if {$op in $wAware} { return $out }
     set n [llength $out]
     if {$op in {invokeStk1 invokeStk4}} {
         set ce [lindex $out [expr {$n - [lindex $a 0]}]]
@@ -2487,7 +2526,7 @@ proc wnorm {P out sop} {
 proc analyze {key} {
     global VK PI variants
     lassign [keysplit $key] P sig
-    set ::curWpol [wpol $P]
+    set ::curWpol [wpolK $key]
     set nvar [llength $PI($P,vnames)]
     set nbefore [llength $variants]
     set oldret $VK($key,ret)
@@ -3113,8 +3152,9 @@ proc entryCalled {cid pc} {
             foreach ypc $PI($P,reach) { if {[lindex $PI($P,ins,$ypc) 0] in {yield yieldToInvoke}} { set ENT([cident $P],$PI($P,next,$ypc)) 1; set ENT([cident $P],[expr {-$ypc-1}]) 1 } }
         }
         # (a re-entry that gives up goes on in the boxed code at the loop head it was entered from)
-        global OSRKEY
+        global OSRKEY OSRKEYW
         dict for {P gk} $OSRKEY { foreach rp [resumePoints $gk] { set ENT([cident $P],$rp) 1 } }
+        dict for {P gk} $OSRKEYW { foreach rp [resumePoints $gk] { set ENT([cident $P],$rp) 1 } }
     }
     return [info exists ENT($cid,$pc)]
 }
@@ -3156,27 +3196,40 @@ proc emitResume {P} {
 
 # The points at which the boxed code of P may enter typed code again: the loop heads the typed analysis knows the state at (resumePoints of the generic variant).
 proc osrPointsOf {P} {
-    global OSRKEY
-    if {![dict exists $OSRKEY $P]} { return {} }
-    return [resumePoints [dict get $OSRKEY $P]]
+    global OSRKEY OSRKEYW
+    set r {}
+    if {[dict exists $OSRKEY $P]} { set r [resumePoints [dict get $OSRKEY $P]] }
+    if {[dict exists $OSRKEYW $P]} { set r [lsort -integer -unique [concat $r [resumePoints [dict get $OSRKEYW $P]]]] }
+    return $r
 }
 # At such a loop head, once per activation of the boxed code: hand the stack and the frame to the typed variant for boxed arguments, which starts there.  It
 # checks the locals and the stack against the kinds the typed code assumes and, if they do not fit, goes on in the boxed code itself (with osr_ off, see
 # TBC_GNOF); if they fit, typed code runs to the end of the call and this activation returns its result.  The stack slots belong to the variant from the call on.
-proc osrAttempt {P pc d} {
-    global OSRKEY VK PI
+# A proc that adapts has two such variants (the second with tagged numbers, used once its flag is set).
+proc osrFin {P gk pc d} {
+    global VK PI
     set cid [cident $P]
-    set gk [dict get $OSRKEY $P]
     set rk $VK($gk,ret); if {$rk in {- U}} { set rk B }
-    set slots {}; for {set i 0} {$i < $d} {incr i} { lappend slots s$i }
     set nulls [string repeat ", NULL" $PI($P,nargs)]
     set call "V_${cid}_[lindex [keysplit $gk] 1](interp, tbc_maxdepth - ((Interp *) interp)->numLevels + TBC_REMK, 1$nulls)"
     switch $rk {
-        I { set fin "int64_t r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); rcg_ = TCL_OK; \}" }
-        D { set fin "double r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); rcg_ = TCL_OK; \}" }
-        default { set fin "Tcl_Obj *r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, r_); Tcl_DecrRefCount(r_); rcg_ = TCL_OK; \}" }
+        I { return "int64_t r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); rcg_ = TCL_OK; \}" }
+        D { return "double r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); rcg_ = TCL_OK; \}" }
     }
-    return "    if (osr_) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d; $fin goto gexit; \}\n"
+    return "Tcl_Obj *r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, r_); Tcl_DecrRefCount(r_); rcg_ = TCL_OK; \}"
+}
+proc osrAttempt {P pc d} {
+    global OSRKEY OSRKEYW PI
+    set cid [cident $P]
+    set slots {}; for {set i 0} {$i < $d} {incr i} { lappend slots s$i }
+    set gk ""; set wk ""
+    if {[dict exists $OSRKEY $P] && $pc in [resumePoints [dict get $OSRKEY $P]]} { set gk [dict get $OSRKEY $P] }
+    if {[dict exists $OSRKEYW $P] && $pc in [resumePoints [dict get $OSRKEYW $P]]} { set wk [dict get $OSRKEYW $P] }
+    if {$gk eq "" && $wk eq ""} { return "" }
+    if {$gk ne "" && $wk ne ""} { set fin "if (tbc_wp_$cid) \{ [osrFin $P $wk $pc $d] \} else \{ [osrFin $P $gk $pc $d] \}"; set cond "osr_" } \
+    elseif {$wk ne ""} { set fin [osrFin $P $wk $pc $d]; set cond "osr_ && tbc_wp_$cid" } \
+    else { set fin [osrFin $P $gk $pc $d]; set cond [expr {$PI($P,wadapt) ? "osr_ && !tbc_wp_$cid" : "osr_"}] }
+    return "    if ($cond) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d; $fin goto gexit; \}\n"
 }
 
 proc emitG {P} {
@@ -3382,7 +3435,7 @@ proc resumePrologue {key} {
 proc emitVariant {key recursive {resume 0}} {
     global VK PI FM FRM typedMode
     lassign [keysplit $key] P sig
-    set ::curWpol [wpol $P]
+    set ::curWpol [wpolK $key]
     set cid [cident $P]
     set kap $VK($key,kap)
     set rk $VK($key,ret); if {$rk in {- U}} { set rk B }
@@ -3407,14 +3460,14 @@ proc emitVariant {key recursive {resume 0}} {
         if {$v in [flaggedOf $P] && [dict get $kap $v] in {I D}} { append fn " int g$v = 0; (void) g$v;" }
         append fn "\n"
     }
-    for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL; int64_t si$k = 0; double sd$k = 0; (void) s$k; (void) si$k; (void) sd$k;[expr {[wpol $P] ? " int sw$k = 0; (void) sw$k;" : ""}]\n" }
+    for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL; int64_t si$k = 0; double sd$k = 0; (void) s$k; (void) si$k; (void) sd$k;[expr {$::curWpol ? " int sw$k = 0; (void) sw$k;" : ""}]\n" }
     foreach pc $PI($P,reach) { if {[lindex $PI($P,ins,$pc) 0] eq "foreach_step"} { set sp [lindex $PI($P,ins,$pc) 1 4]; append fn "    long fit_$sp = 0, fmax_$sp = 0; (void) fit_$sp; (void) fmax_$sp;\n" } }
     append fn "@@VECDECLS@@"
     if {$recursive && !$resume} {
         append fn "    if (TBC_UNLIKELY(rem < 0)) \{ tbc_depth_error(interp); tbc_st = 2; tbc_rc = TCL_ERROR; return rv; \}\n"
     }
     # the variant the boxed code enters at a loop head: locals and stack come from the frame and from tbc_rstk (see resumePrologue)
-    set osrHere [expr {!$resume && [dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key}]
+    set osrHere [expr {!$resume && (([dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key) || ([dict exists $::OSRKEYW $P] && [dict get $::OSRKEYW $P] eq $key))}]
     if {$osrHere} {
         append fn "    int resumed_ = 0, rpc = 0, rn = 0; Tcl_Obj **rstk = NULL; (void) rstk; (void) rn;\n"
         append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = 1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0; goto RESUME; \}\n"
@@ -3438,7 +3491,7 @@ proc emitVariant {key recursive {resume 0}} {
         append fn [resumePrologue $key]
     } else {
         append fn "    TBC_HIT([cstring "V:$key"]);\n"
-        append fn "    goto [expr {[info exists VK($key,in,0)] && $typedMode ? "T0" : "redo_all"}];\n"
+        append fn "    goto [expr {[info exists VK($key,in,0)] && $typedMode && ![string match *w $sig] ? "T0" : "redo_all"}];\n"
         if {$osrHere} {
             append fn "RESUME: ;\n    TBC_HIT([cstring "V:$key/RE"]);\n"
             append fn [resumePrologue $key]
@@ -3448,8 +3501,9 @@ proc emitVariant {key recursive {resume 0}} {
     # ---- typed code
     set tpcs {}
     foreach pc $PI($P,reach) { if {$typedMode && [info exists VK($key,in,$pc)]} { lappend tpcs $pc } }
-    if {$resume} {
-        # a copy that is entered at its resume points holds only the code that can be reached from them
+    if {$resume || [string match *w $sig]} {
+        # a copy that is entered at its resume points holds only the code that can be reached from them (so does the tagged version of a proc that adapts: the boxed code runs
+        # such a proc up to its first loop head, where it is entered)
         set seen [dict create]; set todo [resumePoints $key]
         foreach t $todo { dict set seen $t 1 }
         while {[llength $todo]} {
@@ -3562,6 +3616,7 @@ proc fixSig {P sig} {
 foreach P $translatable {
     set k $PI($P,nargs)
     newVariant $P [string repeat B $k]
+    if {$typedMode && $PI($P,wadapt)} { newVariant $P [string repeat B $k]w }
     set entries [list [string repeat B $k]]
     if {$typedMode} {
         set sigs [list [fixSig $P [string repeat I $k]]]
@@ -3616,10 +3671,13 @@ foreach key $variants { set REC($key) [reaches $key $key] }
 # the procs whose generic variant has a copy that goes on in typed code after a yield
 set REKEY {}
 set OSRKEY {}
+set OSRKEYW {}
 if {$typedMode} {
     foreach P $translatable {
         set gk $P/[string repeat B $PI($P,nargs)]
         if {[info exists VK($gk,kap)] && [llength [resumePoints $gk]]} { if {$PI($P,hasYield)} { dict set REKEY $P $gk } else { dict set OSRKEY $P $gk } }
+        set wk ${gk}w
+        if {[info exists VK($wk,kap)] && [llength [resumePoints $wk]]} { dict set OSRKEYW $P $wk }
     }
 }
 if {[info commands ::tbc::fingerprint] eq ""} { error "translate.tcl must run under tcl-aot-sh, a tclsh with tbc::fingerprint linked in (tools/translator-shell.c)" }
@@ -3627,6 +3685,8 @@ set out "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: [lle
 foreach P $translatable {
     set cid [cident $P]
     append out "static int tbc_valid_$cid = 0;\n"
+    if {$PI($P,wadapt)} { append out "static int tbc_wp_$cid = 0;\n" }
+    append out ""
     set i 0
     foreach l $PI($P,lits) { append out "static Tcl_Obj *L_[cident $P]_$i;\n"; incr i }
 }
@@ -3676,6 +3736,11 @@ foreach P $translatable {
     for {set v 0} {$v < $k} {incr v} { append e "    objv\[[expr {$v+1}]\] = loc_\[$v\].value.objPtr;\n" }
     append e "    tbc_maxdepth = Tcl_SetRecursionLimit(interp, 0);\n"
     set generic [string repeat B $k]
+    if {$PI($P,wadapt)} {
+        set wcargs {}
+        for {set v 0} {$v < $k} {incr v} { lappend wcargs "objv\[[expr {$v+1}]\]" }
+        append e "    if (tbc_wp_$cid) return G_${cid}(interp, 0, NULL, 0);\n"
+    }
     foreach s $sigs {
         if {$s eq $generic} continue
         set key $P/$s
@@ -3773,6 +3838,7 @@ if {$splitN > 0} {
     foreach P $translatable {
         set cid [cident $P]
         append hdr "extern int tbc_valid_$cid;\n"
+        if {$PI($P,wadapt)} { append hdr "extern int tbc_wp_$cid;\n" }
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append hdr "extern Tcl_Obj *L_${cid}_$i;\n" }
     }
     append hdr $dcExtern
@@ -3814,6 +3880,7 @@ if {$splitN > 0} {
     foreach P $translatable {
         set cid [cident $P]
         append init "int tbc_valid_$cid = 0;\n"
+        if {$PI($P,wadapt)} { append init "int tbc_wp_$cid = 0;\n" }
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append init "Tcl_Obj *L_${cid}_$i;\n" }
     }
     append init $dcDef "\n" [string range $out $outAfterG end]

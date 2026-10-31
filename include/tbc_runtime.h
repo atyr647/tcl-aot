@@ -867,6 +867,14 @@ TBC_INLINE int tbc_arg_dbl(Tcl_Obj *o, double *d) {
     return 0;
 }
 
+/* A proc that adapts (wadapt in translate.tcl) has a second typed version with tagged numbers.  Its integer version calls this where an object operand is not an integer: if it is
+ * a finite double the flag is set, the entry of the proc and the loop-head entry of the boxed code use the tagged version from then on, and this call hands over as before. */
+TBC_INLINE void tbc_wnote(int *flag, Tcl_Obj *o) {
+    Tcl_WideInt w;
+    double d;
+    if (!*flag && tbc_num(o, &w, &d) == 2 && d == d) *flag = 1;
+}
+
 /* the same for a value that is going to live in a typed variable: it must come back as it was (see tbc_arg_int): an integer in its canonical form, a double without a
  * string form of its own */
 TBC_INLINE int tbc_wload_canon(Tcl_Obj *o, int *tag, int64_t *iv, double *dv) {

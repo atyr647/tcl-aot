@@ -271,6 +271,11 @@ foreach a $wfv { foreach b {0 1 -2 2.5 0.0 abc 9223372036854775807} { lappend ca
 foreach n {0 1 3 10 100 1000} { lappend calls [list wf_loop $n] [list wf_incr $n] [list wf_store $n] }
 foreach x {0 1 -1 2.5 -2.5 abc {} 9223372036854775807} { lappend calls [list wf_ret $x] [list wf_keep $x] }
 foreach l $wfl { lappend calls [list wm_funcs $l] [list wm_acc $l] }
+# arithmetic on objects that turn out to be doubles, in procs without a sign of floating-point numbers: integers first, then doubles, then integers again
+set wal [list {1 2 3} {} {1.5 2.5} {1 2 3 4.5} {0.1 0.2 0.3} {7 8} {0x10 3} {1e3 2} {1 abc 2} {9223372036854775807 1} {9223372036854775807 1.0} {-5 5} {" 5" 2.0} {100000000000000000000 1} {1 2 3}]
+foreach l $wal { lappend calls [list wa_sum $l] [list wa_mean $l] [list wa_max $l] [list wa_twice $l] [list wa_scale $l 2] [list wa_scale $l 0.5] [list wa_dot $l $l] }
+foreach x {0 1 2 -3 0.5 2.5 abc 1e10 9223372036854775807} { lappend calls [list wa_poly $x] }
+lappend calls {list [wa_sum {1 2 3}] [wa_sum {1.5 2}] [wa_sum {4 5}] [wa_sum {0.25 0.25}] [wa_sum {7}]}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}

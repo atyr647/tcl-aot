@@ -1675,3 +1675,12 @@ proc wf_store {n} { for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i * 0.5
 proc wf_keep {x} { set v $x; set w [expr {$v + 0.5}]; list $v $w }
 proc wm_funcs {l} { set r {}; foreach v $l { set x [expr {$v * 1.0 + 0.0}]; lappend r [expr {sqrt(abs($x))}] [expr {double($v)}] [expr {sin($v)}] [expr {floor($v)}] [expr {ceil($x)}] [expr {pow($v, 2)}] [expr {atan2($v, 1)}] [expr {abs($v)}] [expr {int($v)}] [expr {round($v)}] }; return $r }
 proc wm_acc {l} { set s 0; set q 0.0; foreach v $l { set s [expr {$s + $v}]; set q [expr {$q + sqrt($v * $v)}] }; list $s $q [expr {sqrt($s)}] [expr {double($s)}] }
+
+# floating-point arithmetic on values that arrive as objects, in procs that show no sign of floating-point numbers (the second, tagged-number version, used after the first double)
+proc wa_sum {l} { set s 0; foreach v $l { set s [expr {$s + $v}] }; return $s }
+proc wa_mean {l} { set s 0; set n 0; foreach v $l { set s [expr {$s + $v}]; incr n }; if {$n == 0} { return 0 }; return [expr {$s / $n}] }
+proc wa_dot {a b} { set s 0; foreach x $a y $b { set s [expr {$s + $x * $y}] }; return $s }
+proc wa_scale {l k} { set r {}; foreach v $l { lappend r [expr {$v * $k - 1}] }; return $r }
+proc wa_max {l} { set m [lindex $l 0]; foreach v $l { if {$v > $m} { set m $v } }; return $m }
+proc wa_poly {x} { set r 0; foreach c {3 -2 5} { set r [expr {$r * $x + $c}] }; return $r }
+proc wa_twice {l} { list [wa_sum $l] [wa_sum $l] }

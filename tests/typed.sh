@@ -67,3 +67,23 @@ if echo "$out" | grep -q -E '^DEADOP add .*tw_sum'; then echo "typed: FAILED, th
 echo "$out" | grep -E '::tw_sum/B ' | grep -q ' W ' || { echo "typed: FAILED, tw_sum has no tagged number variable:"; echo "$out" | grep tw_sum; exit 1; }
 echo "$out" | grep -E '::tw_int/B ' | grep -q ' W' && { echo "typed: FAILED, an integer-only proc got tagged numbers:"; echo "$out" | grep tw_int; exit 1; }
 echo "typed: sums of numbers of either kind stay in typed code as tagged numbers (floating-point procs only): ok"
+
+# a tagged number is boxed only where an object is needed (here: the two values put in the returned list), not at every instruction of a loop (a boxing at the edge into each add and each
+# store allocated two double objects per iteration and made such loops no faster than the interpreter)
+n=$(awk '/^static .* V__3a_3atw_5fsum_B\(/ {f=1} f && /^}/ {f=0} f' "$tmp/w.c" | grep -v '^[DF][0-9a-f]*:' | grep -o '(sw[0-9]* ? tbc_newdbl' | wc -l)
+[ "$n" = 2 ] || { echo "typed: FAILED, tw_sum boxes a tagged number $n times (2 expected, the two values it returns)"; exit 1; }
+echo "typed: tagged numbers are not boxed inside a loop: ok"
+
+# a proc with no sign of floating-point numbers that accumulates over data gets, besides its integer variants, one tagged-number variant (key suffix w) used once
+# the proc has been seen to meet a double; procs with bit operations or without a loop get none
+cat > "$tmp/a.tcl" <<'TCL'
+proc ta_sum {l} { set sum 0; foreach v $l { set sum [expr {$sum + $v}] }; return $sum }
+proc ta_bits {l} { set s 0; foreach v $l { set s [expr {$s ^ $v}] }; return $s }
+proc ta_count {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s $i }; return $s }
+TCL
+out=$(env -u TBC_FORCE_WPOLICY TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/a.tcl" "$tmp/a.c" Adapttest 2>&1)
+echo "$out" | grep -E '::ta_sum/Bw ' | grep -q ' W' || { echo "typed: FAILED, ta_sum has no adaptive tagged-number variant:"; echo "$out" | grep ta_sum; exit 1; }
+echo "$out" | grep -E '::ta_sum/B ' | grep -q ' W' && { echo "typed: FAILED, the first variant of ta_sum is already tagged:"; echo "$out" | grep ta_sum; exit 1; }
+echo "$out" | grep -E '::ta_(bits|count)/[A-Za-z]*w ' && { echo "typed: FAILED, a bit-operation or loop-free-of-data proc got an adaptive variant"; exit 1; }
+grep -q "tbc_wp_" "$tmp/a.c" || { echo "typed: FAILED, no adaptive flag in the generated code"; exit 1; }
+echo "typed: a proc that accumulates over data has an adaptive tagged-number variant; bit-operation and counting procs have none: ok"
