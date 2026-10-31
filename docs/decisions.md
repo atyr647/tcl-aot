@@ -663,5 +663,7 @@ namespace of its own, and the definitions (bytecode, body, arguments, defaults, 
 before).  The same pattern turned up in my first version of the fix for defect 2, where a fingerprint such as `53240e9073862955` went through `expr` and became `0xInf`: found by comparing the generated C with the previous
 translator's, and by the suite's module build; a check for it is in `tests/names.sh`.
 
-Full-suite result: see the next paragraph when it has run.
+Full-suite result: the whole of `tests/run.sh` from a snapshot of `a2b6024`, exit 0 (16703 calls in the differential test in four modes, forced hand-over at three rates and two seeds, guard, typed, osr, hot, cmdmap,
+names, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The generated C was also compared byte for byte with the previous translator's on the test module and five
+workloads (identical), so the run with the forced tagged-number policy was not repeated.
 
