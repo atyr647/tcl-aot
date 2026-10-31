@@ -458,3 +458,23 @@ the 608 proc variants in the tests, the benchmarks and the eleven workloads, bef
 Tests: `dn_up` (state through `upvar #0 $name`), `dnns::f` (`variable $token`, `upvar 0 $token`, `foreach` with several variables), `dn_list` (numbers from `lindex`), with
 integers, zero, negative numbers, doubles, text, an empty value, a bignum, hex and octal text and a missing variable; `tests/osr.sh` fails unless each of them went on in typed
 code, and the coverage counters show the check at the store failing for the values that are not integers.
+
+## 27. Small arrays of a proc live in the proc's C frame; what was measured for calls from boxed code and for a Tcl without threads
+
+* **Native arrays of up to four elements need no allocation.**  A proc that keeps an array for its own use (kind R, decision 17) allocated an element table (768 bytes) and a
+  hash table (128 bytes) on the first store and freed them at the end of every call: 45% of the instructions of `call_frame` (a loop that calls a proc that fills and reads
+  a one-element array) were malloc and free.  The first four elements, and a table for them, are now in the array's own storage, which is a local of the typed function; a fifth
+  element moves the table to the heap with room for 16.  `call_frame`: 4.3x (2.4x before).  The tests that use native arrays (the `fa_`/`fx_` fuzz families, the `t*_arr`
+  procs, `mk_*`) cover it; the fuzz and the forced hand-over stage pass.
+* **Calls from boxed code to compiled procs** go through the interpreter's dispatch (about 500 instructions per call).  Calling the typed variant directly from boxed code
+  would remove part of that.  The estimate of the share of proc calls in the eleven workloads is at most 6.3% (md5, before decision 26 made its calls typed to typed), 5.9%
+  (records) and 2.2% (structlist), so at most about 3% could be saved; it would also skip what the dispatch does (`info cmdcount`, traces).  Not built.
+* **A Tcl built without thread support** uses fewer instructions for the same work, because object allocation does not look up thread data (`pthread_getspecific` was 10-28% of
+  the instructions of the workloads).  Measured with `--disable-threads` on two workloads, net of start-up: sha1 482.8M instead of 544.4M interpreted and 249.0M instead
+  of 312.6M compiled (ratio 1.94x instead of 1.74x); tokenizer 1578M instead of 1684M and 1592M instead of 1745M.  The Tcl build is the user's choice (`TCL_SRC`,
+  `TCL_OBJ`); a program that uses Tcl threads needs the threaded one.  Nothing in this repository changes.
+* **Namespace arrays** (`nn::fill`): 2.1x counted in instructions of one cold run, 3.9x in wall time of the best of five; the README and the roadmap said 2.1x only.
+
+Checked: the full `tests/run.sh` passes on this tree, run from a copy of it (differential 13680 calls in four modes, forced hand-over 6 configurations, `tests/typed.sh`,
+`tests/osr.sh`, fuzz typed seeds 1-3 and boxed seeds 1-2, valgrind 13641 calls, 0 mismatches); `tests/pristine.sh` passes in the tree itself (it compares the paths the
+Tcl build was made from, which a copy with a linked `build/` cannot satisfy).  Decision 26's commit (93e4fad) was a work-in-progress snapshot made while that run was pending.

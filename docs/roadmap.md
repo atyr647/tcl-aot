@@ -12,8 +12,8 @@ An item moves out of this file when it is measured, tested and written up there.
 4. **Calls into procs that need a frame** (global, namespace and `upvar` variables).  The interpreter's call costs about 900 instructions more than it
    needs to.  Building the call frame directly and running the compiled body in it, without the stub bytecode and its second dispatch, is possible with
    Tcl's exported frame functions but must reproduce argument binding, error messages and error info exactly.
-5. **Namespace and global arrays** (2.1x).  These stay in Tcl's hash table because other code can reach them.  Caching the element found for a constant key,
-   guarded by the array's trace and write state, would help loops that use a few fixed keys.
+5. **Namespace and global arrays** (`nn::fill`: 2.1x counted in instructions of one cold run, 3.9x in wall time of the best of five).  These stay in Tcl's hash table
+   because other code can reach them.  Caching the element found for a constant key, guarded by the array's trace and write state, would help loops that use a few fixed keys.
 6. **A table of instruction effects.**  Each bytecode instruction declares what it may read, write and throw, in one place.  Today this is spread over the
    liveness, purity and caller-safety analyses.  Moving code across instructions (hoisting, discarding results that nobody reads) needs it.
 7. **Compile-time and run-time reports.**  Where the time of a compiled proc goes (boxed accesses, native arithmetic, transitions to the interpreter), and which

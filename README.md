@@ -50,15 +50,16 @@ Wall-clock times vary; `bench/run.sh count` counts instructions instead:
 | array histogram | 7.4x |
 | counter through `upvar` | 6.6x |
 | `foreach` over a list | 5.5x |
-| matrix product over a 2-D array | 5.5x |
+| matrix product over a 2-D array | 4.9x |
 | array sieve | 4.5x |
 | array Fibonacci | 3.3x |
-| loop calling a proc that uses an array of its own | 2.4x |
+| loop calling a proc that uses an array of its own | 4.3x |
 | namespace array fill | 2.1x |
 | `string length` / `string first` in a loop | 1.4x |
 
-On thirteen tcllib-based workloads (sha1, md5, regexp-heavy text splitting, JSON and CSV parsing, `struct::list`, ...) compiled code is between 0.7x and 1.2x
-of the interpreter: the time is in Tcl's library.  `docs/decisions.md` has the numbers and what was tried.
+On eleven tcllib-based workloads (`docs/decisions.md`, 19 to 26): the checksums run 4.5x (md5), 2.5x (crc32) and 1.7x (sha1) the interpreter, binary packing 1.4x, and the
+text and data workloads (regexp-heavy splitting, JSON and CSV parsing, `struct::list`, ...) between 0.96x and 1.05x: their time is in Tcl's library.  A Tcl built
+with `--disable-threads` (point `TCL_SRC` and `TCL_OBJ` at it) used 6-20% fewer instructions on the two workloads measured, both interpreted and compiled.
 
 ## Use it on your program
 

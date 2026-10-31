@@ -353,7 +353,9 @@ typedef struct {
     int len;
     union { char s[28]; char *p; } k;		/* the key's bytes: inline up to 27, else allocated */
 } tbc_rent;
-typedef struct { tbc_rent *e; int32_t *tab; size_t n, cap, tcap; } tbc_rmap;
+/* (the first TBC_RSMALL elements live in the map itself: most arrays a proc keeps for its own use are small, and the allocations were half of a call of such a proc) */
+#define TBC_RSMALL 4
+typedef struct { tbc_rent *e; int32_t *tab; size_t n, cap, tcap; tbc_rent ie[TBC_RSMALL]; int32_t itab[TBC_RSMALL * 2]; } tbc_rmap;
 TBC_INLINE const char *tbc_rkey(const tbc_rent *r) { return r->len < (int) sizeof r->k.s ? r->k.s : r->k.p; }
 static void tbc_rfree(tbc_rmap *m) {
     size_t i;
@@ -361,7 +363,8 @@ static void tbc_rfree(tbc_rmap *m) {
         if (m->e[i].len >= (int) sizeof m->e[i].k.s) free(m->e[i].k.p);
         Tcl_DecrRefCount(m->e[i].val);
     }
-    free(m->e); free(m->tab);
+    if (m->e != m->ie) free(m->e);
+    if (m->tab != m->itab) free(m->tab);
     memset(m, 0, sizeof *m);
 }
 TBC_INLINE tbc_rent *tbc_rfind(const tbc_rmap *m, const char *s, int len, uint64_t h) {
@@ -378,10 +381,24 @@ TBC_INLINE tbc_rent *tbc_rfind(const tbc_rmap *m, const char *s, int len, uint64
     }
 }
 static int tbc_rgrow(tbc_rmap *m) {
-    size_t ncap = m->cap ? m->cap * 2 : 16, ntcap = m->tcap ? m->tcap * 2 : 32, i;
-    tbc_rent *ne = (tbc_rent *) realloc(m->e, ncap * sizeof *ne);
+    size_t ncap, ntcap, i;
+    tbc_rent *ne;
     int32_t *nt;
-    if (!ne) return 0;
+    if (!m->cap) {
+        /* the first elements: in the map itself (its table is still zero from the start) */
+        m->e = m->ie; m->cap = TBC_RSMALL;
+        m->tab = m->itab; m->tcap = TBC_RSMALL * 2;
+        return 1;
+    }
+    ncap = m->e == m->ie ? 16 : m->cap * 2; ntcap = ncap * 2;
+    if (m->e == m->ie) {
+        ne = (tbc_rent *) malloc(ncap * sizeof *ne);
+        if (!ne) return 0;
+        memcpy(ne, m->ie, m->n * sizeof *ne);
+    } else {
+        ne = (tbc_rent *) realloc(m->e, ncap * sizeof *ne);
+        if (!ne) return 0;
+    }
     m->e = ne;
     m->cap = ncap;
     nt = (int32_t *) calloc(ntcap, sizeof(int32_t));
@@ -391,7 +408,7 @@ static int tbc_rgrow(tbc_rmap *m) {
         while (nt[j]) j = (j + 1) & (ntcap - 1);
         nt[j] = (int32_t) (i + 1);
     }
-    free(m->tab);
+    if (m->tab != m->itab) free(m->tab);
     m->tab = nt; m->tcap = ntcap;
     return 1;
 }
