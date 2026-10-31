@@ -1650,3 +1650,11 @@ proc em_eq {x} { list [expr {$x == {}}] [expr {$x != ""}] [expr {{} == $x}] [exp
 proc em_loop {l} { set n 0; foreach v $l { if {$v == {}} { continue }; if {$v != ""} { incr n } }; return $n }
 proc em_num {n} { set c 0; for {set i 0} {$i < $n} {incr i} { if {$i == {}} { incr c 100 }; if {$i != ""} { incr c } }; return $c }
 proc em_dbl {x} { set d [expr {$x * 1.5}]; list [expr {$d == ""}] [expr {$d != {}}] }
+
+# string match, the executor's instruction: plain strings, string objects, byte arrays, -nocase, patterns with classes and escapes
+proc sm_match {p s} { list [string match $p $s] [string match -nocase $p $s] [string match *o* $s] [string match {[a-c]*} $s] [string match {a\*b} $s] }
+proc sm_loop {l} { set n 0; foreach s $l { if {[string match *a* $s]} { incr n }; if {[string match -nocase A* $s]} { incr n 10 } }; return $n }
+
+# regexp as an instruction (no variables, no options but -nocase): matches, no match, an invalid pattern, patterns with classes and anchors
+proc rx_test {p s} { list [regexp $p $s] [regexp -nocase $p $s] [regexp -- {^[0-9]+$} $s] [regexp {a.c} $s] }
+proc rx_loop {l} { set n 0; foreach s $l { if {[regexp {^a} $s]} { incr n }; if {[regexp -nocase {B+} $s]} { incr n 10 } }; return $n }

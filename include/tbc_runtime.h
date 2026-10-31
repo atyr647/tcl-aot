@@ -731,6 +731,27 @@ static int tbc_s_index(Tcl_Obj *s, int64_t i, Tcl_Obj **out) {
     }
     return 1;
 }
+/* INST_STR_MATCH as the executor does it (tclExecute.c): the Unicode matcher when either operand is a string object, the byte matcher for a byte array, else the UTF-8
+ * matcher.  The command (TclStringMatchObj) takes the Unicode path for a plain string too, which builds Unicode arrays of both operands. */
+static int tbc_s_match(Tcl_Obj *str, Tcl_Obj *pat, int nocase) {
+    int l1, l2;
+    if (str->typePtr == tbcString || pat->typePtr == tbcString) {
+        Tcl_UniChar *u1 = Tcl_GetUnicodeFromObj(str, &l1), *u2 = Tcl_GetUnicodeFromObj(pat, &l2);
+        return TclUniCharMatch(u1, l1, u2, l2, nocase);
+    }
+    if (TclIsPureByteArray(str) && !nocase) {
+        unsigned char *b1 = Tcl_GetByteArrayFromObj(str, &l1), *b2 = Tcl_GetByteArrayFromObj(pat, &l2);
+        return TclByteArrayMatch(b1, l1, b2, l2, 0);
+    }
+    return Tcl_StringCaseMatch(TclGetString(str), TclGetString(pat), nocase);
+}
+/* INST_REGEXP as the executor does it: the compiled expression of the pattern (cached in the pattern object), then one match; 0 on success (the match is 0 or 1) */
+static int tbc_s_regexp(Tcl_Interp *interp, Tcl_Obj *str, Tcl_Obj *pat, int cflags, int *match) {
+    Tcl_RegExp re = Tcl_GetRegExpFromObj(interp, pat, cflags);
+    if (!re) return 1;
+    *match = Tcl_RegExpExecObj(interp, re, str, 0, 0, 0);
+    return *match < 0;
+}
 static int tbc_s_range(Tcl_Obj *s, int64_t first, int64_t last, Tcl_Obj **out) {
     int len;
     const char *str = tbc_ascii(s, &len);

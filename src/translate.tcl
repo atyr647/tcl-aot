@@ -1300,7 +1300,7 @@ proc stepT {key pc in} {
         dictFirst - dictNext - unsetScalar { return $dead }
         listIn - listNotIn - strindex - strfind - strrfind - strrange - strreplace - strcaseUpper - strcaseLower - strcaseTitle - strtrim - strtrimLeft -
         strtrimRight - strmatch - regexp - strrangeImm - listRangeImm - lindexMulti {
-            if {$op in {strfind strrfind strindex strrange strrangeImm}} {
+            if {$op in {strfind strrfind strindex strrange strrangeImm strmatch regexp}} {
                 set r [stepStrFast $key $pc $in $d $op $a]
                 if {$r ne ""} { return $r }
             }
@@ -1523,6 +1523,21 @@ proc stepStrFast {key pc in d op a} {
     set below [lrange $in 0 [expr {$q-1}]]
     set operands [lrange $in $q end]
     foreach e $operands { if {[kd $e] in {A N M Q K U}} { return "" } }
+    if {$op eq "regexp"} {
+        # (pattern, string; the result is 0 or 1; an error leaves the operands for the failure chain)
+        set cflags [expr {[lindex $a 0]}]
+        set pre ""; set rel ""
+        for {set k $q} {$k < $d} {incr k} { append pre [boxc $P $k [lindex $in $k]] " "; append rel " Tcl_DecrRefCount(s$k);" }
+        set st [list {*}$below {*}[lrepeat $n B]]
+        return [R fall [list {*}$below I] "$pre\{ int m_ = 0; if (tbc_s_regexp(interp, s[expr {$q+1}], s$q, $cflags, &m_)) goto [fl $key $st];$rel si$q = m_; \}"]
+    }
+    if {$op eq "strmatch"} {
+        # (pattern, string; the result is 0 or 1)
+        set nocase [expr {[lindex $a 0] ne "+0" && [lindex $a 0] ne "0"}]
+        set pre ""; set rel ""
+        for {set k $q} {$k < $d} {incr k} { append pre [boxc $P $k [lindex $in $k]] " "; append rel " Tcl_DecrRefCount(s$k);" }
+        return [R fall [list {*}$below I] "$pre\{ int m_ = tbc_s_match(s[expr {$q+1}], s$q, $nocase);$rel si$q = m_; \}"]
+    }
     # integer operands (indices): {ok value} for a number held unboxed or an object that is an integer; "" for anything else
     set ints {}
     switch $op {
@@ -2725,6 +2740,15 @@ proc genG {key pc d} {
         listIn - listNotIn - strindex - strfind - strrfind - strrange - strreplace - strcaseUpper - strcaseLower - strcaseTitle - strtrim - strtrimLeft -
         strtrimRight - strmatch - regexp - strrangeImm - listRangeImm - lindexMulti {
             lassign [cmdOpSpec $op $a] n name pre post
+            if {$op eq "regexp"} {
+                set sp s[expr {$d-2}]; set ss s[expr {$d-1}]
+                return "\{ int m_ = 0; if (tbc_s_regexp(interp, $ss, $sp, [expr {[lindex $a 0]}], &m_)) goto GE[set ::curpc]; Tcl_DecrRefCount($sp); Tcl_DecrRefCount($ss); $sp = tbc_newint(m_); \}"
+            }
+            if {$op eq "strmatch"} {
+                set nocase [expr {[lindex $a 0] ne "+0" && [lindex $a 0] ne "0"}]
+                set sp s[expr {$d-2}]; set ss s[expr {$d-1}]
+                return "\{ int m_ = tbc_s_match($ss, $sp, $nocase); Tcl_DecrRefCount($sp); Tcl_DecrRefCount($ss); $sp = tbc_newint(m_); \}"
+            }
             set fast [gStrFast $d $op $a]
             if {$fast ne ""} { return "$fast else [gCmd $d $n $name 0 $pre $post] \}" }
             return [gCmd $d $n $name 0 $pre $post]

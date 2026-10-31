@@ -511,4 +511,9 @@ Asked for: every text and data optimisation that has no downside.  What was buil
     item on the roadmap, with this census as its measure.
   - `lsort -command` with a compiled comparator.  The interpreter evaluates the comparator as a script for each comparison; routing it to the compiled procedure needs a command of
     ours to stand in for the proc in the script (which shows in the error info of a failing comparator) or a copy of Tcl's merge sort.  Not built: the error text would differ.
-  - A native regexp matcher: see below if the section is present.
+  - A native regexp matcher for literal patterns.  In the tokenizer workload `miss` and `getVacantSS`, the construction of states of Tcl's matcher, are 27.5% of all
+    instructions: its state cache is built again for every match.  It cannot be kept between matches without changing Tcl's matcher.  A matcher of our own, for a subset of
+    patterns (classes, anchors, greedy quantifiers, no back references), would remove it, but its results (leftmost-longest rules, `-all`, `-inline`, `-indices`, `-start`,
+    captures, `-nocase`) must equal Tcl's exactly, and the patterns of the library are mostly built at run time (the JSON tokenizer's is assembled when the package loads),
+    which a translation-time matcher cannot see.  That is an engine, not an optimisation; it is not started, and the differential and fuzz setup here is what it would be tested with.
+  - `string map`, `string match`, `split` with literal arguments: the dispatch part of their cost went with the pinned call above; what is left is the work of the commands.

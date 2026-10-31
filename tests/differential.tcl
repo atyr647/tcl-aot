@@ -255,6 +255,14 @@ foreach l {{} {a {} b} {1 2 {}} {{} {} {}} {0 0.0 abc}} { lappend calls [list em
 foreach n {0 1 5} { lappend calls [list em_num $n] }
 foreach x {0 1 2.5 -3} { lappend calls [list em_dbl $x] }
 lappend calls {em_eq} {em_eq 1 2}
+# string match
+set smv [list hello {} Hello "a*b" abc "\u00e9a" [binary format c3 {97 98 99}] 12345 {a b} *a* "\u00e9\u20ac"]
+foreach p {* a* ?e* {[a-c]*} {a\*b} {} HELLO *\u00e9* {[]} {\\}} { foreach s $smv { lappend calls [list sm_match $p $s] } }
+foreach l {{} {a b} {abc bca {} Apple} {a A aa AA}} { lappend calls [list sm_loop $l] }
+foreach s $smv { lappend calls [list sm_loop [list $s $s]] }
+# regexp as an instruction
+foreach p {a b+ {^a} {[0-9]} {(} {a{2}} {\d} {*a} {} {.} {\u00e9}} { foreach s {abc {} 12345 ABC "\u00e9a" {a b} aabbcc 1.5} { lappend calls [list rx_test $p $s] } }
+foreach l {{} {a b} {abc Bcd {} bbb} {a A b B}} { lappend calls [list rx_loop $l] }
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}
