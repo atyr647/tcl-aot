@@ -581,3 +581,26 @@ Full-suite result for decision 30 (commits `d888048`, `5df30ab`, `4eabbed`; the 
 rates and two seeds, guard, typed, osr, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3 (3 with forced hand-over), boxed fuzz seeds 1-2, valgrind, 0 mismatches in all.  A first pair of runs,
 at the same time, showed the unary plus defect above (forced hand-over) and a compiler killed for lack of memory (fuzz seed 3 with forced hand-over): the second is the machine, the first is fixed.
 
+## 31. Reports on how well compiled code does: `TBC_REPORT=1` and `tbc::hot`
+
+Until now there were three ways to see what typed code does not cover, none of them complete: `tbc::report` (which procs run compiled), `TBC_DEADOPS=1` (the instructions typed code has no code for) and
+the `-DTBC_COV` counters of the test suite (a flat list of names and counts that only the tests read, and only in a single-file build).  Neither said how much of a proc is typed code, nor
+which instruction made typed code hand over most often at run time.
+
+* **At translation, `TBC_REPORT=1`**: one line per variant of every proc (instructions, how many have typed code, how many can hand over when a check fails, how many have no typed code at all,
+  the kinds of the locals and of the result) and, for every unsupported instruction, its name, the command it calls and its position.  The count of unsupported instructions equals what
+  `TBC_DEADOPS=1` lists (checked on three procs).  A variant's percentage is of the instructions the proc can reach: what follows an unsupported instruction runs boxed, so it is lower there.
+* **At run time, `tbc::hot ?-top n? ?-dict? ?-reset?`**, in a module built with `-DTBC_COV` (a measuring build; without the flag the command does not exist and the macros are empty, so
+  normal builds are unchanged).  Per proc: entries of typed code by variant, entries again at a loop head from the boxed code, hand-overs at an instruction, after a call, and the instructions
+  it handed over at most often, with their command and a kind: `unsupported` (no typed code for the instruction: it hands over every time) or `guard` (a check failed).  The sites carry their
+  description from the translator (`TBC_HITI`); the counter names the tests match are unchanged.  The table of counters is now part of the shared state, so a split module counts too (it
+  did not before: each file had its own table).
+* **First use on real code** (`struct::list` workload of decision 19, `math::statistics`): `struct::list::Lequal` hands over at an `eq` guard on 32400 of its 32800 entries and resumes (why its check fails was not
+  examined); `FTest`, `Lfold`, `Lmap`, `Lfilter` hand over at `uplevel` and `Lswap` at `upvar` every call; `struct::list::list` at `info level`; `math::statistics::BasicStats` at a `loadStk` (a
+  variable read by name; 120 of 120 entries).  Whether any of these is worth removing is a question for the next measurement; the reports are what made them visible.
+* **Found by the new test:** the macro for a site with a description had no definition in a build without `-DTBC_COV`, so every ordinary module would have failed to link.
+
+Tests: `tests/hot.sh` (in `tests/run.sh`): the report lines for a typed proc, a proc with an unsupported instruction and a proc with a tagged variant; `tbc::hot` on counts known by construction
+(a proc that never hands over, a sum that hands over once at the add and is then resumed in the tagged variant on every call, an unsupported `dict for` that hands over on every call, the sites of two
+variants merged), `-top`, `-reset` and a bad option, in a single-file and a split build; and a build without `-DTBC_COV` has no `tbc::hot`.
+

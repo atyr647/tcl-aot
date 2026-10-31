@@ -1245,13 +1245,22 @@ static int tbc_is_lrepeat(Tcl_Interp *interp) {
     return tbc_orig_lrepeat && Tcl_GetCommandInfo(interp, "lrepeat", &ci) && ci.objProc == tbc_orig_lrepeat;
 }
 
-/* Coverage counters (compile with -DTBC_COV): how often each typed variant is entered and each deoptimisation point is taken. */
+/* Counters (compile with -DTBC_COV): how often each typed variant is entered and each hand-over point is taken.  A hand-over site also carries what the
+ * instruction is (TBC_HITI), for tbc::hot.  The table is part of the shared state, so a module split over several files counts in one place. */
 #ifdef TBC_COV
 #define TBC_COV_MAX 131072
-static struct { const char *name; long hits; } tbc_cov[TBC_COV_MAX];
+typedef struct { const char *name; const char *info; long hits; } TbcCov;
+#if defined(TBC_SPLIT_USER)
+extern TbcCov tbc_cov[TBC_COV_MAX];
+#elif defined(TBC_SPLIT_OWNER)
+TbcCov tbc_cov[TBC_COV_MAX];
+#else
+static TbcCov tbc_cov[TBC_COV_MAX];
+#endif
 TBC_SHARED int tbc_cov_n;
 /* (the last slot takes the sites beyond the table: a module built for forced hand-over has a site at every instruction) */
-#define TBC_HIT(nm) do { static int idx_ = -1; if (idx_ < 0) { idx_ = tbc_cov_n < TBC_COV_MAX - 1 ? tbc_cov_n++ : TBC_COV_MAX - 1; tbc_cov[idx_].name = (nm); } tbc_cov[idx_].hits++; } while (0)
+#define TBC_HITI(nm, inf) do { static int idx_ = -1; if (idx_ < 0) { idx_ = tbc_cov_n < TBC_COV_MAX - 1 ? tbc_cov_n++ : TBC_COV_MAX - 1; tbc_cov[idx_].name = (nm); tbc_cov[idx_].info = (inf); } tbc_cov[idx_].hits++; } while (0)
+#define TBC_HIT(nm) TBC_HITI(nm, NULL)
 static int tbc_cov_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Tcl_Obj *r = Tcl_NewObj();
     int i;
@@ -1263,8 +1272,120 @@ static int tbc_cov_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *con
     Tcl_SetObjResult(interp, r);
     return TCL_OK;
 }
+
+/* tbc::hot ?-top n? ?-dict? ?-reset?: what the compiled procs did, from the counters.  For every proc: how often typed code was entered (by variant), how often it
+ * was entered again at a loop head from the boxed code ("resumed"), how often it handed over at an instruction, after a call, and at which instructions (most often
+ * first).  A site is "unsupported" when typed code has no code for the instruction at all (it hands over there every time), "guard" when it hands over only when
+ * a check fails (an operand that is not the kind the code assumed, an overflow, a variable with a trace...).  -dict gives the same as a dict:
+ * {proc {entries {variant n ...} resumed n resumes {variant n ...} handovers n aftercall n sites {{pc op detail kind n} ...}} ...}. */
+typedef struct { const char *proc; int plen; long entries, resumed, handovers, aftercall; } TbcHotProc;
+static const char *tbc_hot_split(const char *name, int *plen, int *pc, const char **variant, int *vlen) {
+    /* "V:<proc>/<variant>[/RE]", "D:<proc>/<variant>:<pc>", "C:..." and "R:..." likewise */
+    const char *p = name + 2, *end = name + strlen(name), *slash;
+    *pc = -1;
+    if (name[0] != 'V') { const char *c = end; while (c > p && c[-1] != ':') c--; if (c > p) { *pc = atoi(c); end = c - 1; } }
+    else if (end - name > 3 && strcmp(end - 3, "/RE") == 0) end -= 3;
+    slash = end; while (slash > p && slash[-1] != '/') slash--;
+    if (slash <= p) { *plen = (int) (end - p); *variant = end; *vlen = 0; return p; }
+    *plen = (int) (slash - 1 - p); *variant = slash; *vlen = (int) (end - slash);
+    return p;
+}
+static int tbc_hot_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+    int i, j, top = 5, asDict = 0, reset = 0, np = 0;
+    TbcHotProc *procs;
+    Tcl_Obj *res = Tcl_NewObj();
+    (void) cd;
+    for (i = 1; i < objc; i++) {
+        const char *a = Tcl_GetString(objv[i]);
+        if (strcmp(a, "-dict") == 0) asDict = 1;
+        else if (strcmp(a, "-reset") == 0) reset = 1;
+        else if (strcmp(a, "-top") == 0 && i + 1 < objc && Tcl_GetIntFromObj(interp, objv[++i], &top) == TCL_OK) ;
+        else { Tcl_SetObjResult(interp, Tcl_NewStringObj("usage: tbc::hot ?-top n? ?-dict? ?-reset?", -1)); return TCL_ERROR; }
+    }
+    procs = (TbcHotProc *) ckalloc(sizeof(TbcHotProc) * (tbc_cov_n + 1));
+    for (i = 0; i < tbc_cov_n && i < TBC_COV_MAX; i++) {
+        int plen, pc, vlen; const char *variant; const char *pn = tbc_hot_split(tbc_cov[i].name, &plen, &pc, &variant, &vlen);
+        for (j = 0; j < np; j++) if (procs[j].plen == plen && memcmp(procs[j].proc, pn, plen) == 0) break;
+        if (j == np) { procs[np].proc = pn; procs[np].plen = plen; procs[np].entries = procs[np].resumed = procs[np].handovers = procs[np].aftercall = 0; np++; }
+        switch (tbc_cov[i].name[0]) {
+        case 'V': if (strcmp(tbc_cov[i].name + strlen(tbc_cov[i].name) - 3, "/RE") == 0 && strlen(tbc_cov[i].name) > 3) procs[j].resumed += tbc_cov[i].hits; else procs[j].entries += tbc_cov[i].hits; break;
+        case 'D': procs[j].handovers += tbc_cov[i].hits; break;
+        case 'C': case 'R': procs[j].aftercall += tbc_cov[i].hits; break;
+        }
+    }
+    /* procs by hand-overs, then entries, descending (a plain selection sort: a module has some hundreds of procs) */
+    for (i = 0; i < np; i++) for (j = i + 1; j < np; j++)
+        if (procs[j].handovers > procs[i].handovers || (procs[j].handovers == procs[i].handovers && procs[j].entries + procs[j].resumed > procs[i].entries + procs[i].resumed)) { TbcHotProc t = procs[i]; procs[i] = procs[j]; procs[j] = t; }
+    for (i = 0; i < np; i++) {
+        Tcl_Obj *ents = Tcl_NewObj(), *resv = Tcl_NewObj(), *sites = Tcl_NewObj(), *pr = Tcl_NewObj();
+        int ns = 0, *order = (int *) ckalloc(sizeof(int) * (tbc_cov_n + 1)), k; long *siteHits = (long *) ckalloc(sizeof(long) * (tbc_cov_n + 1));
+        if (procs[i].entries + procs[i].resumed + procs[i].handovers + procs[i].aftercall == 0) { ckfree((char *) order); ckfree((char *) siteHits); continue; }
+        for (j = 0; j < tbc_cov_n && j < TBC_COV_MAX; j++) {
+            int plen, pc, vlen; const char *variant; const char *pn = tbc_hot_split(tbc_cov[j].name, &plen, &pc, &variant, &vlen);
+            if (plen != procs[i].plen || memcmp(pn, procs[i].proc, plen) != 0 || !tbc_cov[j].hits) continue;
+            if (tbc_cov[j].name[0] == 'V') {
+                int nl = (int) strlen(tbc_cov[j].name), re = nl > 3 && strcmp(tbc_cov[j].name + nl - 3, "/RE") == 0;
+                Tcl_Obj *l = re ? resv : ents;
+                Tcl_ListObjAppendElement(NULL, l, Tcl_NewStringObj(variant, vlen));
+                Tcl_ListObjAppendElement(NULL, l, Tcl_NewWideIntObj(tbc_cov[j].hits));
+            }
+            else if (tbc_cov[j].name[0] == 'D') order[ns++] = j;
+        }
+        /* the variants of a proc have the same instructions: one line per instruction, the hits of all variants added */
+        { long *tot = (long *) ckalloc(sizeof(long) * (ns + 1)); int m = 0;
+          for (j = 0; j < ns; j++) {
+              int pj, vl; const char *vv; int pl; tbc_hot_split(tbc_cov[order[j]].name, &pl, &pj, &vv, &vl);
+              for (k = 0; k < m; k++) { int pk, vl2; const char *vv2; int pl2; tbc_hot_split(tbc_cov[order[k]].name, &pl2, &pk, &vv2, &vl2); if (pk == pj) break; }
+              if (k == m) { order[m] = order[j]; tot[m++] = tbc_cov[order[j]].hits; } else tot[k] += tbc_cov[order[j]].hits;
+          }
+          ns = m;
+          for (j = 0; j < ns; j++) for (k = j + 1; k < ns; k++) if (tot[k] > tot[j]) { long tt = tot[j]; int t = order[j]; tot[j] = tot[k]; tot[k] = tt; order[j] = order[k]; order[k] = t; }
+          for (j = 0; j < ns; j++) siteHits[j] = tot[j];
+          ckfree((char *) tot); }
+        for (j = 0; j < 0; j++) for (k = j + 1; k < ns; k++) if (tbc_cov[order[k]].hits > tbc_cov[order[j]].hits) { int t = order[j]; order[j] = order[k]; order[k] = t; }
+        for (j = 0; j < ns; j++) {
+            int plen, pc, vlen; const char *variant; const char *inf = tbc_cov[order[j]].info ? tbc_cov[order[j]].info : "? ? ?";
+            Tcl_Obj *site = Tcl_NewObj(); const char *sp1 = strchr(inf, ' '), *sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
+            (void) tbc_hot_split(tbc_cov[order[j]].name, &plen, &pc, &variant, &vlen);
+            Tcl_ListObjAppendElement(NULL, site, Tcl_NewIntObj(pc));
+            Tcl_ListObjAppendElement(NULL, site, Tcl_NewStringObj(sp1 ? sp1 + 1 : inf, sp2 ? (int) (sp2 - sp1 - 1) : -1));
+            Tcl_ListObjAppendElement(NULL, site, Tcl_NewStringObj(sp2 ? sp2 + 1 : "", -1));
+            Tcl_ListObjAppendElement(NULL, site, Tcl_NewStringObj(inf, sp1 ? (int) (sp1 - inf) : -1));
+            Tcl_ListObjAppendElement(NULL, site, Tcl_NewWideIntObj(siteHits[j]));
+            Tcl_ListObjAppendElement(NULL, sites, site);
+        }
+        ckfree((char *) order); ckfree((char *) siteHits);
+        if (asDict) {
+            Tcl_DictObjPut(NULL, pr, Tcl_NewStringObj("entries", -1), ents);
+            Tcl_DictObjPut(NULL, pr, Tcl_NewStringObj("resumed", -1), Tcl_NewWideIntObj(procs[i].resumed));
+            Tcl_DictObjPut(NULL, pr, Tcl_NewStringObj("resumes", -1), resv);
+            Tcl_DictObjPut(NULL, pr, Tcl_NewStringObj("handovers", -1), Tcl_NewWideIntObj(procs[i].handovers));
+            Tcl_DictObjPut(NULL, pr, Tcl_NewStringObj("aftercall", -1), Tcl_NewWideIntObj(procs[i].aftercall));
+            Tcl_DictObjPut(NULL, pr, Tcl_NewStringObj("sites", -1), sites);
+            Tcl_DictObjPut(NULL, res, Tcl_NewStringObj(procs[i].proc, procs[i].plen), pr);
+        } else {
+            long ent = procs[i].entries + procs[i].resumed;
+            Tcl_AppendPrintfToObj(res, "%.*s: typed entries %ld, resumed at a loop head %ld, handed over at an instruction %ld, after a call %ld", procs[i].plen, procs[i].proc, procs[i].entries, procs[i].resumed, procs[i].handovers, procs[i].aftercall);
+            if (ent > 0 && procs[i].handovers) Tcl_AppendPrintfToObj(res, " (%ld%% of entries and resumes)", (procs[i].handovers * 100) / ent);
+            Tcl_AppendToObj(res, "\n", 1);
+            Tcl_ListObjLength(NULL, sites, &ns);
+            for (j = 0; j < ns && j < top; j++) {
+                Tcl_Obj *site; int pc; long n; Tcl_ListObjIndex(NULL, sites, j, &site);
+                { Tcl_Obj *e0, *e1, *e2, *e3, *e4; Tcl_ListObjIndex(NULL, site, 0, &e0); Tcl_ListObjIndex(NULL, site, 1, &e1); Tcl_ListObjIndex(NULL, site, 2, &e2); Tcl_ListObjIndex(NULL, site, 3, &e3); Tcl_ListObjIndex(NULL, site, 4, &e4);
+                  Tcl_GetIntFromObj(NULL, e0, &pc); Tcl_GetWideIntFromObj(NULL, e4, (Tcl_WideInt *) &n);
+                  Tcl_AppendPrintfToObj(res, "    pc %-4d %-16s %-10s %-24s %ld\n", pc, Tcl_GetString(e1), Tcl_GetString(e3), Tcl_GetString(e2), n); }
+            }
+            if (ns > top) Tcl_AppendPrintfToObj(res, "    (%d more sites)\n", ns - top);
+        }
+    }
+    ckfree((char *) procs);
+    if (reset) { for (i = 0; i < tbc_cov_n && i < TBC_COV_MAX; i++) tbc_cov[i].hits = 0; }
+    Tcl_SetObjResult(interp, res);
+    return TCL_OK;
+}
 #else
 #define TBC_HIT(nm) ((void) 0)
+#define TBC_HITI(nm, inf) ((void) 0)
 #endif
 
 #endif

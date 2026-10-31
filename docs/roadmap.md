@@ -15,8 +15,7 @@ An item moves out of this file when it is measured, tested and written up there.
    because other code can reach them.  Caching the element found for a constant key, guarded by the array's trace and write state, would help loops that use a few fixed keys.
 6. **A table of instruction effects.**  Each bytecode instruction declares what it may read, write and throw, in one place.  Today this is spread over the
    liveness, purity and caller-safety analyses.  Moving code across instructions (hoisting, discarding results that nobody reads) needs it.
-7. **Compile-time and run-time reports.**  Where the time of a compiled proc goes (boxed accesses, native arithmetic, transitions to the interpreter), and which
-   instruction made typed code hand over most often.  `tbc::report` says which procs run compiled; this would say how well.
+7. **Compile-time and run-time reports**: done (decision 31: `TBC_REPORT=1`, `tbc::hot`).
 8. **More tests.**  Metamorphic tests (the same program with a statement reordered or a variable renamed must give the same result) and fuzzing of the
    hand-over paths: force typed code to hand over at every instruction of every test proc and compare.
 

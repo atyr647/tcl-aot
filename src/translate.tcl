@@ -22,7 +22,7 @@
 #   -split N      write the module as several files instead of one: <out>.h (shared declarations), <out>_v1.c .. <out>_vN.c (typed code),
 #                 <out>_g1.c .. <out>_gN.c (boxed code) and <out>.c (tables and Init); build them with tools/build-module.sh
 #
-# Environment: TBC_FORCE_DEOPT=1 adds a forced hand-over point at every typed instruction (see tests/run.sh); TBC_CENSUS=1 lists which procs can be translated and exits; TBC_DEADOPS=1 logs, to stderr, every instruction at which typed code gives
+# Environment: TBC_FORCE_DEOPT=1 adds a forced hand-over point at every typed instruction (see tests/run.sh); TBC_CENSUS=1 lists which procs can be translated and exits; TBC_REPORT=1 prints, to stderr, how much of every variant is typed code and which instructions it has no code for; TBC_DEADOPS=1 logs, to stderr, every instruction at which typed code gives
 # up; TBC_TIMING=1 logs procs that take long to analyse.
 
 if {$argc < 3} { puts stderr "usage: translate.tcl procs.tcl out.c InitName \[-hints file\] \[-untyped\] \[-split N\]"; exit 2 }
@@ -2523,6 +2523,37 @@ proc wnorm {P out sop} {
     return $out
 }
 
+# What a hand-over site is, for tbc::hot: "<kind> <op> <detail>" (kind: unsupported = typed code has no code for the instruction, guard = it hands over when a check
+# fails; detail: the command a call instruction calls).  The text has no other spaces in its first two words.
+proc siteInfo {P pc in kind} {
+    global PI
+    set op [lindex $PI($P,ins,$pc) 0]; set detail ""
+    if {$op in {invokeStk1 invokeStk4}} {
+        set nn [lindex $PI($P,ins,$pc) 1]; set ce [lindex $in [expr {[llength $in] - $nn}]]
+        set detail [expr {[kd $ce] eq "L" ? [lindex $PI($P,lits) [lt $ce]] : "<dynamic>"}]
+    } elseif {$op in {loadScalar1 loadScalar4 storeScalar1 storeScalar4 incrScalar1 incrScalar1Imm}} {
+        set vi [operand [lindex $PI($P,ins,$pc) 1]]
+        if {[string is integer -strict $vi] && $vi < [llength $PI($P,vnames)]} { set detail [lindex $PI($P,vnames) $vi] }
+    }
+    return "$kind $op [string map {{ } _} $detail]"
+}
+
+# TBC_REPORT=1: for every variant of every proc, how much of it runs as typed code and where it can hand over to the boxed code.  `unsupported` instructions are
+# those typed code has no code for (they hand over every time they are reached: the first thing to look at); `guarded` ones hand over only when a check fails
+# (an operand of another kind than the code assumes, an overflow, a variable with a trace); a guarded instruction is counted once however many checks it has.
+proc variantReport {key P tpcs usedD dsiteVar} {
+    global PI VK
+    upvar $dsiteVar DS
+    set uns {}; set guarded 0
+    foreach pc $tpcs {
+        lassign $DS($key,$pc) kind op detail
+        if {$kind eq "unsupported"} { lappend uns [expr {$detail ne "" ? "$op $detail" : $op}]@$pc } elseif {[dict exists $usedD $pc]} { incr guarded }
+    }
+    set kinds {}
+    dict for {v k} $VK($key,kap) { set vn [lindex $PI($P,vnames) $v]; lappend kinds "[expr {$vn eq "" ? "#$v" : $vn}]=$k" }
+    return [list [llength $PI($P,reach)] [expr {[llength $tpcs] - [llength $uns]}] $guarded $uns $kinds $VK($key,ret)]
+}
+
 proc analyze {key} {
     global VK PI variants
     lassign [keysplit $key] P sig
@@ -3518,6 +3549,7 @@ proc emitVariant {key recursive {resume 0}} {
         set in $VK($key,in,$pc)
         set r [stepT $key $pc $in]
         set flow [dict get $r flow]; set out [dict get $r out]; set code [dict get $r code]
+        set DSITE($key,$pc) [siteInfo $P $pc $in [expr {$flow eq "dead" ? "unsupported" : "guard"}]]
         if {$flow eq "dead" && [info exists ::env(TBC_DEADOPS)]} { set cmdn ""; if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4}} { set nn [lindex $PI($P,ins,$pc) 1]; set ce [lindex $in [expr {[llength $in] - $nn}]]; if {[kd $ce] eq "L"} { set cmdn [lindex $PI($P,lits) [lt $ce]] } else { set cmdn "<dynamic>" } }; puts stderr "DEADOP [lindex $PI($P,ins,$pc) 0] $cmdn :: $key $pc [lindex $in end]" }
         append fn "T$pc: ;  /* $PI($P,ins,$pc) */\n"
         if {$pc in $PI($P,loopheads)} { append fn "    if (TBC_UNLIKELY(tbc_tick_due(interp))) goto D$pc;\n" }
@@ -3551,10 +3583,11 @@ proc emitVariant {key recursive {resume 0}} {
     # and continues in the boxed code; a function called directly (no frame) reports that the call must be made the ordinary way.
     set usedD {}
     foreach m [regexp -all -inline {goto D(\d+)} "$fn$stubs"] { if {![string match goto* $m]} { dict set usedD $m 1 } }
+    if {[info exists ::env(TBC_REPORT)]} { set ::REPORT($key) [variantReport $key $P $tpcs $usedD DSITE] }
     foreach pc $tpcs {
         if {![dict exists $usedD $pc]} continue
         set in $VK($key,in,$pc)
-        append fn "D$pc: ; TBC_HIT([cstring "D:$key:$pc"]); [enterG $key $pc $in "" [flushSet $P $pc]]\n"
+        append fn "D$pc: ; TBC_HITI([cstring "D:$key:$pc"], [cstring $DSITE($key,$pc)]); [enterG $key $pc $in "" [flushSet $P $pc]]\n"
     }
     append fn $stubs
     # resume stubs of a proc with variables in the frame (see `fl`)
@@ -3825,7 +3858,7 @@ foreach P $translatable {
     append out "    tbc_register(interp, &tbc_e_[cident $P], [incr regId]);\n"
 }
 if {[llength $refusedProcs]} { append out "    tbc_register_refused(tbc_refused_$initName, [llength $refusedProcs]);\n" }
-append out "#ifdef TBC_COV\n    Tcl_CreateObjCommand(interp, \"::tbc_coverage\", tbc_cov_cmd, NULL, NULL);\n#endif\n"
+append out "#ifdef TBC_COV\n    Tcl_CreateObjCommand(interp, \"::tbc_coverage\", tbc_cov_cmd, NULL, NULL);\n    Tcl_CreateObjCommand(interp, \"::tbc::hot\", tbc_hot_cmd, NULL, NULL);\n#endif\n"
 append out "    return TCL_OK;\n\}\n"
 
 set dcDecl ""; set dcExtern ""; set dcDef ""
@@ -3891,4 +3924,14 @@ if {$splitN > 0} {
     set f [open $outFile w]; puts -nonewline $f $out; close $f
 }
 puts "tcl-aot: [llength $translatable] of [llength $procNames] procs compiled, [llength $variants] variants"
+if {[info exists ::env(TBC_REPORT)]} {
+    # typed: instructions of the variant that have typed code; reach: all reachable instructions of the proc (what follows an unsupported one runs boxed)
+    foreach key $variants {
+        if {![info exists ::REPORT($key)]} continue
+        lassign $::REPORT($key) reach typed guarded uns kinds ret
+        set nuns [llength $uns]
+        puts stderr [format "REPORT %-34s %3d instructions, %3d typed (%d%%), %3d guarded, %d unsupported; returns %s; locals %s" $key $reach $typed [expr {$reach ? $typed * 100 / $reach : 0}] $guarded $nuns $ret [join $kinds " "]]
+        foreach u $uns { puts stderr "REPORT     unsupported: $u" }
+    }
+}
 foreach key $variants { puts "  $key  ret=$VK($key,ret)  kinds=[dict values $VK($key,kap)]  [expr {$REC($key) ? "recursive" : ""}]" }

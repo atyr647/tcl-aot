@@ -40,6 +40,16 @@ handle are left to the interpreter and listed with a reason on stderr (the same 
 `TBC_CENSUS=1` prints which procs can be translated and stops; `TBC_DEADOPS=1` logs every instruction at which typed code gives up, which is the place to
 look when a hot proc is slower than expected.
 
+`TBC_REPORT=1` prints one line per variant of every proc to stderr: its instructions, how many of them have typed code, how many of those can hand over to the boxed
+code when a check fails ("guarded": an operand that is not the kind the code assumes, an overflow, a variable with a trace), the instructions typed code has no code
+for at all ("unsupported": it hands over there every time, and what follows runs boxed), the kinds of the locals and of the result:
+
+    REPORT ::h_sum/Bw      17 instructions,  12 typed (70%),   3 guarded, 0 unsupported; returns B; locals l=B s=W v=B
+    REPORT ::u_dict/B      31 instructions,   5 typed (16%),   1 guarded, 1 unsupported; returns B; locals d=B n=I k=B v=B #4=B #5=B
+    REPORT     unsupported: dictFirst@12
+
+(`#4` is a temporary the compiler made; the number after `@` is the instruction.)  What the compiled code did at run time is in `tbc::hot`, below.
+
 ## Link
 
 The module is plain C: compile it with Tcl's headers and `include/`, with the macros of the Tcl build, and link it with libtcl.
@@ -68,6 +78,7 @@ The module adds commands in the `::tbc` namespace:
 | command | |
 |---|---|
 | `tbc::report ?-text?` | what became of every proc definition the module has seen: compiled (with call counts), waiting for its first call, left to the interpreter and why. As a dict, or as text |
+| `tbc::hot ?-top n? ?-dict? ?-reset?` | in a module built with `-DTBC_COV` only (a measuring build: a counter per entry and per hand-over site, no other change): for every proc how often typed code was entered (by variant), how often it was entered again at a loop head from the boxed code, how often it handed over at an instruction and after a call, and the `n` instructions (default 5) it handed over at most often, with `unsupported` (no typed code for that instruction) or `guard` (a check failed). `-dict` gives it as a dict, `-reset` zeroes the counters. Without `-DTBC_COV` the command does not exist and the code has no counters |
 | `tbc::attached` | the names of the procs that have a compiled body attached |
 | `tbc::attach eager\|lazy\|status` | when compiled bodies are attached |
 | `tbc::profile on\|off\|reset\|status` | count the calls of procs left to the interpreter and the scripts evaluated at run time (`eval`, `uplevel`, `source`...). It runs a Tcl trace on every command: a measuring tool, not for production |
