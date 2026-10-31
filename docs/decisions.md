@@ -576,3 +576,8 @@ Tests: `wa_*` procs (sums, means, dot products, maxima, polynomials, nested call
 integer variant, later calls the `w` variant: `tests/coverage.sh` shows `V:::wa_sum/B` and `V:::wa_sum/Bw/RE`); `tests/typed.sh` checks that `/Bw` exists for an accumulating proc and not for a bit-operation
 or counting proc, and that W is not boxed inside a loop.  Full suite with the default and with the forced policy (see below).
 
+Full-suite result for decision 30 (commits `d888048`, `5df30ab`, `4eabbed`; the last two change only the boxed unary plus, the documentation and the tests of the first): the whole of
+`tests/run.sh`, run from a snapshot of `5df30ab` once with the default policy and once with `TBC_FORCE_WPOLICY=1`, exit 0 both times: differential in four modes, forced hand-over at three
+rates and two seeds, guard, typed, osr, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3 (3 with forced hand-over), boxed fuzz seeds 1-2, valgrind, 0 mismatches in all.  A first pair of runs,
+at the same time, showed the unary plus defect above (forced hand-over) and a compiler killed for lack of memory (fuzz seed 3 with forced hand-over): the second is the machine, the first is fixed.
+
