@@ -435,3 +435,26 @@ Tests: `mk_*` procs build keys of two and three integers, with negative and 64-b
 Checked: the full `tests/run.sh` passes on this tree (differential 13640 calls in four modes, forced hand-over 6 configurations, `tests/typed.sh`, `tests/osr.sh`, fuzz typed
 seeds 1-3 and boxed seeds 1-2, valgrind 13601 calls, 0 mismatches).  The earlier commit of this change (abbf922) was a work-in-progress snapshot made while that run
 was pending.  `bench/run.sh` wall time: `arr_mat` 18.7 ms interpreted, 3.4 ms compiled (5.5x; 2.05x before).
+
+## 26. Typed code after `variable $name` / `upvar 0 $name x`, and integer variables read from arrays and lists
+
+tcllib's md5 ran 1.03x the interpreter.  Its transform starts with `variable $token` and `upvar 0 $token state`, and the typed analysis stopped at the first
+(`variable` with a name held in a variable is an ordinary command call, which typed code does not make).  Everything after it, a loop of 64 steps per block, ran boxed.
+Two changes, each general.
+
+* **Typed code is analysed after such an instruction too.**  After a call of `variable`, `upvar` or `global` that typed code hands over at (the commands that link
+  variables of the frame, by name), the typed state of the next instruction is a seed (as after a yield, decision 20): the stack slots below as they were, the result as
+  an object.  It is done only where a loop head can be reached from there; the boxed code runs the call and goes on until the loop head, where it enters typed code
+  again (decision 23).  The checks of that entry make the assumptions safe: the locals are read from the frame and checked against the kinds typed code expects.
+* **Integer variables that are assigned objects.**  `set A $state(A)` stored an object, `set A [expr {...}]` an integer, so `A` was an object variable and every
+  assignment of an integer allocated one.  A variable that an instruction uses as a number (a load whose next user is arithmetic, a comparison or a bit operation) and that is
+  assigned a value loaded from an array or a list straight before the store, as well as integers, is now held as an integer; the store checks the value
+  (`tbc_arg_int`) and hands over to the boxed code, which does the store, if it is anything else (a double, text, a bignum).  A variable that is only ever assigned
+  loaded values stays an object variable, so text that passes through a loop is not checked.
+
+Measured, instruction counts net of start-up, interpreter / compiled: md5 464M / 104M (4.45x; 1.03x before); sha1 544M / 313M (1.74x, unchanged).  Variable kinds of
+the 608 proc variants in the tests, the benchmarks and the eleven workloads, before and after: 599 the same, 9 with more integer variables, none with fewer.
+
+Tests: `dn_up` (state through `upvar #0 $name`), `dnns::f` (`variable $token`, `upvar 0 $token`, `foreach` with several variables), `dn_list` (numbers from `lindex`), with
+integers, zero, negative numbers, doubles, text, an empty value, a bignum, hex and octal text and a missing variable; `tests/osr.sh` fails unless each of them went on in typed
+code, and the coverage counters show the check at the store failing for the values that are not integers.

@@ -778,6 +778,10 @@ proc jk {a b} {
     if {$a eq "F" || $b eq "F"} { return F }
     if {$a in {- U}} { return $b }
     if {$b in {- U}} { return $a }
+    # S: a boxed value that is loaded from an array or a list into a variable that is used as a number (see specStore): an integer variable if it is stored integers
+    # as well, else boxed
+    if {$a eq "S" && $b in {S I}} { return [expr {$b eq "I" ? "I" : "S"}] }
+    if {$b eq "S" && $a eq "I"} { return I }
     return B
 }
 proc jstate {a b} { lmap x $a y $b { jd $x $y } }
@@ -984,6 +988,13 @@ proc stepT {key pc in} {
                 if {$kv ne "B"} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
             }
             set sk [expr {$k eq "L" || $k in {A N M Q} ? "B" : $k}]
+            if {$k eq "B" && [specStore $P $pc $v]} {
+                if {[kap $key $v] eq "I"} {
+                    # (the value is checked: anything but an integer is stored by the boxed code, which is what the hand-over does)
+                    return [R fall $in "if (TBC_UNLIKELY(!tbc_arg_int(s$top, &i$v))) goto D$pc;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" stores [list [list $v S]]]
+                }
+                set sk S
+            }
             switch [kap $key $v] {
                 I { set c "i$v = si$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
                 D { set c "d$v = sd$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
@@ -2163,6 +2174,67 @@ proc pureBuiltin {nm sub} {
 
 # ---------------------------------------------------------------- fixpoint for one variant
 # returns 1 if the result kind of this variant changed or a new variant was discovered
+# Variables that an instruction uses as a number: a load of the variable whose next user is an arithmetic, comparison or bit operation.
+proc numVars {P} {
+    global PI NUMV
+    if {[info exists NUMV($P)]} { return $NUMV($P) }
+    set res {}
+    foreach pc $PI($P,reach) {
+        lassign $PI($P,ins,$pc) op a
+        if {$op ni {loadScalar1 loadScalar4}} continue
+        set q $PI($P,depth,$pc)
+        set cur $PI($P,next,$pc)
+        for {set steps 0} {$steps < 60 && [info exists PI($P,depth,$cur)]} {incr steps} {
+            lassign $PI($P,ins,$cur) cop ca
+            set cd $PI($P,depth,$cur)
+            lassign [effect $cop $ca $cd [lindex $PI($P,mk,$cur) end]] pops pushes kind
+            if {$kind ne "fall"} break
+            if {$cd - $pops <= $q} {
+                if {$cop in {add sub mult div mod lt le gt ge eq neq bitand bitor bitxor lshift rshift}} { lappend res [operand [lindex $a 0]] }
+                break
+            }
+            set cur $PI($P,next,$cur)
+        }
+    }
+    set NUMV($P) [lsort -integer -unique $res]
+    return $NUMV($P)
+}
+# Does the store at pc keep a value that was loaded from an array or a list, straight before it, into a variable that is used as a number?  Such a store is
+# speculated to be an integer (kind S of the variable, see jk): typed code checks the value and hands over if it is not one.
+proc specStore {P pc v} {
+    global PI
+    if {$v ni [numVars $P]} { return 0 }
+    foreach p $PI($P,reach) { if {$PI($P,next,$p) == $pc && [lindex $PI($P,ins,$p) 0] in {loadArray1 loadArray4 listIndex listIndexImm}} { return 1 } }
+    return 0
+}
+
+# The typed state after an instruction that typed code hands over at and that links variables of the frame by name (`variable $name`, `upvar 0 $name x`,
+# `global`): {pc state} for the code that goes on when the boxed code enters typed code again at a loop head, or "" (see osrAttempt).  Only where a loop head can be
+# reached from there, and only when no stack slot holds something a typed state cannot be rebuilt for.
+proc frameSeed {P pc in} {
+    global PI
+    lassign $PI($P,ins,$pc) op a
+    if {$op ni {invokeStk1 invokeStk4} || $PI($P,hasYield)} { return "" }
+    set n [lindex $a 0]; set q [expr {[llength $in] - $n}]
+    set ce [lindex $in $q]
+    if {[kd $ce] ne "L" || [lt $ce] eq ""} { return "" }
+    if {[string trimleft [lindex $PI($P,lits) [lt $ce]] :] ni {variable upvar global}} { return "" }
+    set st {}
+    foreach e [lrange $in 0 [expr {$q-1}]] {
+        switch [kd $e] { I - D - B - T { lappend st $e } L { lappend st B } default { return "" } }
+    }
+    lappend st B
+    set nx $PI($P,next,$pc)
+    set seen [dict create $nx 1]; set todo [list $nx]; set found 0
+    while {[llength $todo] && !$found} {
+        set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {$c in $PI($P,loopheads)} { set found 1; break }
+        foreach t $PI($P,succ,$c) { if {![dict exists $seen $t]} { dict set seen $t 1; lappend todo $t } }
+    }
+    if {!$found} { return "" }
+    return [list $nx $st]
+}
+
 proc analyze {key} {
     global VK PI variants
     lassign [keysplit $key] P sig
@@ -2190,6 +2262,18 @@ proc analyze {key} {
                     if {$j ne $IN($sn)} { set IN($sn) $j; lappend work $sn }
                 }
             }
+            # (an instruction that links variables of the frame by name hands over to the boxed code, which goes on until a loop head where typed code can be entered
+            # again: typed code is analysed from the next instruction, as for a yield)
+            if {$flow eq "dead" && ![dict exists $r seed]} {
+                set sd [frameSeed $P $pc $IN($pc)]
+                if {$sd ne ""} {
+                    lassign $sd sn sout
+                    if {![info exists IN($sn)]} { set IN($sn) $sout; lappend work $sn } else {
+                        set j [jstate $IN($sn) $sout]
+                        if {$j ne $IN($sn)} { set IN($sn) $j; lappend work $sn }
+                    }
+                }
+            }
             switch $flow {
                 fall { set succs [list $PI($P,next,$pc)] }
                 jump { set succs [list [dict get $r tgt]] }
@@ -2214,7 +2298,7 @@ proc analyze {key} {
         if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M}} { dict set nk $v B } } }
         if {$nk eq $kap} {
             set pending 0
-            dict for {v k} $nk { if {$k eq "-"} { dict set nk $v B; set pending 1 } }
+            dict for {v k} $nk { if {$k eq "-"} { dict set nk $v B; set pending 1 } elseif {$k eq "S"} { dict set nk $v B; set pending 1 } }
             if {!$pending} break
         }
         set VK($key,kap) $nk

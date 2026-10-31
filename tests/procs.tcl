@@ -1596,3 +1596,32 @@ proc mk_error {n} {
     for {set i 0} {$i < $n} {incr i} { set s $a($i,$i) }
     return $s
 }
+
+# state reached through names held in variables (`upvar #0 $name st`, `variable $name`), then a loop that uses numbers read from the array: typed code goes on at the loop head;
+# values that are not integers make the check at the store fail
+proc dn_up {name n} {
+    upvar #0 $name st
+    set A $st(A); set B $st(B)
+    for {set i 0} {$i < $n} {incr i} {
+        set A [expr {($A + $B * $i) & 0xFFFF}]
+        set B [expr {$B ^ $A}]
+    }
+    set st(A) $A; set st(B) $B
+    return [list $A $B]
+}
+namespace eval dnns {
+    proc f {token n} {
+        variable $token
+        upvar 0 $token st
+        set A $st(A); set B $st(B); set s 0
+        foreach {x y} {1 2 3 4 5 6 7 8} { set s [expr {$s + $x * $A + $y * $B}] }
+        for {set i 0} {$i < $n} {incr i} { set A [expr {($A * 3 + $i) % 1000003}]; incr s $A }
+        set st(A) $A
+        return [list $s $A [array get st]]
+    }
+}
+proc dn_list {l n} {
+    set A [lindex $l 0]; set B [lindex $l 1]
+    for {set i 0} {$i < $n} {incr i} { set A [expr {$A + $B + $i}]; set B [expr {$B - 1}] }
+    return [list $A $B]
+}

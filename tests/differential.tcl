@@ -227,6 +227,11 @@ foreach n {0 1 5 300} { lappend calls "tco tyc {list \[coroutine tyc ty_same $n\
 foreach n {0 1 3 6} { foreach p {mk_load mk_incr mk_exist mk_neg mk_three mk_lit mk_deopt mk_error} { lappend calls [list $p $n] } }
 foreach {n s} {0 x 3 abc 3 {} 2 a,b 2 9223372036854775807} { lappend calls [list mk_text $n $s] }
 foreach n {1.5 -1} { foreach p {mk_load mk_incr mk_exist mk_three mk_lit mk_deopt} { lappend calls [list $p $n] } }
+# state reached through names in variables, and numbers read from arrays and lists
+foreach {a b} {5 9 0 0 -7 3 1.5 2 abc 1 {} 4 99999999999999999999 1 0x10 010 9223372036854775807 1} {
+    lappend calls "array set ::dnx {A $a B $b}; dn_up ::dnx 20" "array set ::dnx {A $a B $b}; dn_up ::dnx 0" "namespace eval dnns {array set t1 {A $a B $b}}; dnns::f t1 10" "dn_list {$a $b} 15"
+}
+lappend calls {dn_up nosuchvar 3} {dnns::f nosuchvar 3} {dn_list {} 3} {dn_list {1} 3}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}
