@@ -5,10 +5,7 @@ An item moves out of this file when it is measured, tested and written up there.
 
 ## Next
 
-1. **Integer loops: fewer overflow checks.**  An integer loop costs about 33 instructions per iteration where hand-written C needs 10 to 12.  Range analysis
-   with induction variables and trip counts would remove the overflow tests that cannot fire (a counter bounded by a loop condition, a non-negative `%`), and
-   loop versioning would let one check at the entry cover the loop.  Wrap and bignum promotion must stay exact: every rule needs a differential and a fuzz
-   case that fails without it.
+1. **Integer loops: fewer overflow checks.**  Measured and not worth it: removing every overflow check gains at most 0-4% (decision 24).
 2. **String commands in loops** (`string length`, `string first`: 1.4x).  Not built: the only way to call them faster is to call their C procedures directly,
    which changes what a program can observe (decision 24).
 3. **Keys of arrays**: done for integer and literal keys (decision 25).
