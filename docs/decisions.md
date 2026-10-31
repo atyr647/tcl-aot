@@ -517,3 +517,9 @@ Asked for: every text and data optimisation that has no downside.  What was buil
     captures, `-nocase`) must equal Tcl's exactly, and the patterns of the library are mostly built at run time (the JSON tokenizer's is assembled when the package loads),
     which a translation-time matcher cannot see.  That is an engine, not an optimisation; it is not started, and the differential and fuzz setup here is what it would be tested with.
   - `string map`, `string match`, `split` with literal arguments: the dispatch part of their cost went with the pinned call above; what is left is the work of the commands.
+
+Checked: the full `tests/run.sh` passes on this tree, run from a copy of it with `BUILD` set to the real build directory (differential 15135 calls in four modes, forced hand-over
+6 configurations, `tests/typed.sh`, `tests/osr.sh`, `tests/pristine.sh`, fuzz typed seeds 1-3 and boxed seeds 1-2, valgrind 15096 calls, 0 mismatches).  The earlier commits of
+this work (c56dded, d9a8c17, 62bc9c2) were work-in-progress snapshots made while runs were pending; an earlier run, on the tree before the `string match` and `regexp` change,
+also passed completely.  The README speed table was regenerated with `bench/run.sh count` (`str_ops` 143.9M interpreted, 29.7M compiled: 4.8x); the tcllib figures are the
+instruction counts net of start-up of the eleven workloads of decision 19 and the nine census modules above.
