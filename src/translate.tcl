@@ -1683,9 +1683,10 @@ proc defaultConst {d} {
 
 # can typed code of P have changed state that a restart of the call in the boxed code would repeat?  Its own frame variables, or the effects of a
 # callee that is not pure.
-proc resumable {P} {
+proc resumable {P {key ""}} {
     global PI
-    if {[llength $PI($P,fvars)] || $PI($P,hasYield)} { return 1 }
+    # (the typed variant the boxed code enters at a loop head can never start the call over: the boxed code has run)
+    if {[llength $PI($P,fvars)] || $PI($P,hasYield) || ($key ne "" && [info exists ::OSRKEY] && [dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key)} { return 1 }
     foreach c $PI($P,callees) { if {![info exists PI($c,pure)] || !$PI($c,pure)} { return 1 } }
     return 0
 }
@@ -1695,7 +1696,7 @@ proc fl {key st} {
     global FM FRM PI
     lassign [keysplit $key] P sig
     set m [maskOf $st]
-    if {[resumable $P] && [info exists ::stepPC]} {
+    if {[resumable $P $key] && [info exists ::stepPC]} {
         # a proc with variables in the frame, or one that calls a proc with effects, can have changed state before this point, so it cannot start the
         # whole call over in the boxed code: it goes on there at this instruction (the boxed code then repeats the failing step, which raises the
         # error with its error info)
@@ -2691,12 +2692,16 @@ proc entryCalled {cid pc} {
     if {![info exists ENT]} {
         array set ENT {}
         foreach {all c n} [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] { set ENT($c,$n) 1 }
+        foreach {all c n} [regexp -all -inline {TBC_GNOF\(resumed_, G_(\w+), interp, (-?\d+),} $out] { set ENT($c,$n) 1 }
         # (the resume callbacks of the procs that yield enter at the instruction after each yield, and at the yield itself with an error)
         global PI translatable
         foreach P $translatable {
             if {!$PI($P,hasYield)} continue
             foreach ypc $PI($P,reach) { if {[lindex $PI($P,ins,$ypc) 0] in {yield yieldToInvoke}} { set ENT([cident $P],$PI($P,next,$ypc)) 1; set ENT([cident $P],[expr {-$ypc-1}]) 1 } }
         }
+        # (a re-entry that gives up goes on in the boxed code at the loop head it was entered from)
+        global OSRKEY
+        dict for {P gk} $OSRKEY { foreach rp [resumePoints $gk] { set ENT([cident $P],$rp) 1 } }
     }
     return [info exists ENT($cid,$pc)]
 }
@@ -2736,6 +2741,31 @@ proc emitResume {P} {
     return $fn
 }
 
+# The points at which the boxed code of P may enter typed code again: the loop heads the typed analysis knows the state at (resumePoints of the generic variant).
+proc osrPointsOf {P} {
+    global OSRKEY
+    if {![dict exists $OSRKEY $P]} { return {} }
+    return [resumePoints [dict get $OSRKEY $P]]
+}
+# At such a loop head, once per activation of the boxed code: hand the stack and the frame to the typed variant for boxed arguments, which starts there.  It
+# checks the locals and the stack against the kinds the typed code assumes and, if they do not fit, goes on in the boxed code itself (with osr_ off, see
+# TBC_GNOF); if they fit, typed code runs to the end of the call and this activation returns its result.  The stack slots belong to the variant from the call on.
+proc osrAttempt {P pc d} {
+    global OSRKEY VK PI
+    set cid [cident $P]
+    set gk [dict get $OSRKEY $P]
+    set rk $VK($gk,ret); if {$rk in {- U}} { set rk B }
+    set slots {}; for {set i 0} {$i < $d} {incr i} { lappend slots s$i }
+    set nulls [string repeat ", NULL" $PI($P,nargs)]
+    set call "V_${cid}_[lindex [keysplit $gk] 1](interp, tbc_maxdepth - ((Interp *) interp)->numLevels + TBC_REMK, 1$nulls)"
+    switch $rk {
+        I { set fin "int64_t r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); rcg_ = TCL_OK; \}" }
+        D { set fin "double r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); rcg_ = TCL_OK; \}" }
+        default { set fin "Tcl_Obj *r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, r_); Tcl_DecrRefCount(r_); rcg_ = TCL_OK; \}" }
+    }
+    return "    if (osr_) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d; $fin goto gexit; \}\n"
+}
+
 proc emitG {P} {
     global PI
     set cid [cident $P]
@@ -2744,6 +2774,8 @@ proc emitG {P} {
     if {$PI($P,hasYield)} { append fn "static int tbc_yres_${cid}(ClientData data\[\], Tcl_Interp *interp, int result);\n" }
     append fn "static int G_${cid}(Tcl_Interp *interp, int entryPc, Tcl_Obj **stk, int nstk)\n\{\n"
     append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
+    set osrPts [osrPointsOf $P]
+    if {[llength $osrPts]} { append fn "    int osr_ = !tbc_noosr; tbc_noosr = 0;\n" }
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
     foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
     for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    Tcl_Obj *ex${it}_ = NULL;\n" }
@@ -2766,6 +2798,7 @@ proc emitG {P} {
         set d $PI($P,depth,$pc)
         append fn "G$pc: ;  /* $PI($P,ins,$pc) */\n"
         if {$pc in $PI($P,loopheads)} { append fn "    if (TBC_UNLIKELY(((++tbc_ticks & 63) == 0) && tbc_poll(interp))) goto GE$pc;\n" }
+        if {$pc in $osrPts} { append fn [osrAttempt $P $pc $d] }
         append fn "    [genG $P/ $pc $d]\n"
     }
     # what happens when an instruction ends with an error or another result code (rcg_): errors are logged in the errorInfo as the interpreter
@@ -2830,6 +2863,23 @@ proc resumePoints {key} {
         set nx $PI($P,next,$pc)
         if {[info exists VK($key,in,$nx)] && [resumeWorthwhile $P $nx]} { lappend pts $nx }
     }
+    # a proc that does not yield: the loop heads, for the boxed code to enter typed code again after typed code has handed over (see osrAttempt)
+    if {!$PI($P,hasYield) && ![llength $PI($P,iters)] && !$PI($P,exlevels)} {
+        set kap $VK($key,kap)
+        # (only the outermost loops: the boxed code that reaches an inner loop head from the middle of a loop is soon at the head of the loop around it)
+        set ends [dict create]
+        foreach pc $PI($P,reach) { foreach t $PI($P,succ,$pc) { if {$t <= $pc} { dict set ends $t [expr {[dict exists $ends $t] ? max([dict get $ends $t], $pc) : $pc}] } } }
+        foreach pc $PI($P,loopheads) {
+            if {![info exists VK($key,in,$pc)] || $pc ni $PI($P,reach)} continue
+            set inner 0
+            dict for {h e} $ends { if {$h < $pc && $pc <= $e} { set inner 1; break } }
+            if {$inner} continue
+            set ok 1
+            foreach e $VK($key,in,$pc) { if {[kd $e] ni {I D B T}} { set ok 0; break } }
+            foreach v $PI($P,may,$pc) { if {[dict get $kap $v] ni {I D B F}} { set ok 0; break } }
+            if {$ok} { lappend pts $pc }
+        }
+    }
     return $pts
 }
 # Typed code after a yield pays for the change from boxed code (the locals are read from the frame and checked) and for the change back at the next yield.  Only
@@ -2870,7 +2920,12 @@ proc resumePrologue {key} {
         set chk ""; set ld ""
         foreach v $PI($P,may,$nx) {
             set k [dict get $kap $v]
-            if {$k eq "F"} continue
+            if {$k eq "F"} {
+                # (typed code assumes that a variable it keeps in the frame is not linked to a variable of this very frame, which it may hold unboxed; the boxed code
+                # that has run since may have linked it so, see tbc_t_upvar)
+                append chk "    \{ Var *vp_ = &loc_\[$v\]; if (TBC_UNLIKELY((vp_->flags & VAR_LINK) && vp_->value.linkPtr >= loc_ && vp_->value.linkPtr < loc_ + [llength $PI($P,vnames)])) goto giveup; \}\n"
+                continue
+            }
             append chk "    \{ Var *vp_ = &loc_\[$v\]; if (TBC_UNLIKELY(vp_->flags & (VAR_ARRAY | VAR_LINK | VAR_TRACED_READ | VAR_TRACED_WRITE | VAR_TRACED_UNSET | VAR_TRACE_ACTIVE))) goto giveup;"
             switch $k {
                 I - D {
@@ -2941,6 +2996,12 @@ proc emitVariant {key recursive {resume 0}} {
     if {$recursive && !$resume} {
         append fn "    if (TBC_UNLIKELY(rem < 0)) \{ tbc_depth_error(interp); tbc_st = 2; tbc_rc = TCL_ERROR; return rv; \}\n"
     }
+    # the variant the boxed code enters at a loop head: locals and stack come from the frame and from tbc_rstk (see resumePrologue)
+    set osrHere [expr {!$resume && [dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key}]
+    if {$osrHere} {
+        append fn "    int resumed_ = 0, rpc = 0, rn = 0; Tcl_Obj **rstk = NULL; (void) rstk; (void) rn;\n"
+        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = 1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0; goto RESUME; \}\n"
+    }
     # arguments into locals
     for {set v 0} {$v < $PI($P,nargs) && !$resume} {incr v} {
         set s [string index $sig $v]; set k [dict get $kap $v]
@@ -2958,11 +3019,26 @@ proc emitVariant {key recursive {resume 0}} {
     } else {
         append fn "    TBC_HIT([cstring "V:$key"]);\n"
         append fn "    goto [expr {[info exists VK($key,in,0)] && $typedMode ? "T0" : "redo_all"}];\n"
+        if {$osrHere} {
+            append fn "RESUME: ;\n    TBC_HIT([cstring "V:$key/RE"]);\n"
+            append fn [resumePrologue $key]
+        }
     }
 
     # ---- typed code
     set tpcs {}
     foreach pc $PI($P,reach) { if {$typedMode && [info exists VK($key,in,$pc)]} { lappend tpcs $pc } }
+    if {$resume} {
+        # a copy that is entered at its resume points holds only the code that can be reached from them
+        set seen [dict create]; set todo [resumePoints $key]
+        foreach t $todo { dict set seen $t 1 }
+        while {[llength $todo]} {
+            set pc [lindex $todo end]; set todo [lrange $todo 0 end-1]
+            if {$pc ni $tpcs} continue
+            foreach t $PI($P,succ,$pc) { if {![dict exists $seen $t]} { dict set seen $t 1; lappend todo $t } }
+        }
+        set tpcs [lmap pc $tpcs {expr {[dict exists $seen $pc] ? $pc : [continue]}}]
+    }
     set stubs ""
     foreach pc $tpcs {
         set in $VK($key,in,$pc)
@@ -3042,6 +3118,8 @@ proc emitVariant {key recursive {resume 0}} {
         if {[string first "qv$k" $fn] >= 0} { append decls "    tbc_imap qv$k; memset(&qv$k, 0, sizeof qv$k);\n" }
     }
     set fn [string map [list @@VECDECLS@@ $decls] $fn]
+    # a variant that was entered from the boxed code, and every hand-over from it, must not make the boxed code enter typed code again (see osrAttempt)
+    if {$osrHere} { set fn [regsub -all "G_${cid}\\(interp," $fn "TBC_GNOF(resumed_, G_${cid}, interp,"] }
     return $fn
 }
 
@@ -3116,11 +3194,11 @@ foreach key $variants { set REC($key) [reaches $key $key] }
 # ---- output
 # the procs whose generic variant has a copy that goes on in typed code after a yield
 set REKEY {}
+set OSRKEY {}
 if {$typedMode} {
     foreach P $translatable {
-        if {!$PI($P,hasYield)} continue
         set gk $P/[string repeat B $PI($P,nargs)]
-        if {[info exists VK($gk,kap)] && [llength [resumePoints $gk]]} { dict set REKEY $P $gk }
+        if {[info exists VK($gk,kap)] && [llength [resumePoints $gk]]} { if {$PI($P,hasYield)} { dict set REKEY $P $gk } else { dict set OSRKEY $P $gk } }
     }
 }
 if {[info commands ::tbc::fingerprint] eq ""} { error "translate.tcl must run under tcl-aot-sh, a tclsh with tbc::fingerprint linked in (tools/translator-shell.c)" }
@@ -3154,7 +3232,7 @@ dict for {P gk} $REKEY { set t [emitVariant $gk $REC($gk) 1]; append out $t "\n"
 foreach P $translatable { set t [emitG $P]; append out $t "\n"; set GTXT($P) $t }
 # every literal entry into the boxed code that generated code makes must have a case in the entry switch of that proc (a missing one would run `default`)
 foreach P $translatable { set G2P([cident $P]) $P }
-foreach {all c n} [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] {
+foreach {all c n} [concat [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] [regexp -all -inline {TBC_GNOF\(resumed_, G_(\w+), interp, (-?\d+),} $out]] {
     if {$n == 0 || ![info exists G2P($c)]} continue
     if {[string first "    case $n: " $GTXT($G2P($c))] < 0} { error "internal error: the boxed code of $G2P($c) is entered at instruction $n and has no case for it" }
 }

@@ -368,3 +368,34 @@ tables the generated code owns.  Measured on this tree, as instruction counts (v
 
 Checked: the full `tests/run.sh` passes on this tree (differential 13460 calls in four modes, forced hand-over 6 configurations, fuzz typed seeds 1-3 and boxed seeds
 1-2, valgrind 13431 calls, 0 mismatches).  The earlier commit of this change (f6dc853) was a work-in-progress snapshot made while that run was pending.
+
+## 23. Boxed code enters typed code again at a loop head
+
+When typed code hands over (a bignum operand, a value of the wrong kind), the rest of that call used to run boxed, however hot the loop that followed.  tcllib's
+crc32 did this on every call (`signbit` is 2^63, so `~$signbit>>7` is bignum arithmetic): 1.06x the interpreter, against 4.7x for the same byte loop when typed.
+
+Now the boxed code of a proc that has typed variants, at the head of an outermost loop that typed code knows the state at, calls the typed variant for boxed
+arguments with a resume point (the instruction, and the operand stack, in thread-wide variables the variant reads and clears first thing).  The variant reads the locals
+that may have been assigned from the frame and checks them as the entry after a yield does (decision 20): an integer for an integer variable, no trace, no link, no
+array; a variable the typed code keeps in the frame must not be linked to a variable of this very frame; each stack slot is of its kind.  If anything does not fit,
+the boxed code goes on instead.  If it fits, typed code runs to the end of the call.  Entering is attempted once per activation of the boxed code, and a variant that was entered
+this way hands over to boxed code that does not try again (`tbc_noosr`, set at every hand-over from it), so a loop whose typed code keeps giving up costs two
+transitions, not one per iteration.  The failure labels of that variant resume at the failing instruction (the call cannot be started over: the boxed code has run).
+
+Design choice, measured.  The first version was a separate copy of the typed variant that starts at the loop heads (as for yield): +17-18% machine code and +19-29%
+compile time on the benchmark procs and on tcllib's sha1 module.  Entering the shared variant costs +1.1% machine code and +4% compile time on the sha1 module
+(+8.8% on the benchmark file, whose procs are a few lines each, so the fixed part per proc dominates).  Only outermost loop heads are entry points.
+
+Results, instruction counts net of start-up, interpreter / compiled: crc32 378M / 154M (2.45x; 1.06x before).  The other ten workloads of decision 21's table are
+unchanged (sha1 1.74x, md5 1.03x, base64 0.99x, json 0.98x, csv 0.96x, structlist 0.99x, textutil 1.04x, tokenizer 0.97x, records 1.05x, binary 1.41x).
+
+Tests: `os_*` procs hand over before a loop (a bignum), in the middle of one, give up the entry, nest loops, `foreach`, `while` with `break`/`continue`, raise an error
+in the loop, `catch` inside it, `return` from it, use doubles, and take their arguments as numbers or text; the differential test compares them with the interpreter.
+`tests/osr.sh` fails unless each of them did enter typed code again (coverage counters), which equal results alone would not show.
+
+Two defects found on the way, both fixed:
+* The first version restarted the whole call when typed code failed after an entry (the failure chains of a proc without frame variables do that); the boxed code had
+  already run, and the error info showed `tbc: restart in a resumed body`.  The variant now resumes at the failing instruction.
+* The entry after a yield (decision 20) skipped the variables typed code keeps in the frame.  A proc that links a variable to one of its own (`upvar 0 y x`) after
+  typed code has handed over, and then yields, returned a stale value for `y` when typed code was entered again: `ty_same` fails without the check.  The check is now
+  made by both entries.

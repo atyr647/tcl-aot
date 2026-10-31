@@ -666,6 +666,12 @@ fail:
 
 TBC_SHARED int tbc_st, tbc_rc;
 TBC_SHARED int tbc_susp;			/* boxed code has suspended a coroutine: the callbacks are in place, the frames above must return without touching the result */
+/* The boxed code of a proc enters typed code again at a loop head by calling the typed variant for boxed arguments with tbc_rpc1 set to the instruction + 1 and
+ * the operand stack in tbc_rstk/tbc_rn; the variant reads and clears them first thing.  tbc_noosr is set by typed code that was entered that way (or that has just
+ * given up) when it goes on in the boxed code: that boxed code must not try to enter typed code at its loop heads once more. */
+TBC_SHARED int tbc_noosr, tbc_rpc1, tbc_rn;
+TBC_SHARED Tcl_Obj **tbc_rstk;
+#define TBC_GNOF(f, g, ...) (tbc_noosr = (f), g(__VA_ARGS__))
 TBC_SHARED Tcl_Obj *tbc_box;
 TBC_SHARED int tbc_depth, tbc_maxdepth;
 #ifndef TBC_REMK

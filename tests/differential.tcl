@@ -219,6 +219,10 @@ set bsd [list {} a ab abc abcd abcde abcdefgh "\x00\x01\x7f\x80\xff" "\xff\xff\x
 foreach tbs_t {c cu s su S Su i iu I Iu} { foreach d $bsd { lappend calls [list tbs_$tbs_t $d] [list tbs_sum_$tbs_t $d] } }
 foreach d $bsd { lappend calls [list tbs_use $d] [list tbs_twice $d] [list tbs_arr $d] [list tbs_elem $d] [list tbs_noarg $d] [list tbs_fmt $d c*] [list tbs_fmt $d i2] [list tbs_fmt $d I*] }
 lappend calls {tbs_lit}
+# typed code handing over before a loop, and the boxed code entering typed code again at the loop head
+foreach n {0 1 -1 5 7 255 100000 9223372036854775807 -9223372036854775808 abc 1.5 {}} { foreach p {os_big os_giveup os_mid os_nested os_foreach os_while os_error os_catch os_return os_dbl} { lappend calls [list $p $n] } }
+foreach {a b} {0 0 1 5 -3 7 9223372036854775807 1 abc 1 1 abc 1.5 2} { lappend calls [list os_args $a $b] }
+foreach n {0 1 5 300} { lappend calls "tco tyc {list \[coroutine tyc ty_same $n\] \[tyc\]}" }
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}

@@ -1465,3 +1465,86 @@ proc tbs_noarg {d} { binary scan $d c* }
 proc tbs_fmt {d f} { binary scan $d $f x; return $x }
 proc tl_lit_fold {a b} { return [expr {($b / (9223372036854775807 + 2147483648)) - ($a > (0.5 - 2))}] }
 proc tl_lit_big2 {x} { return [list [expr {$x + 0xFFFFFFFFFFFFFFFFF}] [expr {$x & 0x7FFFFFFFFFFFFFFF}] [expr {$x - -0x8000000000000000}]] }
+
+# typed code handing over before a loop (a bignum, an out-of-range value) and the boxed code entering typed code again at the loop head
+proc os_big {n} {
+    set big [expr {9223372036854775807 + $n}]
+    set m [expr {$big >> 3}]
+    set s 0
+    for {set i 0} {$i < 100} {incr i} { incr s [expr {($i ^ $n) & 0xFF}] }
+    return [list $m $s]
+}
+proc os_giveup {n} {
+    set v 0
+    set big [expr {9223372036854775807 + $n}]
+    set v [expr {$big * 2}]
+    set s 0
+    for {set i 0} {$i < 10} {incr i} { set s [expr {$s + $v % 7 + $i}] }
+    return [list $v $s]
+}
+proc os_mid {n} {
+    set s 0
+    for {set i 0} {$i < 50} {incr i} {
+        if {$i == 20} { set s [expr {$s + 9223372036854775807 + $n}] ; set s [expr {$s - 9223372036854775807 - $n}] }
+        incr s [expr {$i * 3 + $n}]
+    }
+    return $s
+}
+proc os_nested {n} {
+    set big [expr {9223372036854775807 + $n}]
+    set t 0
+    for {set i 0} {$i < 20} {incr i} {
+        for {set j 0} {$j < 20} {incr j} { incr t [expr {($i * $j) ^ $n}] }
+    }
+    return [list [expr {$big - 9223372036854775807}] $t]
+}
+proc os_foreach {n} {
+    set big [expr {9223372036854775807 + $n}]
+    set l {}
+    for {set i 0} {$i < 30} {incr i} { lappend l [expr {$i * $i}] }
+    set s 0
+    foreach x $l { incr s [expr {$x & 0xFF}] }
+    foreach {a b} $l { incr s [expr {$a - $b}] }
+    return [list [expr {$big > 0}] $s]
+}
+proc os_while {n} {
+    set big [expr {9223372036854775807 + $n}]
+    set i 0; set s 0
+    while {$i < 1000} {
+        incr i
+        if {$i % 7 == 0} continue
+        if {$i > 500} break
+        incr s [expr {$i ^ $n}]
+    }
+    return [list [expr {$big != 0}] $i $s]
+}
+proc os_error {n} {
+    set big [expr {9223372036854775807 + $n}]
+    set s 0
+    for {set i 5} {$i > -5} {incr i -1} { incr s [expr {100 / $i}] }
+    return $s
+}
+proc os_catch {n} {
+    set big [expr {9223372036854775807 + $n}]
+    set s 0
+    for {set i 5} {$i > -5} {incr i -1} { if {[catch {incr s [expr {100 / $i}]} m]} { incr s 1000 } }
+    return [list $s [expr {$big > 0}]]
+}
+proc os_return {n} {
+    set big [expr {9223372036854775807 + $n}]
+    for {set i 0} {$i < 1000} {incr i} { if {($i * $n) % 97 == 11} { return [list $i [expr {$big > 0}]] } }
+    return none
+}
+proc os_dbl {n} {
+    set big [expr {9223372036854775807 + $n}]
+    set x 0.5
+    for {set i 0} {$i < 20} {incr i} { set x [expr {$x * 1.5 + $i}] }
+    return [list $x [expr {$big > 0}]]
+}
+proc os_args {a b} {
+    set big [expr {9223372036854775807 + $a}]
+    set s $b
+    for {set i 0} {$i < 20} {incr i} { set s [expr {$s + $i * $a}] }
+    return [list $s $big]
+}
+proc ty_same {n} { set y 0; upvar 0 y x; yield 1; for {set i 0} {$i < $n} {incr i} { incr x }; return [list $x $y] }

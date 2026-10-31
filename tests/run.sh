@@ -64,7 +64,7 @@ for rate in 3 17 101; do
 done
 
 echo "== guard, nest cap, capture loop, unmodified Tcl"
-for t in guard typed nestcap capture pristine; do
+for t in guard typed osr nestcap capture pristine; do
   out=$(tests/$t.sh 2>&1) || { echo "$out"; fail "tests/$t.sh"; continue; }
   echo "$out" | grep -E ': ok$'
 done
