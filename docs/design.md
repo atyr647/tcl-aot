@@ -99,6 +99,7 @@ never called directly.
 |---|---|
 | `src/translate.tcl` | the translator |
 | `src/opcodes.tcl` | stack effect of every 8.6.14 instruction |
+| `src/cmdmap.tcl` | the command each instruction belongs to (by bisection: translation time must not be quadratic in the size of a proc) |
 | `include/tbc_runtime.h` | object helpers, arithmetic, strings, lists, dicts, the typed-code protocol |
 | `include/tbc_hook.h` | the registry, attaching, the entry command, `tbc::*`, variable fast paths |
 | `tools/` | `env.sh`, the translator shell, the module shell, `build-module.sh` |

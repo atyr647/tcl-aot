@@ -94,6 +94,8 @@ The module adds commands in the `::tbc` namespace:
   interpreter's callbacks and, where a loop without a yield can follow, typed code is entered again after the yield.  A proc that yields inside a `dict for`
   or an argument expansion stays interpreted, as does any other proc inside a coroutine.
 * A proc is compiled only if the program defines it with exactly the namespace, argument list and body the translator saw.
+* Translation time: about linear in the size of a proc (2000 statements: 23 s; one generated proc of 71000 lines: 67 s), but the typed analysis grows somewhat faster than linearly, so a generated proc of a megabyte takes
+  minutes.  A module of 6840 procs (all of tcllib) translates in chunks of a few hundred procs in 20 to 40 seconds each.
 * Compiled code recurses on the C stack. `TBC_NEST_CAP` (a macro to define when compiling the module; default off natively and 200 when compiling for WebAssembly)
   hands calls past that many live compiled entries to the interpreter, which has its own stack. A WebAssembly guest has 512 KiB of call stack by default.
 * Typed code stops at instructions it does not implement and continues in boxed code: `dict for`, `lmap`, `unset`, `lsort`, commands

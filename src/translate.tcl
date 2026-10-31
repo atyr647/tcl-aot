@@ -38,7 +38,19 @@ while {[llength $rest]} {
     }
 }
 
-proc allprocs {ns} {
+# (in a namespace of its own: it is called right after the program's file is read, which may define a proc of any name in the global namespace)
+namespace eval ::tbcx {}
+# What the translator needs to know about one proc as the program defined it: its bytecode, body, arguments (name or name\003default) and the defaults ({} for none, {d}).
+proc ::tbcx::snap {P} {
+    set args [info args $P]
+    set defs {}; set canon {}
+    foreach a $args { if {[info default $P $a d]} { lappend defs [list $d]; lappend canon "$a\003$d" } else { lappend defs [list]; lappend canon $a } }
+    # (no [expr {... ? ... : ...}] for the strings: a fingerprint like 53240e9073862955 is a number to expr, and a very large one Inf)
+    set q $P; if {![string match ::* $P]} { set q ::$P }
+    set fp ""; if {[info commands ::tbc::fingerprint] ne ""} { set fp [::tbc::fingerprint $P] }
+    return [dict create bc [::tcl::unsupported::getbytecode proc $q] body [info body $P] args $args defs $defs canon $canon fp $fp]
+}
+proc ::tbcx::allprocs {ns} {
     set r {}
     foreach p [namespace eval $ns {::info procs}] {
         set q [expr {$ns eq "::" ? "::$p" : "${ns}::$p"}]
@@ -46,14 +58,22 @@ proc allprocs {ns} {
         if {[catch {namespace origin $q} o] || $o ne $q} continue
         lappend r $q
     }
-    foreach c [namespace children $ns] { lappend r {*}[allprocs $c] }
+    foreach c [namespace children $ns] { lappend r {*}[::tbcx::allprocs $c] }
     return $r
 }
-set before [allprocs ::]
+set before [::tbcx::allprocs ::]
 source $srcFile
-set procNames [lsort [lmap p [allprocs ::] {expr {$p in $before ? [continue] : $p}}]]
+set procNames [lsort [lmap p [::tbcx::allprocs ::] {expr {$p in $before ? [continue] : $p}}]]
+# a proc of the program with the name of one of the translator's own (lt, emit, analyze, operand...) is replaced in this interpreter when this file defines that proc below:
+# what the module is built from is read now for those (and by `prepare` for all others, which come before any such replacement)
+set ::EARLY [dict create]
+set tbcOwnNames {}
+set tbcSelf [open [info script]]; set tbcText [read $tbcSelf]; close $tbcSelf
+foreach tbcLine [split $tbcText \n] { if {[regexp {^proc ([^ ]+) } $tbcLine -> tbcN]} { lappend tbcOwnNames ::[string trimleft $tbcN :] } }
+foreach tbcP $procNames { if {$tbcP in $tbcOwnNames} { dict set ::EARLY $tbcP [::tbcx::snap $tbcP] } }
+unset tbcSelf tbcText tbcLine tbcOwnNames
 set census [info exists ::env(TBC_CENSUS)]
-if {$census} { set procNames [lsort [allprocs ::]] }
+if {$census} { set procNames [lsort [::tbcx::allprocs ::]] }
 
 # ================================================================== helpers
 
@@ -136,6 +156,7 @@ proc operand {a} {
 
 # {pops pushes kind target}; kind: fall | jump | cond | term
 source [file join [file dirname [info script]] opcodes.tcl]
+source [file join [file dirname [info script]] cmdmap.tcl]
 # instructions that have a handler in the boxed code (G) -- the others keep a proc interpreted
 set tbcGops {nop startCommand beginCatch4 endCatch tryCvtToNumeric push1 push4 pop dup loadScalar1 loadScalar4 storeScalar1 storeScalar4
     incrScalar1Imm incrScalar1 add sub mult div mod lt le gt ge eq neq jump1 jump4 jumpTrue1 jumpTrue4 jumpFalse1 jumpFalse4 done
@@ -273,11 +294,16 @@ proc findRange {ranges pc mode} {
 proc prepare {P} {
     global PI
     if {[regexp {[[:cntrl:]]} $P] || [string match *:::* $P]} { refuse "unusual proc name" }
-    set bc [::tcl::unsupported::getbytecode proc [expr {[string match ::* $P] ? $P : "::$P"}]]
-    set args [info args $P]
+    # (the definition as the program gave it: from the snapshot taken after its file was read when a proc of this translator replaced it since)
+    if {[dict exists $::EARLY $P]} { set snap [dict get $::EARLY $P] } else { set snap [::tbcx::snap $P] }
+    set bc [dict get $snap bc]
+    set args [dict get $snap args]
+    set PI($P,infoBody) [dict get $snap body]
+    set PI($P,infoArgs) [dict get $snap canon]
+    set PI($P,fp) [dict get $snap fp]
     set PI($P,argsIdx) [expr {[lindex $args end] eq "args" ? [llength $args] - 1 : -1}]
     # the default value of each argument ({} when it has none); a call that leaves trailing arguments out passes the defaults of a canonical number
-    set PI($P,defaults) [lmap a $args { if {[info default $P $a d]} { list $d } else { list } }]
+    set PI($P,defaults) [dict get $snap defs]
     set vnames {}; set nargs 0; set vflags {}
     foreach v [dict get $bc variables] {
         set flags [lindex $v 0]
@@ -325,12 +351,9 @@ proc prepare {P} {
     set ranges [dict get $bc exception]
     set PI($P,ranges) $ranges
     # the command each instruction belongs to (the innermost one: the last whose code starts at or before the pc and still covers it)
-    set cmds [dict get $bc commands]
-    foreach pc $pcs {
-        set best {}
-        foreach c $cmds { if {[dict get $c codefrom] <= $pc && $pc <= [dict get $c codeto]} { set best [list [dict get $c scriptfrom] [expr {[dict get $c scriptto] - [dict get $c scriptfrom] + 1}]] } }
-        set PI($P,src,$pc) $best
-    }
+    # (see cmdmap.tcl)
+    array set cmdOf [cmdMap $pcs [dict get $bc commands]]
+    foreach pc $pcs { set PI($P,src,$pc) $cmdOf($pc) }
 
     array set nxtOf {}; array set prevOp {}
     for {set i 0} {$i < [llength $pcs]} {incr i} { set nxtOf([lindex $pcs $i]) [lindex $pcs [expr {$i+1}]]; if {$i} { set prevOp([lindex $pcs $i]) [lindex $ins([lindex $pcs [expr {$i-1}]]) 0] } }
@@ -2576,7 +2599,7 @@ proc variantReport {key P tpcs usedD dsiteVar} {
         if {$kind eq "unsupported"} { lappend uns [expr {$detail ne "" ? "$op $detail" : $op}]@$pc } elseif {[dict exists $usedD $pc]} { incr guarded }
     }
     set kinds {}
-    dict for {v k} $VK($key,kap) { set vn [lindex $PI($P,vnames) $v]; lappend kinds "[expr {$vn eq "" ? "#$v" : $vn}]=$k" }
+    dict for {v k} $VK($key,kap) { set vn [lindex $PI($P,vnames) $v]; if {$vn eq ""} { set vn "#$v" }; lappend kinds "$vn=$k" }
     return [list [llength $PI($P,reach)] [expr {[llength $tpcs] - [llength $uns]}] $guarded $uns $kinds $VK($key,ret)]
 }
 
@@ -3824,11 +3847,7 @@ foreach P $translatable {
     append out $e
 }
 # canonical argument list (names, defaults) as the interpreter's Proc holds it: name, or name \003 default, joined by \002
-proc canonArgs {P} {
-    set r {}
-    foreach a [info args $P] { if {[info default $P $a d]} { lappend r "$a\003$d" } else { lappend r $a } }
-    join $r "\002"
-}
+proc canonArgs {P} { join $::PI($P,infoArgs) "\002" }
 # The built-ins the compiled code was analysed against.  The module lists the distinct names, the distinct namespaces they are looked up from and the pairs;
 # each entry lists its pairs (those of the procs it calls included).  The runtime checks them when the proc is entered (see tbc_guard_ok).
 set gnames {}; set gnss {}; set gall {}
@@ -3850,11 +3869,11 @@ if {[llength $gall]} {
 foreach P $translatable {
     set cid [cident $P]
     set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
-    set fp [tbc::fingerprint $P]
+    set fp $PI($P,fp)
     set gx [lmap d [gdeps $P] {lsearch -exact $gall $d}]
     if {[llength $gx]} { append out "static const unsigned short tbc_gx_$cid\[\] = { [join $gx {, }] };\n" }
     if {[llength [ydeps $P]]} { append out "static int *tbc_yd_$cid\[\] = { [join [lmap c [ydeps $P] {string cat &tbc_valid_[cident $c]}] {, }], NULL };\n" }
-    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}] \};\n"
+    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring $PI($P,infoBody)], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}] \};\n"
 }
 # the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled
 if {[llength $refusedProcs]} {
@@ -3862,7 +3881,7 @@ if {[llength $refusedProcs]} {
     foreach pr $refusedProcs {
         lassign $pr P why
         set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
-        append out "    \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring [info body $P]], [cstring $why] \},\n"
+        append out "    \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring $PI($P,infoBody)], [cstring $why] \},\n"
     }
     append out "\};\n"
 }

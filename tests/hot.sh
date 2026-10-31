@@ -12,6 +12,7 @@ proc h_sum {l} { set s 0; foreach v $l { set s [expr {$s + $v}] }; return $s }
 proc h_ok {x} { return [expr {$x * 2}] }
 proc h_dict {d} { set n 0; dict for {k v} $d { incr n $v }; return $n }
 proc h_cmp {a b} { if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return 1 }; if {$a != "left"} { return 2 }; return 3 }
+proc h_nan {x} { set NaN $x; set Inf [expr {$NaN + 1}]; return $Inf }
 proc h_two {n} { set x [dict create a 1]; dict for {k v} $x { }; return $n }
 TCL
 cat > "$tmp/run.tcl" <<'TCL'
@@ -48,6 +49,7 @@ TCL
 rep=$(TBC_REPORT=1 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/one.c" Hot 2>&1 >/dev/null | grep '^REPORT')
 echo "$rep" | grep -q '^REPORT ::h_ok/B .*100%.*0 unsupported' || { echo "hot: FAILED, the report of h_ok:"; echo "$rep"; exit 1; }
 echo "$rep" | grep -q '^REPORT     unsupported: dictFirst@' || { echo "hot: FAILED, the report does not list dictFirst as unsupported:"; echo "$rep"; exit 1; }
+echo "$rep" | grep -q '^REPORT ::h_nan/.*locals.*NaN=' || { echo "hot: FAILED, the report of a proc with variables named NaN and Inf:"; echo "$rep" | grep h_nan; exit 1; }
 echo "$rep" | grep -q '^REPORT ::h_sum/Bw ' || { echo "hot: FAILED, the report has no line for the tagged variant of h_sum"; exit 1; }
 echo "hot: TBC_REPORT lists the typed share of every variant and the unsupported instructions: ok"
 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/split.c" Hot -split 2 >/dev/null 2>&1 || { echo "hot: split translation failed"; exit 1; }

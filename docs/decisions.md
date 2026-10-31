@@ -628,3 +628,40 @@ read when a module is built with `-DTBC_COV`), so the run with the forced tagged
 Full-suite result: the whole of `tests/run.sh` from a snapshot of `38ec990`, exit 0 (16703 calls in the differential test in four modes, forced hand-over at three rates and two seeds, guard, typed, osr, hot, nest cap, capture,
 pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The quick suite also ran with `TBC_FORCE_WPOLICY=1`: 0 mismatches.
 
+## 33. What the AOT covers in all of tcllib, where run time goes, and three defects the whole-library run found
+
+**Correction to decision 32's closing remark.**  `upvar` and `uplevel` were 31% of the hand-over events of the 21 workloads (`upvar $name var` in `json::parseValue` and the `Pop` helpers, `uplevel` in `struct::list::FTest`,
+`Lfold`, `Lmap`, `Lfilter`), and I took them for the next thing to examine.  Counting events overstates the cost: a hand-over early in a proc costs little, and what follows runs in the boxed code, which is what ran before
+typed code existed.  What bounds the gain is the share of the run that is generated code at all.  Measured by callgrind (instructions net of start-up; self cost of the generated functions as a share of the compiled run):
+base64 0.3%, json 1.0%, `struct::list` 1.1%, csv 2.0%, tokenizer 2.4%, yaml 2.7%, textutil 3.1%, binary 3.5%, records 3.6%, base32 0.0%, soundex 6.6%, sha1 7.5%, md5 8.3%, numtheory 10.8%, md4 11.8%, blowfish 14.0%,
+crc32 14.4%, rc4 16.0%, `math::statistics` 34.2%, `math::linearalgebra` 40.9%.  The rest is Tcl: the regexp engine and list parsing in json, the allocator, hashing and script compilation in `struct::list` (where
+`uplevel` evaluates a script, which the interpreter has to do either way).  Making `upvar` and `uplevel` typed could gain at most about 1% on those two; it is not worth the risk to the frame handling, and it is not planned.
+
+**What it covers (measured).**  All of tcllib 1.21 (367 packages loaded; 57 would not load in the interpreter used) with 6840 procs, by the translator's census: 6837 translate (at least to boxed code), 3 are refused
+(`cron::runTasksCoro`, `oo::Helpers::classvariable`, `oo::define::classmethod`: the TclOO instructions `tclooClass`, `tclooNamespace`, `tclooIsObject`).  Of Tcl 8.6.14's 190 bytecode instructions the translator has code for
+177; the others are `lor`, `land`, `callBuiltinFunc1`, `callFunc1`, `foreach_start4`, `foreach_step4`, `dictDone` (not emitted by the 8.6 compiler for procs, except possibly `dictDone`, which was not looked for) and the
+TclOO ones.  The typed share is much lower (static counts by the compile-time report of decision 31, over 6750 procs and 12258 variants, translated in 12 chunks of 600 procs, so a call from one chunk to a proc in another
+does not have the callee's kinds): 27.3% of the reachable instructions are typed code (best variant of each proc), the median proc is 58% typed, 23.6% of the procs have no instruction typed code lacks (14.3% of the
+4938 procs of 20 instructions or more).  The instructions typed code lacks in most procs: a call of a command whose name is not a literal (573 procs), `returnImm` (564), `uplevel` (291), `listIndexImm` (274),
+`arrayExistsImm` (212), `upvar` (197), `currentNamespace` (160), `{*}` expansion (123).  These are counts of instructions in the code, not of what runs; typed code is entered again at loop heads, and most of tcllib is
+not compute.
+
+**Defect 1: translation time quadratic in the size of a proc.**  Translating the 12 chunks, one took 30 minutes (the others 20 to 40 seconds): `fileutil::magic::filetype::analyze`, a generated proc of 1.1 MB and 71037 lines.
+Cause: finding the command of each instruction looped over all commands for every instruction (instructions times commands: 4.3 s for a table 1/16 the size of the one in the test).  It is now `cmdMap` (`src/cmdmap.tcl`),
+which finds each command's first instruction by bisection.  The proc alone now translates in 67 s; the generated C is byte-identical to before on the test module, json, `struct::list`, statistics, md5 and blowfish.
+A synthetic proc of 2000 statements: 69 s to 23 s.  Translation is still faster than linear in size but no longer quadratic in the instructions of this step: `analyze` (the typed analysis) grows 2.7 times per doubling of the
+proc, and Tcl's own `::tcl::unsupported::getbytecode` (not ours to change) 3.3 times (3.1 s for 92000 instructions).  `tests/cmdmap.sh`: the result equals the old loop on 300 random nested tables, and 40000
+instructions in 16000 commands are mapped in under 5 s (92 ms measured; the old loop takes about a minute on it).
+
+**Defect 2: a program's proc with the name of one of the translator's own procs.**  The translator reads the program's file into its own interpreter, then defines its procs, so a global proc of the program named `lt`,
+`kd`, `emit`, `analyze`, `operand`, `effect`, `refuse`... was replaced by the translator's before the module was written: the module held the translator's body and fingerprint for it, the proc was left to the
+interpreter (`tbc::report`: "another definition of this name") and the translator said "5 of 5 procs compiled".  A proc named `allprocs` crashed the translator.  Now the helper that runs before the file is read is in a
+namespace of its own, and the definitions (bytecode, body, arguments, defaults, fingerprint) of the procs that collide are read right after the file is, and `prepare` takes everything from that snapshot.  `tests/names.sh`
+(ten such procs: compiled, results equal the interpreter's; failed on the previous translator) and a check that every fingerprint in the module of the test procs is a hexadecimal number.
+
+**Defect 3: `TBC_REPORT` with a local variable named like a number** (`NaN`, `Inf`): `expr {... ? "#$v" : $vn}` read the name as a number and raised a domain error (`tests/hot.sh` now has such a proc; it failed
+before).  The same pattern turned up in my first version of the fix for defect 2, where a fingerprint such as `53240e9073862955` went through `expr` and became `0xInf`: found by comparing the generated C with the previous
+translator's, and by the suite's module build; a check for it is in `tests/names.sh`.
+
+Full-suite result: see the next paragraph when it has run.
+
