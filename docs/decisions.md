@@ -38,6 +38,11 @@ stub's own evaluation is checked by the interpreter before any of our code runs.
 info; its topmost entry names the callee's first command instead of the calling command.  Closing this would need a patch to Tcl or a raised
 `maxNestingDepth`; neither was acceptable.
 
+**Decided by the user (2026-10-31): the edge stays as a named limit.**  A research pass found the only way to close it without a patch to Tcl's sources: replace the
+proc command's `Command.nreProc` in memory with a wrapper that adjusts `numLevels` (verified in a prototype).  That writes to Tcl's own `Command` struct, which
+conflicts with "never alter Tcl" (decision 1), so it is not done.  It is a stated limit of the system, not an open item: a proc entered from the interpreter at the
+very last nesting level fails one level early, with the same message and code.
+
 ## 5. Coroutines, `yield`, `tailcall`
 
 Compiled code runs on the C stack and a coroutine suspends by unwinding the interpreter's own stack, which cannot cross a C frame (Tcl answers a `yield`
