@@ -351,7 +351,8 @@ static int tbc_un(Tcl_Interp *interp, int op, Tcl_Obj **pa) {
         else if (ta == 2 && dx == dx) r = Tcl_NewDoubleObj(-dx);
         break;
     case TBC_POS:
-        if (ta == 1 || (ta == 2 && dx == dx)) return 0;                  /* the operand itself stays */
+        /* as INST_UPLUS: a number without a string form of its own stays as it is, any other is replaced by one that has none ("+7.90" is 7.9, "+0x10" is 16) */
+        if (ta == 1 || (ta == 2 && dx == dx)) { if (!a->bytes) return 0; r = ta == 1 ? tbc_mkint(x) : Tcl_NewDoubleObj(dx); }
         break;
     case TBC_BNOT:
         if (ta == 1) r = tbc_mkint(~x);
