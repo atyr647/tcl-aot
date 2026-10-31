@@ -25,11 +25,6 @@ An item moves out of this file when it is measured, tested and written up there.
 * **Hand-over at every instruction, for the callee side**: the forced hand-over test covers typed to boxed; the other direction (boxed to typed at a loop head) does
   not exist yet and is the same entry point as above.
 
-## Floating-point procs with no sign of floating-point numbers
-
-The tagged number kind (decision 29) is used in a proc that has a double literal or calls a function that gives a double.  A proc that only does arithmetic on values that arrive as
-objects keeps the integer assumption and runs boxed when they are doubles.  Choosing the policy by the first failure at run time needs both versions of such procs.
-
 ## Smaller items
 
 * `lsort -command` with a compiled comparator (needs a stand-in command whose name shows in the error info of a failing comparator, or a copy of Tcl's merge sort).

@@ -543,10 +543,36 @@ given a kind in advance, so there is now a kind that carries its tag.
   proc; the whole test suite runs that way as well, which is how the kind was tested.  Procs that yield do not use it.
 * **Measured** (instruction counts net of start-up, results equal): `math::statistics` 1.14x to 1.84x, `math::linearalgebra` 1.02x to 1.39x; the other nine census modules and the eleven
   workloads of decision 19 are within noise of before (all within 0.3%).
-* **Not done.**  A floating-point proc with no sign of one (arithmetic only on values that arrive as objects) keeps the integer assumption, hands over at the first double and runs
-  boxed; picking the policy by a failure at run time would need both versions of every such proc.  `int`, `round`, `abs` of a W go through the generic call.
+* **Not done here.**  A floating-point proc with no sign of one was left to decision 30.  `int`, `round`, `abs` of a W go through the generic call.
 
 Tests: `wf_*` and `wm_*` procs (sums of lists of integers, doubles, mixed, non-canonical text, bignums, infinities and NaN; variables that stay integers when a loop does not run;
 comparisons and arithmetic of every pairing of those values; tagged numbers passed to procs, returned, incremented, compared, stored in arrays), run with the default policy and with
 the policy forced; `tests/typed.sh` checks that a sum over a list of numbers stays typed and uses W in a floating-point proc and not in an integer one.  Forced policy also ran the
 typed fuzz families (seeds 1-3, with forced hand-overs).
+
+## 30. Procs with no sign of floating-point numbers: an adaptive tagged version, and a defect in decision 29's boxing
+
+Decision 29 used W only where the proc itself shows floating-point numbers.  A proc that only adds, multiplies or compares values that arrive as objects (`proc sum {l} {...foreach v $l {incr...}}`
+over a list of doubles) kept the integer assumption: the first double handed over and the rest ran boxed.  Choosing by the data needs both versions of the proc, and growth had to stay small.
+
+* **Eligibility** (`PI($P,wadapt)`): the proc has a loop, no bit operation or `%`, does not yield, and either accumulates (`set s [expr {$s + ...}]`, `incr` of a float-looking operand) or
+  does arithmetic on a `foreach` variable.  Counting loops (`for {set i 0} ...`, `incr s $i`) and checksums are not eligible.  `TBC_FORCE_WPOLICY=1` still means W in every proc.
+* **Mechanism.**  The proc gets one more variant, key suffix `w` (`P/Bw`), whose locals are W.  A flag `tbc_wp_<proc>` is set by the integer variants' guard (`tbc_wnote`) the first time an
+  object operand is a finite double.  While the flag is set a call enters the boxed code, which re-enters the `w` variant at the first loop head (decision 21's re-entry; the `w` variant is
+  pruned to what is reachable from loop heads), and typed callers that would call the integer variant take the generic call instead.  A proc that never meets a double never sets the flag and
+  runs as before.
+* **Defect found while measuring this.**  `wnorm`, which boxes the W slots going into an instruction that does not take tagged numbers, compared the *pc* of the next instruction with a list of
+  opcode names, so it never recognised the instructions that do take them, and boxed every W slot on every edge: two double objects per loop iteration in all W code, floating-point procs
+  included.  The first measurement of the adaptive version showed no gain for this reason (1.13x, against 1.27x without it, at 10 calls of the workload).  After the fix the same workload (four
+  list-of-doubles procs, no float literal in them) goes from 1.52x to 3.26x.  `tests/typed.sh` counts the boxings in a W loop; it reports 7 where 2 are expected without the fix.
+* **A second defect it exposed.**  With W slots staying unboxed over unary plus, the forced hand-over test (a hand-over just before `+$v`) reached the generic code's unary plus, which left the
+  operand as it was: `+7.90` gave `7.90`, where Tcl's INST_UPLUS discards the string form of a number and gives `7.9` (`+0x10` is `16`).  `tbc_un` now does the same.  The forced hand-over stage
+  failed (`wf_neg`, at every rate and seed it was run with) before the fix and passes after.
+* **Measured** (instruction counts net of start-up, interpreter / compiled, results equal), against the tree of decision 29: `math::statistics` 1.84x to 6.20x, `math::linearalgebra` 1.38x to
+  4.73x, `math::numtheory` 2.04x to 2.97x; the eleven workloads of decision 19 and the other seven census modules unchanged (compiled instruction counts within 0.03%).  Generated code: bench
+  +0.7%, json, sha1, records 0%, linalg about +4%, `struct::list` about +12% (text size, measured before the boxing fix above; the run time of `struct::list` is unchanged).
+
+Tests: `wa_*` procs (sums, means, dot products, maxima, polynomials, nested calls over lists of integers, doubles and mixed values, run with the default and forced policy; first calls enter the
+integer variant, later calls the `w` variant: `tests/coverage.sh` shows `V:::wa_sum/B` and `V:::wa_sum/Bw/RE`); `tests/typed.sh` checks that `/Bw` exists for an accumulating proc and not for a bit-operation
+or counting proc, and that W is not boxed inside a loop.  Full suite with the default and with the forced policy (see below).
+
