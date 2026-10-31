@@ -24,3 +24,16 @@ TCL
 out=$(TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/t.tcl" "$tmp/t.c" Typedtest 2>&1)
 if echo "$out" | grep -q -E '^DEADOP (bit|invokeStk1 ::tcl::binary::scan :: ::tt_scan/B)'; then echo "typed: FAILED, typed code hands over at:"; echo "$out" | grep -E '^DEADOP (bit|invokeStk1 ::tcl::binary::scan :: ::tt_scan/B)'; exit 1; fi
 echo "typed: no hand-over at integer operations on integers written as 0xFF, or at binary scan with a number format: ok"
+
+# a key built from integers and literals that goes straight to an element of a native array is built as text in a buffer, not as a Tcl object (tbc_cat_*)
+cat > "$tmp/k.tcl" <<'TCL'
+proc tk_mat {n} {
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set a($i,$j) [expr {$i + $j}]; incr a($i,$j) } }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $a($i,$i) }
+    return $s
+}
+TCL
+"$TCLSH" src/translate.tcl "$tmp/k.tcl" "$tmp/k.c" Keytest >"$tmp/k.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/k.log"; exit 1; }
+if grep -q "tbc_cat_init" "$tmp/k.c"; then echo "typed: FAILED, a(\$i,\$j) builds a Tcl object for the key"; exit 1; fi
+echo "typed: a(\$i,\$j) keys are built as text, without objects: ok"

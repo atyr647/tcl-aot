@@ -681,6 +681,8 @@ TBC_SHARED int tbc_depth, tbc_maxdepth;
 #define TBC_2P53 (((Tcl_WideInt) 1) << 53)
 
 TBC_INLINE Tcl_Obj *tbc_ref(Tcl_Obj *o) { Tcl_IncrRefCount(o); return o; }
+/* an owned string object (one reference) of a key held as text in a buffer of typed code */
+TBC_INLINE Tcl_Obj *tbc_newkey(const char *s, int n) { Tcl_Obj *o = Tcl_NewStringObj(s, n); Tcl_IncrRefCount(o); return o; }
 TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) { Tcl_Obj *o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); return o; }
 /* `binary scan $data <t>[u]* var` for t one of c s S i I: the list tclBinary.c's BinaryScanCmd builds (ScanNumber's byte order and sign extension; a
  * number is read from its bytes, trailing bytes that do not make a whole number are ignored; no data gives the empty object).  Refcount 0.  Equal values share one

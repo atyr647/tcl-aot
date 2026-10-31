@@ -223,6 +223,10 @@ lappend calls {tbs_lit}
 foreach n {0 1 -1 5 7 255 100000 9223372036854775807 -9223372036854775808 abc 1.5 {}} { foreach p {os_big os_giveup os_mid os_nested os_foreach os_while os_error os_catch os_return os_dbl} { lappend calls [list $p $n] } }
 foreach {a b} {0 0 1 5 -3 7 9223372036854775807 1 abc 1 1 abc 1.5 2} { lappend calls [list os_args $a $b] }
 foreach n {0 1 5 300} { lappend calls "tco tyc {list \[coroutine tyc ty_same $n\] \[tyc\]}" }
+# array elements with keys built from integers and literals
+foreach n {0 1 3 6} { foreach p {mk_load mk_incr mk_exist mk_neg mk_three mk_lit mk_deopt mk_error} { lappend calls [list $p $n] } }
+foreach {n s} {0 x 3 abc 3 {} 2 a,b 2 9223372036854775807} { lappend calls [list mk_text $n $s] }
+foreach n {1.5 -1} { foreach p {mk_load mk_incr mk_exist mk_three mk_lit mk_deopt} { lappend calls [list $p $n] } }
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}

@@ -804,6 +804,7 @@ proc boxe {P p e} {
             # the iteration state of a foreach (the stack slot of the interpreter's foreach holds an object with the iteration number and the count)
             return "({ Tcl_Obj *c_ = Tcl_NewObj(); c_->internalRep.twoPtrValue.ptr1 = INT2PTR(fit_[lt $e]); c_->internalRep.twoPtrValue.ptr2 = INT2PTR(fmax_[lt $e]); Tcl_IncrRefCount(c_); c_; })"
         }
+        K { return "tbc_newkey(kb$p, kl$p)" }
         N { return "tbc_ivec_list(&sv$p, 1)" }
         M {
             switch $::boxMode {
@@ -1076,6 +1077,22 @@ proc stepT {key pc in} {
         strcat {
             set n [lindex $a 0]; set q [expr {$d - $n}]
             set parts ""; set rel ""
+            # a key that a native array operation (kind R) is about to use is built in a buffer of the slot, as text, without an object (kind K)
+            set kc [keyConsumer $P $pc $q]
+            if {$kc ne "" && [kap $key [lindex $kc 1]] eq "R"} {
+                set kcode ""; set ok 1; set maxl 0
+                for {set k $q} {$k < $d && $ok} {incr k} {
+                    set e [lindex $in $k]
+                    switch [kd $e] {
+                        I { if {[lt $e] ne ""} { set lit [lindex $PI($P,lits) [lt $e]]; append kcode " memcpy(kb$q + o_, [cstring $lit], [cbytes $lit]); o_ += [cbytes $lit];"; incr maxl [cbytes $lit] } else { append kcode " o_ += tbc_fmt_i64(kb$q + o_, si$k);"; incr maxl 20 } }
+                        L { set lit [lindex $PI($P,lits) [lt $e]]; append kcode " memcpy(kb$q + o_, [cstring $lit], [cbytes $lit]); o_ += [cbytes $lit];"; incr maxl [cbytes $lit] }
+                        default { set ok 0 }
+                    }
+                }
+                if {$ok && $maxl <= 100} {
+                    return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] K] "\{ int o_ = 0;$kcode kl$q = o_; \}"]
+                }
+            }
             for {set k $q} {$k < $d} {incr k} {
                 set e [lindex $in $k]
                 switch [kd $e] {
@@ -1655,10 +1672,31 @@ proc fvalue {P p e tmplObj tmplInt} {
     return ""
 }
 
+# The instruction that uses the key that the strcat at pc leaves in slot q: {pc variable} when it is an array element operation of typed code (load, store,
+# increment, exists) that comes after only simple instructions that leave slot q alone, else "".
+proc keyConsumer {P pc q} {
+    global PI
+    set cur $PI($P,next,$pc)
+    for {set steps 0} {$steps < 60} {incr steps} {
+        if {![info exists PI($P,depth,$cur)]} { return "" }
+        lassign $PI($P,ins,$cur) op a
+        set d $PI($P,depth,$cur)
+        if {$op in {loadArray1 loadArray4 existArray incrArray1Imm}} { if {$d - 1 == $q} { return [list $cur [operand [lindex $a 0]]] } }
+        if {$op in {storeArray1 storeArray4 incrArray1}} { if {$d - 2 == $q} { return [list $cur [operand [lindex $a 0]]] } }
+        if {$op ni {push1 push4 loadScalar1 loadScalar4 storeScalar1 storeScalar4 startCommand add sub mult div mod lt le gt ge eq neq bitand bitor bitxor lshift rshift
+                incrScalar1Imm incrScalar1 loadArray1 loadArray4 storeArray1 storeArray4 incrArray1 incrArray1Imm existArray strcat pop}} { return "" }
+        lassign [effect $op $a $d {}] pops pushes kind
+        if {$kind ne "fall" || $d - $pops < $q + 1} { return "" }
+        set cur $PI($P,next,$cur)
+    }
+    return ""
+}
+
 # a dict key held in slot p (described by e) as bytes: {setup pointer length release key-object}, or "" if the kind is not handled
 proc keyArgs {P p e} {
     global PI
     switch [kd $e] {
+        K { return [list "" kb$p kl$p "" NULL] }
         B { return [list "int kl_; const char *kp_ = Tcl_GetStringFromObj(s$p, &kl_);" kp_ kl_ " Tcl_DecrRefCount(s$p);" s$p] }
         L - I {
             if {[lt $e] ne ""} {
@@ -3116,6 +3154,7 @@ proc emitVariant {key recursive {resume 0}} {
     for {set k 0} {$k < $maxd2} {incr k} {
         if {[string first "sv$k" $fn] >= 0} { append decls "    tbc_ivec sv$k = {NULL, 0}; (void) sv$k;\n" }
         if {[string first "qv$k" $fn] >= 0} { append decls "    tbc_imap qv$k; memset(&qv$k, 0, sizeof qv$k);\n" }
+        if {[string first "kb$k" $fn] >= 0} { append decls "    char kb$k\[104\]; int kl$k = 0; (void) kl$k;\n" }
     }
     set fn [string map [list @@VECDECLS@@ $decls] $fn]
     # a variant that was entered from the boxed code, and every hand-over from it, must not make the boxed code enter typed code again (see osrAttempt)

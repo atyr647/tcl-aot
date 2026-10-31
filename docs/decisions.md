@@ -413,3 +413,21 @@ pending.
   per call).  It would cut the dispatch share (estimated 1.6-7% of the eleven workloads, up to 2x on a loop that does nothing but call such commands, `str_ops`
   1.45x).  It changes what a program can observe: `info cmdcount` would not count the call, execution traces and `interp limit command` would not see it, and the
   interpreter's checks between commands would be skipped, unless the call repeated each of them (which is most of the dispatch cost).  Not done.
+
+## 25. Keys such as `$i,$j` for native arrays are built as text, not as objects
+
+A proc that works on `a($i,$j)` keeps the array in a table of its own (kind R, decision 17), but each key was built as a Tcl string object (`tbc_cat_*`), used for one
+lookup and freed: about 800 instructions per key, most of it allocation.  `arr_mat` (a 40x40 matrix product) ran 1.8x the interpreter.
+
+A `strcat` whose parts are integers and literals now leaves its result in a buffer of the stack slot (kind K: text in `kb<slot>`, its length in `kl<slot>`, at most 100
+bytes by construction: an integer is at most 20 characters), when the instruction that uses the key is an element operation on a native array (load, store, `incr`,
+`info exists`) that follows with only simple instructions between (`keyConsumer`).  The array operations take the bytes from the buffer.  Anywhere else the key is
+needed as an object (a hand-over, a join with a path that has an object, a store into a variable) the object is made then (`boxe`), so every other path behaves as
+before; a key with a text part (a variable that holds a string) is not made a K and goes the old way.
+
+Measured, instruction counts net of start-up, interpreter / compiled: `arr_mat` 189M / 38M (5.0x; 1.8x before); `arr_sieve` 4.6x, `arr_hist` 7.5x, `nn::fill` 2.1x,
+unchanged by this change (the last is a namespace array, which stays in Tcl's table: roadmap).
+
+Tests: `mk_*` procs build keys of two and three integers, with negative and 64-bit values, with literal prefixes and suffixes, with a bignum stored under the key
+(a hand-over right after the key was built), with a text part, and with a lookup that fails; the forced hand-over stage hands over at every instruction of them.
+`tests/typed.sh` fails if a proc of that shape builds a Tcl object for the key.

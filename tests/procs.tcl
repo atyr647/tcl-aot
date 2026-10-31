@@ -1548,3 +1548,51 @@ proc os_args {a b} {
     return [list $s $big]
 }
 proc ty_same {n} { set y 0; upvar 0 y x; yield 1; for {set i 0} {$i < $n} {incr i} { incr x }; return [list $x $y] }
+
+# array elements whose key is built from integers and literals (a($i,$j)): typed code holds such a key as text in a buffer
+proc mk_load {n} {
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set a($i,$j) [expr {$i * 10 + $j}] } }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { incr s [expr {$a($i,$j) * $a($j,$i)}] } }
+    return [list $s [lsort [array names a]]]
+}
+proc mk_incr {n} {
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set c($i,$j) 1; incr c($i,$j) 3; incr c($i,$j) $i; incr c($j,$i) -1 } }
+    return [lsort [array get c]]
+}
+proc mk_exist {n} {
+    set e 0
+    for {set i 0} {$i < $n} {incr i} { set a($i,$i) $i }
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { if {[info exists a($i,$j)]} { incr e } } }
+    return $e
+}
+proc mk_neg {n} {
+    set a(-5,9223372036854775807) x
+    set a(-9223372036854775808,0) y
+    set r {}
+    foreach i [list -5 $n -9223372036854775808] { foreach j {9223372036854775807 0 1} { if {[info exists a($i,$j)]} { lappend r $a($i,$j) } else { lappend r - } } }
+    return $r
+}
+proc mk_three {n} {
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { for {set k 0} {$k < $n} {incr k} { set a($i,$j,$k) [expr {$i + $j + $k}] } } }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $a($i,$i,$i) }
+    return [list $s [llength [array names a]]]
+}
+proc mk_lit {n} {
+    for {set i 0} {$i < $n} {incr i} { set a(x$i) $i; set a(y${i}z) [expr {$i * 2}]; set a(:$i:) 1 }
+    return [lsort [array get a]]
+}
+proc mk_deopt {n} {
+    for {set i 0} {$i < $n} {incr i} { set a($i,1) [expr {9223372036854775807 + $i}]; set b($i,2) [expr {$i + 1}] }
+    return [list [lsort [array get a]] [lsort [array get b]]]
+}
+proc mk_text {n s} {
+    for {set i 0} {$i < $n} {incr i} { set a($s,$i) $i; set a($i,$s) [expr {$i * 2}] }
+    return [lsort [array get a]]
+}
+proc mk_error {n} {
+    set a(1,1) 5
+    for {set i 0} {$i < $n} {incr i} { set s $a($i,$i) }
+    return $s
+}
