@@ -6,8 +6,7 @@ An item moves out of this file when it is measured, tested and written up there.
 ## Next
 
 1. **Integer loops: fewer overflow checks.**  Measured and not worth it: removing every overflow check gains at most 0-4% (decision 24).
-2. **String commands in loops** (`string length`, `string first`: 1.4x).  Not built: the only way to call them faster is to call their C procedures directly,
-   which changes what a program can observe (decision 24).
+2. **String commands in loops**: done (decision 28; `str_ops` 1.4x to 4.8x).
 3. **Keys of arrays**: done for integer and literal keys (decision 25).
 4. **Calls into procs that need a frame** (global, namespace and `upvar` variables).  The interpreter's call costs about 900 instructions more than it
    needs to.  Building the call frame directly and running the compiled body in it, without the stub bytecode and its second dispatch, is possible with
@@ -25,6 +24,19 @@ An item moves out of this file when it is measured, tested and written up there.
 
 * **Hand-over at every instruction, for the callee side**: the forced hand-over test covers typed to boxed; the other direction (boxed to typed at a loop head) does
   not exist yet and is the same entry point as above.
+
+## Arithmetic on numbers that arrive as objects
+
+Typed code takes an object operand of an arithmetic instruction to be an integer and hands over when it is not.  For a list of floating-point numbers (`math::statistics`,
+`math::linearalgebra`: 1.14x and 1.02x in the census, decision 28) that is the first addition of the first call.  A number kind that carries its tag (integer or double) through
+expressions and variables would keep such loops in typed code; it touches every arithmetic instruction, the variable kinds and the conversions at the boundaries.  This is the
+largest gap left for numeric library code.
+
+## Smaller items
+
+* `lsort -command` with a compiled comparator (needs a stand-in command whose name shows in the error info of a failing comparator, or a copy of Tcl's merge sort).
+* A native regexp matcher for literal patterns (decision 28 has the measurement and what it would take).
+* An element cache for namespace and global arrays, for loops that revisit keys.
 
 ## Replaced commands
 
