@@ -431,3 +431,7 @@ unchanged by this change (the last is a namespace array, which stays in Tcl's ta
 Tests: `mk_*` procs build keys of two and three integers, with negative and 64-bit values, with literal prefixes and suffixes, with a bignum stored under the key
 (a hand-over right after the key was built), with a text part, and with a lookup that fails; the forced hand-over stage hands over at every instruction of them.
 `tests/typed.sh` fails if a proc of that shape builds a Tcl object for the key.
+
+Checked: the full `tests/run.sh` passes on this tree (differential 13640 calls in four modes, forced hand-over 6 configurations, `tests/typed.sh`, `tests/osr.sh`, fuzz typed
+seeds 1-3 and boxed seeds 1-2, valgrind 13601 calls, 0 mismatches).  The earlier commit of this change (abbf922) was a work-in-progress snapshot made while that run
+was pending.  `bench/run.sh` wall time: `arr_mat` 18.7 ms interpreted, 3.4 ms compiled (5.5x; 2.05x before).

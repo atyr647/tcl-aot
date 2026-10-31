@@ -50,11 +50,11 @@ Wall-clock times vary; `bench/run.sh count` counts instructions instead:
 | array histogram | 7.4x |
 | counter through `upvar` | 6.6x |
 | `foreach` over a list | 5.5x |
+| matrix product over a 2-D array | 5.5x |
 | array sieve | 4.5x |
 | array Fibonacci | 3.3x |
 | loop calling a proc that uses an array of its own | 2.4x |
 | namespace array fill | 2.1x |
-| matrix product over a 2-D array | 1.8x |
 | `string length` / `string first` in a loop | 1.4x |
 
 On thirteen tcllib-based workloads (sha1, md5, regexp-heavy text splitting, JSON and CSV parsing, `struct::list`, ...) compiled code is between 0.7x and 1.2x

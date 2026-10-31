@@ -9,11 +9,9 @@ An item moves out of this file when it is measured, tested and written up there.
    with induction variables and trip counts would remove the overflow tests that cannot fire (a counter bounded by a loop condition, a non-negative `%`), and
    loop versioning would let one check at the entry cover the loop.  Wrap and bignum promotion must stay exact: every rule needs a differential and a fuzz
    case that fails without it.
-2. **String commands in loops** (`string length`, `string index`, `string first`: 1.4x).  The commands are called with boxed operands.  Direct length and index
-   for strings known to be ASCII, hoisting the length out of loops, and comparing lengths before bytes.  Care with the string representation that Tcl
-   caches in the object.
-3. **Keys of arrays.**  The matrix product (`set a($i,$j)`) is 1.8x because each key is built as a string.  Integer-pair keys for a native array whose every
-   access has the same shape (two integers and a fixed separator) would avoid the string; the table keeps the text for writing it out.
+2. **String commands in loops** (`string length`, `string first`: 1.4x).  Not built: the only way to call them faster is to call their C procedures directly,
+   which changes what a program can observe (decision 24).
+3. **Keys of arrays**: done for integer and literal keys (decision 25).
 4. **Calls into procs that need a frame** (global, namespace and `upvar` variables).  The interpreter's call costs about 900 instructions more than it
    needs to.  Building the call frame directly and running the compiled body in it, without the stub bytecode and its second dispatch, is possible with
    Tcl's exported frame functions but must reproduce argument binding, error messages and error info exactly.
