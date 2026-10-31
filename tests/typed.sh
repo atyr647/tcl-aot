@@ -87,3 +87,14 @@ echo "$out" | grep -E '::ta_sum/B ' | grep -q ' W' && { echo "typed: FAILED, the
 echo "$out" | grep -E '::ta_(bits|count)/[A-Za-z]*w ' && { echo "typed: FAILED, a bit-operation or loop-free-of-data proc got an adaptive variant"; exit 1; }
 grep -q "tbc_wp_" "$tmp/a.c" || { echo "typed: FAILED, no adaptive flag in the generated code"; exit 1; }
 echo "typed: a proc that accumulates over data has an adaptive tagged-number variant; bit-operation and counting procs have none: ok"
+
+# == and != (and the orderings) against a text literal, or between objects that need not be numbers, do not hand over at the comparison: typed code calls the generic compare
+cat > "$tmp/c.tcl" <<'TCL'
+proc tc_lit {x} { if {$x == "plain"} { return 1 }; if {$x != "left"} { return 2 }; return 3 }
+proc tc_two {a b} { if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return 1 }; return [expr {$a < $b}] }
+TCL
+out=$(TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/c.tcl" "$tmp/c.c" Cmptest 2>&1)
+if echo "$out" | grep -q -E '^DEADOP (eq|neq|lt|le|gt|ge) '; then echo "typed: FAILED, a comparison of objects hands over:"; echo "$out" | grep -E '^DEADOP (eq|neq|lt|le|gt|ge) '; exit 1; fi
+grep -q "tbc_cmpo(" "$tmp/c.c" || { echo "typed: FAILED, no generic comparison in the code of tc_lit"; exit 1; }
+echo "typed: comparisons of objects and of text literals stay in typed code: ok"
+

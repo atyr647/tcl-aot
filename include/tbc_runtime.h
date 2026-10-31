@@ -371,6 +371,10 @@ static int tbc_un(Tcl_Interp *interp, int op, Tcl_Obj **pa) {
 
 #define TBC_2P53 (((Tcl_WideInt) 1) << 53)
 
+/* a comparison of two objects as the interpreter does it (numbers as numbers, anything else as strings), from typed code: the operands are left as they are.  0 and *r
+ * 0 or 1, or 1 on an error (nothing consumed, no result left) */
+static int tbc_cmpo(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, int64_t *r);
+
 /* Returns 0 on success, nonzero on error (nothing consumed). */
 TBC_INLINE int tbc_bin(Tcl_Interp *interp, int op, Tcl_Obj **pa, Tcl_Obj *b) {
     Tcl_Obj *a = *pa;
@@ -850,6 +854,16 @@ static int tbc_parse_canon(const char *s, int len, int64_t *out) {
     if (neg) { if (v > (uint64_t) INT64_MAX + 1) return 0; *out = (int64_t) (0 - v); }
     else { if (v > (uint64_t) INT64_MAX) return 0; *out = (int64_t) v; }
     return 1;
+}
+static int tbc_cmpo(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, int64_t *r) {
+    Tcl_Obj *x = a;
+    Tcl_WideInt w = 0;
+    Tcl_IncrRefCount(a); Tcl_IncrRefCount(b);                      /* tbc_bin consumes its operands */
+    if (tbc_bin(interp, op, &x, b)) { Tcl_DecrRefCount(a); Tcl_DecrRefCount(b); Tcl_ResetResult(interp); return 1; }
+    if (Tcl_GetWideIntFromObj(NULL, x, &w) != TCL_OK) { Tcl_DecrRefCount(x); return 1; }
+    Tcl_DecrRefCount(x);
+    *r = (int64_t) w;
+    return 0;
 }
 TBC_INLINE int tbc_arg_int(Tcl_Obj *o, int64_t *w) {
     const Tcl_ObjType *t = o->typePtr;

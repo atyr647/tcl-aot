@@ -2017,7 +2017,33 @@ proc stepArithW {P pc op in d} {
     }
 }
 
+# A comparison (< <= > >= == !=) of anything that is not a number of the kinds typed code holds unboxed: Tcl compares two numbers as numbers and anything else as strings,
+# and the generic compare of the boxed code does that.  Typed code calls it for the operands as they are (tbc_cmpo) instead of handing over, and the result is an integer
+# like any comparison's.  Where the code above would hand over because an object is not an integer (a double, text, a list...), this is the path taken from there; a
+# comparison with an operand that has no numeric kind at all (a text literal) takes it directly.  Errors (none that a comparison can raise, an interrupted evaluation
+# aside) hand over as before, with nothing consumed.
 proc stepArith {P pc op in d} {
+    set r [stepArith0 $P $pc $op $in $d]
+    if {$op ni {lt le gt ge eq neq}} { return $r }
+    set pa [expr {$d-2}]; set pb [expr {$d-1}]
+    set ea [lindex $in $pa]; set eb [lindex $in $pb]
+    if {[kd $ea] ni {B I D W L} || [kd $eb] ni {B I D W L}} { return $r }
+    if {[kd $ea] ne "B" && [kd $eb] ne "B" && [dict get $r flow] ne "dead"} { return $r }
+    if {[dict get $r flow] ni {fall dead}} { return $r }
+    if {[kd [lindex [dict get $r out] end]] eq "U"} { return $r }
+    set base [lrange $in 0 [expr {$pa-1}]]
+    set rel ""; set pre ""; set post ""
+    foreach {p e v} [list $pa $ea ta_ $pb $eb tb_] {
+        if {[kd $e] eq "B"} { set ox s$p; append rel " Tcl_DecrRefCount(s$p);" } else { set ox $v; append pre " Tcl_Obj *$v = [boxe $P $p $e];"; append post " Tcl_DecrRefCount($v);" }
+        set O($v) $ox
+    }
+    set cu [string toupper $op]
+    set slow "\{$pre int64_t r_; int e_ = tbc_cmpo(interp, TBC_$cu, $O(ta_), $O(tb_), &r_);$post if (TBC_UNLIKELY(e_)) goto D$pc;$rel si$pa = r_; \}"
+    if {[dict get $r flow] eq "dead"} { return [R fall [list {*}$base I] $slow] }
+    set c [string map [list "goto D$pc;" "goto CS$pc;"] [dict get $r code]]
+    return [R fall [dict get $r out] "\{ $c goto CK$pc; CS$pc: ; $slow CK$pc: ; \}"]
+}
+proc stepArith0 {P pc op in d} {
     set pa [expr {$d-2}]; set pb [expr {$d-1}]
     set ea [lindex $in $pa]; set eb [lindex $in $pb]
     # `$x == {}` and `$x != ""`: the empty string is not a number, so the operands are compared as strings: a number held unboxed is never equal to it, any other

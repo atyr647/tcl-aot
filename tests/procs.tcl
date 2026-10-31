@@ -1684,3 +1684,12 @@ proc wa_scale {l k} { set r {}; foreach v $l { lappend r [expr {$v * $k - 1}] };
 proc wa_max {l} { set m [lindex $l 0]; foreach v $l { if {$v > $m} { set m $v } }; return $m }
 proc wa_poly {x} { set r 0; foreach c {3 -2 5} { set r [expr {$r * $x + $c}] }; return $r }
 proc wa_twice {l} { list [wa_sum $l] [wa_sum $l] }
+# comparisons of objects that are not integers (text, lists, doubles, bignums, empty) stay in typed code and take the interpreter's rule: numbers as numbers, anything else as strings
+proc cm_lit {x} { if {$x == "plain"} { return 1 }; if {$x != "left"} { return 2 }; return 3 }
+proc cm_order {x} { list [expr {$x < "m"}] [expr {$x >= "abc"}] [expr {"b" > $x}] }
+proc cm_pair {a b} { if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return [string equal $a $b] }; return -1 }
+proc cm_cnt {l key} { set n 0; foreach v $l { if {$v == $key} { incr n } }; return $n }
+proc cm_neq {l key} { set n 0; foreach v $l { if {$v != $key} { incr n } }; return $n }
+proc cm_min {l} { set m [lindex $l 0]; foreach v $l { if {$v < $m} { set m $v } }; return $m }
+proc cm_eqrec {a b} { if {[llength $a] != [llength $b]} { return 0 }; if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return [string equal $a $b] }; foreach i $a j $b { if {![cm_eqrec $i $j]} { return 0 } }; return 1 }
+proc cm_mixed {x n} { list [expr {$x == $n}] [expr {$n < $x}] [expr {$x != 2.5}] [expr {$x <= 0x10}] }

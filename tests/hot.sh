@@ -11,6 +11,7 @@ cat > "$tmp/p.tcl" <<'TCL'
 proc h_sum {l} { set s 0; foreach v $l { set s [expr {$s + $v}] }; return $s }
 proc h_ok {x} { return [expr {$x * 2}] }
 proc h_dict {d} { set n 0; dict for {k v} $d { incr n $v }; return $n }
+proc h_cmp {a b} { if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return 1 }; if {$a != "left"} { return 2 }; return 3 }
 proc h_two {n} { set x [dict create a 1]; dict for {k v} $x { }; return $n }
 TCL
 cat > "$tmp/run.tcl" <<'TCL'
@@ -19,6 +20,7 @@ source $::env(HOT_PROCS)
 set l {}; for {set i 0} {$i < 50} {incr i} { lappend l [expr {$i * 0.5}] }
 for {set k 0} {$k < 6} {incr k} { h_sum $l; h_ok $k; h_dict {a 1 b 2} }
 h_two 5; h_two abc; h_two 7
+foreach x {{a b c} abc 1.5 {} left {1 2}} { h_cmp $x $x; h_cmp $x abc }
 if {[info exists ::env(HOT_NONE)]} { puts "hot-command: [llength [info commands tbc::hot]]"; exit }
 set d [tbc::hot -dict]
 proc check {what cond} { if {![uplevel 1 [list expr $cond]]} { puts "FAILED: $what"; incr ::bad } }
@@ -38,6 +40,8 @@ tbc::hot -reset
 check "reset" {![dict exists [tbc::hot -dict] ::h_dict]}
 # the integer and the object variant of one proc hand over at the same instruction: one site, the hits of both
 check "sites of the variants of a proc are merged" {[llength [dict get $d ::h_two sites]] == 1 && [lindex [dict get $d ::h_two sites] 0 4] == 3}
+# == and != of objects that are not integers (text, lists, doubles) are done in typed code, by the generic comparison: no hand-over at them
+check "comparisons of text and lists stay typed" {[dict get $d ::h_cmp handovers] == 0 && [dict get $d ::h_cmp sites] eq ""}
 check "bad option" {[catch {tbc::hot -nosuch}]}
 puts "checks failed: $bad"
 TCL

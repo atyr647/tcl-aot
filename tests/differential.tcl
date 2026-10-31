@@ -276,6 +276,12 @@ set wal [list {1 2 3} {} {1.5 2.5} {1 2 3 4.5} {0.1 0.2 0.3} {7 8} {0x10 3} {1e3
 foreach l $wal { lappend calls [list wa_sum $l] [list wa_mean $l] [list wa_max $l] [list wa_twice $l] [list wa_scale $l 2] [list wa_scale $l 0.5] [list wa_dot $l $l] }
 foreach x {0 1 2 -3 0.5 2.5 abc 1e10 9223372036854775807} { lappend calls [list wa_poly $x] }
 lappend calls {list [wa_sum {1 2 3}] [wa_sum {1.5 2}] [wa_sum {4 5}] [wa_sum {0.25 0.25}] [wa_sum {7}]}
+# comparisons of objects that are not integers
+set cmv {0 1 -1 2.5 1.0 1e3 0x10 010 " 5" abc plain left m {} {a b} {1 2} {{a b} c} 100000000000000000000 NaN Inf -0.0 1e400 true {a\ b} "\u00e9" "\u00e9a"}
+foreach x $cmv { lappend calls [list cm_lit $x] [list cm_order $x] [list cm_cnt [list 1 a 1.0 $x abc {} $x] $x] [list cm_neq [list 1 a 1.0 $x abc {} $x] $x] [list cm_min [list $x 3 abc 2.5 $x]] }
+# (cm_eqrec is the recursion of struct::list's equality: with NaN, which is not equal to itself, it never ends, in the interpreter as well)
+foreach x $cmv { foreach y {0 1 2.5 abc {} 100000000000000000000 0x10} { lappend calls [list cm_pair $x $y] [list cm_mixed $x $y]; if {$x ne "NaN"} { lappend calls [list cm_eqrec $x $y] [list cm_eqrec [list $x $y] [list $x $y]] [list cm_eqrec [list $x $y] [list $y $x]] } } }
+lappend calls {list [cm_cnt {1 2 3} 2] [cm_cnt {a b a} a] [cm_cnt {1.0 1 01} 1] [cm_neq {a b a} a] [cm_lit plain] [cm_lit left] [cm_lit x]}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}
