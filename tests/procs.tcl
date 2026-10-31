@@ -1625,3 +1625,28 @@ proc dn_list {l n} {
     for {set i 0} {$i < $n} {incr i} { set A [expr {$A + $B + $i}]; set B [expr {$B - 1}] }
     return [list $A $B]
 }
+
+# calls of built-ins that need no frame, made through their C procedures when nothing the interpreter's dispatch would do can matter
+proc pj_join {l} { set r {}; for {set i 0} {$i < 3} {incr i} { append r [join $l ,] ; append r [llength [split $r ,]] }; return $r }
+proc pj_str {s} { set n 0; for {set i 0} {$i < 4} {incr i} { incr n [string first o $s]; append s [string range $s 0 1]; incr n [string length [string trim " $s "]] }; return [list $n $s [string toupper $s] [string match *o* $s]] }
+proc pj_fmt {n} { set r {}; for {set i 0} {$i < $n} {incr i} { lappend r [format %03d $i] [lreplace {a b c} 1 1 $i] [lsearch -exact {a b c} c] }; return $r }
+
+# string first / last / index / range: the one-byte-character fast path and everything that is left to the command
+proc sf_first {n h} { string first $n $h }
+proc sf_last {n h} { string last $n $h }
+proc sf_index {s i} { string index $s $i }
+proc sf_range {s a b} { string range $s $a $b }
+proc sf_lit {s} { list [string range $s 1 3] [string range $s 0 0] [string range $s 2 1] [string range $s -2 2] [string range $s 1 end] [string range $s end-1 end] [string range $s 3 99] [string index $s 0] [string index $s 2] [string index $s 99] [string index $s -1] [string index $s end] [string first l $s] [string last l $s] [string first ll $s] [string first {} $s] }
+proc sf_loop {s} {
+    set n [string length $s]; set r {}; set pos 0
+    for {set i 0} {$i < $n} {incr i} { lappend r [string index $s $i] }
+    while {[set p [string first o $s $pos]] >= 0} { lappend r $p; set pos [expr {$p + 1}] }
+    for {set i 0} {$i < $n} {incr i} { lappend r [string range $s $i [expr {$i + 1}]] [string first [string index $s $i] $s] [string last [string index $s $i] $s] }
+    return $r
+}
+
+# == and != against the empty string (the idiom `if {$x == {}}`)
+proc em_eq {x} { list [expr {$x == {}}] [expr {$x != ""}] [expr {{} == $x}] [expr {"" != $x}] }
+proc em_loop {l} { set n 0; foreach v $l { if {$v == {}} { continue }; if {$v != ""} { incr n } }; return $n }
+proc em_num {n} { set c 0; for {set i 0} {$i < $n} {incr i} { if {$i == {}} { incr c 100 }; if {$i != ""} { incr c } }; return $c }
+proc em_dbl {x} { set d [expr {$x * 1.5}]; list [expr {$d == ""}] [expr {$d != {}}] }

@@ -478,3 +478,37 @@ code, and the coverage counters show the check at the store failing for the valu
 Checked: the full `tests/run.sh` passes on this tree, run from a copy of it (differential 13680 calls in four modes, forced hand-over 6 configurations, `tests/typed.sh`,
 `tests/osr.sh`, fuzz typed seeds 1-3 and boxed seeds 1-2, valgrind 13641 calls, 0 mismatches); `tests/pristine.sh` passes in the tree itself (it compares the paths the
 Tcl build was made from, which a copy with a linked `build/` cannot satisfy).  Decision 26's commit (93e4fad) was a work-in-progress snapshot made while that run was pending.
+
+## 28. Text and data: calls of built-ins, one-byte strings, `== {}`, and what the census of tcllib modules found
+
+Asked for: every text and data optimisation that has no downside.  What was built, what was measured, what was left.
+
+* **Calling a built-in's C procedure without the interpreter's dispatch.**  Measured on `string first o $s`: 943 instructions through `Tcl_EvalObjv`, 454 calling the procedure.
+  Two places made such calls.
+  - The executor's own instructions for `string first/last/index/range/trim/match/...`, `lrange` and `regexp` (cmdOpSpec): typed and boxed code called the command by name
+    each time.  Each call site now pins the command the first time it runs and calls its procedure while the command is that one (not deleted, epoch unchanged, not a Tcl
+    proc, not an NR command); anything else, and every error, is the dispatch by name as before.  In this Tcl a replaced `string first` is honoured by the interpreter (it
+    recompiles), and the by-name fallback does the same (`pj_str` in the differential test replaces it and puts it back).
+  - A call of a pure built-in as a command (`join`, `split`, `format`, `lreplace`, `lsearch`, ...) from typed code.  The module pins the commands of its guard
+    (decision 19) and calls the procedure when nothing the dispatch does could matter: interpreter deleted, script cancelled or unwinding, async handler pending, a command
+    limit set, the nesting limit reached, execution traces on the command or the interpreter, the command deleted, a proc or an NR command.  Otherwise, and on an error, the
+    call is made through the interpreter (the commands are pure).  The command count is kept.  The test makes the trace, limit and replacement cases (`pj_*`) and fails
+    when the trace check is removed.  Measured on a loop of `format`, `lreplace`, `lsearch`: 1.01x the interpreter before, 1.18x now.
+* **`string first`, `last`, `index`, `range` on one-byte characters** are done in place (`tbc_s_first` and the others) when every operand is a plain string whose character
+  count equals its byte count (O(1) once Tcl has counted them, as the command does); numbers, lists, byte arrays, non-ASCII text, an empty needle, and an index outside the
+  32-bit range (Tcl raises an error for it) go to the command.  The result of `first` and `last` stays an unboxed integer in typed code.  The differential test has 1200 calls
+  over ASCII, non-ASCII, NUL, byte arrays, numbers, lists and every index form (`sf_*`), and found the index range on the first run.  `str_ops` (bench): 112M instructions for
+  100000 iterations before this work, 83M with the pinned call, 38M with the in-place path.
+* **`$x == {}` and `$x != ""`** handed over to boxed code at the comparison (the empty string is not a number, so it was not an operand of an integer comparison).  The operands
+  are compared as strings, so a number held unboxed is never equal to it and any other value is when its string form is empty.  This is the most common comparison in library
+  code; `math::statistics::BasicStats` handed over at it.  `tests/typed.sh` fails without it.
+* **Census of eleven more tcllib modules** (instruction counts net of start-up, interpreter / compiled, results equal): md4 5.5x, rc4 3.3x, blowfish 2.7x, numtheory 2.0x,
+  soundex 1.23x, math::statistics 1.14x, math::linearalgebra 1.02x, base32 1.00x, yaml 0.97x.  The earlier census had numtheory at 0.75x and statistics at 0.91x.
+* **Not built, and why.**
+  - Floating-point data in lists.  Typed code treats an object operand of an arithmetic instruction as an integer and hands over when it is not one; for a list of floating-point
+    numbers (`math::statistics`, `math::linearalgebra`) that is the first addition of the first call, and the rest runs boxed.  The fix is a number kind that carries its own
+    tag (integer or double) through expressions and variables; it touches every arithmetic instruction, the variable kinds and the conversions at every boundary.  It is the next
+    item on the roadmap, with this census as its measure.
+  - `lsort -command` with a compiled comparator.  The interpreter evaluates the comparator as a script for each comparison; routing it to the compiled procedure needs a command of
+    ours to stand in for the proc in the script (which shows in the error info of a failing comparator) or a copy of Tcl's merge sort.  Not built: the error text would differ.
+  - A native regexp matcher: see below if the section is present.

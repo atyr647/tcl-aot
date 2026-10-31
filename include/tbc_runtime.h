@@ -681,6 +681,67 @@ TBC_SHARED int tbc_depth, tbc_maxdepth;
 #define TBC_2P53 (((Tcl_WideInt) 1) << 53)
 
 TBC_INLINE Tcl_Obj *tbc_ref(Tcl_Obj *o) { Tcl_IncrRefCount(o); return o; }
+/* `string first`, `string last`, `string index`, `string range` for operands whose characters are all one byte (ASCII), in place of the command (the command converts
+ * its operands to Unicode arrays).  The operand must be a plain string (no number, list or byte array: their own conversions apply) whose character count equals its
+ * byte count, which is O(1) once Tcl has counted them (the command does the same count).  Each function returns 0, having done nothing, for anything else; the caller
+ * then makes the call.  The semantics are those of StringFirstCmd, StringLastCmd, StringIndexCmd and StringRangeCmd (tclCmdMZ.c): the needle must not be empty and
+ * not longer than the haystack; an index outside the string gives the empty string; first is raised to 0 and last lowered to the end for a range. */
+TBC_INLINE const char *tbc_ascii(Tcl_Obj *o, int *len) {
+    const char *s;
+    if (o->typePtr && o->typePtr != tbcString) return NULL;
+    s = Tcl_GetStringFromObj(o, len);
+    return Tcl_GetCharLength(o) == *len ? s : NULL;
+}
+static int tbc_s_first(Tcl_Obj *needle, Tcl_Obj *hay, int64_t *out) {
+    int nl, hl;
+    const char *n = tbc_ascii(needle, &nl), *h = n ? tbc_ascii(hay, &hl) : NULL;
+    if (!h) return 0;
+    *out = -1;
+    if (nl > 0 && nl <= hl) {
+        const char *p = h, *end = h + hl - nl + 1;
+        while (p < end && (p = (const char *) memchr(p, n[0], (size_t) (end - p)))) {
+            if (memcmp(p, n, (size_t) nl) == 0) { *out = p - h; break; }
+            p++;
+        }
+    }
+    return 1;
+}
+static int tbc_s_last(Tcl_Obj *needle, Tcl_Obj *hay, int64_t *out) {
+    int nl, hl;
+    const char *n = tbc_ascii(needle, &nl), *h = n ? tbc_ascii(hay, &hl) : NULL;
+    if (!h) return 0;
+    *out = -1;
+    if (nl > 0 && nl <= hl) {
+        const char *p;
+        for (p = h + hl - nl; p >= h; p--) if (*p == n[0] && memcmp(p, n, (size_t) nl) == 0) { *out = p - h; break; }
+    }
+    return 1;
+}
+/* (the one-character strings are shared: an object that something may change in place is never shared, so a reference count above one is all that is needed) */
+static Tcl_Obj *tbc_chr1[128];
+static int tbc_s_index(Tcl_Obj *s, int64_t i, Tcl_Obj **out) {
+    int len;
+    const char *str = tbc_ascii(s, &len);
+    if (!str) return 0;
+    if (i < 0 || i >= len) { *out = tbcEmpty; Tcl_IncrRefCount(tbcEmpty); return 1; }
+    {
+        unsigned char c = (unsigned char) str[i];
+        if (!tbc_chr1[c]) { tbc_chr1[c] = Tcl_NewStringObj((const char *) &c, 1); Tcl_IncrRefCount(tbc_chr1[c]); }
+        *out = tbc_chr1[c]; Tcl_IncrRefCount(*out);
+    }
+    return 1;
+}
+static int tbc_s_range(Tcl_Obj *s, int64_t first, int64_t last, Tcl_Obj **out) {
+    int len;
+    const char *str = tbc_ascii(s, &len);
+    if (!str) return 0;
+    if (first < 0) first = 0;
+    if (last >= len) last = len - 1;
+    if (last >= first) *out = Tcl_NewStringObj(str + first, (int) (last - first + 1));
+    else *out = tbcEmpty;
+    Tcl_IncrRefCount(*out);
+    return 1;
+}
 /* an owned string object (one reference) of a key held as text in a buffer of typed code */
 TBC_INLINE Tcl_Obj *tbc_newkey(const char *s, int n) { Tcl_Obj *o = Tcl_NewStringObj(s, n); Tcl_IncrRefCount(o); return o; }
 TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) { Tcl_Obj *o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); return o; }

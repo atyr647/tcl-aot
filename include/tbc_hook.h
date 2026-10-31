@@ -913,12 +913,32 @@ static int tbc_tebc(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, Tcl_Obj 
 
 /* ---- a command the interpreter's own instruction implements (string operations, bitwise operators...), called as a script would call it.
  * The result is referenced; on error nothing is consumed.  A NaN result is an error in an expression operator (nanchk). */
-static int tbc_cmdcall(Tcl_Interp *interp, Tcl_Obj *nm, int n, Tcl_Obj **args, int nanchk, Tcl_Obj **out) {
+/* The executor does `string first`, `string range`, `lrange`, ... in place (no command is dispatched, nothing is counted or traced); typed and boxed code call the command.
+ * A call site pins the built-in the first time it runs (the global command of that name, its C procedure) and calls the procedure itself while the command is
+ * still that one: not deleted, not renamed or imported over (its epoch), not a Tcl proc, not an NR command.  Anything else, and every error, is the dispatch through
+ * Tcl_EvalObjv by name, as before. */
+typedef struct { Command *c; int epoch; int state; } TbcPin;
+static void tbc_pin_resolve(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm) {
+    Command *c = (Command *) Tcl_FindCommand(interp, Tcl_GetString(nm), NULL, TCL_GLOBAL_ONLY);
+    pin->state = 1;
+    if (!c || c->nreProc || !c->objProc || c->objProc == TclObjInterpProc) return;
+    c->refCount++;						/* (kept alive, as Tcl does for the commands it caches) */
+    pin->c = c; pin->epoch = c->cmdEpoch;
+}
+static int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_Obj **args, int nanchk, Tcl_Obj **out) {
     Tcl_Obj *ov[10], *r;
+    Command *c;
     int i, rc;
     ov[0] = nm;
     for (i = 0; i < n; i++) ov[i + 1] = args[i];
-    rc = Tcl_EvalObjv(interp, n + 1, ov, TCL_EVAL_NOERR);
+    if (TBC_UNLIKELY(!pin->state)) tbc_pin_resolve(interp, pin, nm);
+    c = pin->c;
+    if (c && !TBC_UNLIKELY((c->flags & CMD_IS_DELETED) || c->cmdEpoch != pin->epoch)) {
+        Tcl_ResetResult(interp);
+        rc = c->objProc(c->objClientData, interp, n + 1, ov);
+    } else {
+        rc = Tcl_EvalObjv(interp, n + 1, ov, TCL_EVAL_NOERR);
+    }
     if (rc != TCL_OK) return rc;
     r = tbc_takeres(interp);
     if (nanchk && r->typePtr == tbcDouble && r->internalRep.doubleValue != r->internalRep.doubleValue) {
@@ -929,6 +949,7 @@ static int tbc_cmdcall(Tcl_Interp *interp, Tcl_Obj *nm, int n, Tcl_Obj **args, i
     *out = r;
     return TCL_OK;
 }
+#define tbc_cmdcall(interp, nm, n, args, nanchk, out) tbc_opcall(interp, ({ static TbcPin pin_; &pin_; }), nm, n, args, nanchk, out)
 #define TBC_NM(str) ({ static Tcl_Obj *nm_; if (!nm_) { nm_ = Tcl_NewStringObj(str, -1); Tcl_IncrRefCount(nm_); } nm_; })
 
 /* dict incr var key imm, as INST_DICT_INCR_IMM does it; the result is the dict (not referenced), NULL on error */
@@ -1156,6 +1177,28 @@ static int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
         if (TBC_UNLIKELY(g->bad[di] || !ns || !c || ns->nsId != g->nsid[dp->ns] || ns->cmdRefEpoch != g->cre[dp->ns] || ns->resolverEpoch != g->rse[dp->ns]
                 || c->cmdEpoch != g->expEp[dp->name] || (c->flags & CMD_IS_DELETED))) return tbc_guard_slow(interp, e);
     }
+    return 1;
+}
+
+/* the pinned command of built-in number i of the module's guard (NULL: it is a proc of the program, or was not found) */
+static Command *tbc_guard_cmd(const TbcGuard *g, int i) { return g->exp[i]; }
+
+/* A pure built-in's C procedure called without the interpreter's dispatch (about 490 of the 943 instructions of `string first o $s`).  Returns 1 when the call was made
+ * and succeeded (the result is the interpreter's result), 0 when the caller must make the call through Tcl_EvalObjv: the dispatch does more than call the procedure, and
+ * every case where one of those things could matter is left to it, so the observable behaviour is the same (the command count is kept):
+ *   - the interpreter deleted, a script cancelled or unwinding, a pending async handler, resource limits set, the stack of nested evaluations at its limit
+ *     (TclInterpReady, TclLimitExceeded, the checks in NRCommand);
+ *   - execution traces on the command or on the interpreter (EvalObjvCore);
+ *   - the command deleted since the module pinned it, a procedure that uses the NR trampoline, or a Tcl proc.
+ * An error is not reported from here: the call is made again through the interpreter (the built-ins this is used for are pure), which raises it with its error info. */
+static int tbc_direct(Tcl_Interp *interp, Command *c, int objc, Tcl_Obj *const objv[]) {
+    Interp *iPtr = (Interp *) interp;
+    if (TBC_UNLIKELY(!c || c->nreProc || !c->objProc || c->objProc == TclObjInterpProc || (c->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return 0;
+    if (TBC_UNLIKELY((iPtr->flags & (DELETED | CANCELED | TCL_CANCEL_UNWIND)) || iPtr->execEnvPtr->rewind || iPtr->tracePtr || iPtr->limit.active || iPtr->limit.exceeded
+            || iPtr->numLevels + 1 > iPtr->maxNestingDepth || TclAsyncReady(iPtr))) return 0;
+    Tcl_ResetResult(interp);
+    if (TBC_UNLIKELY(c->objProc(c->objClientData, interp, objc, objv) != TCL_OK)) return 0;
+    iPtr->cmdCount++;
     return 1;
 }
 

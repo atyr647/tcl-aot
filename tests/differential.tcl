@@ -232,6 +232,29 @@ foreach {a b} {5 9 0 0 -7 3 1.5 2 abc 1 {} 4 99999999999999999999 1 0x10 010 922
     lappend calls "array set ::dnx {A $a B $b}; dn_up ::dnx 20" "array set ::dnx {A $a B $b}; dn_up ::dnx 0" "namespace eval dnns {array set t1 {A $a B $b}}; dnns::f t1 10" "dn_list {$a $b} 15"
 }
 lappend calls {dn_up nosuchvar 3} {dnns::f nosuchvar 3} {dn_list {} 3} {dn_list {1} 3}
+# built-ins called through their C procedures: the cases the gate leaves to the interpreter's dispatch
+foreach a {{a b c} {} x {{a b} c}} { lappend calls [list pj_join $a] }
+foreach a {hello {} o foo\ bar é€o} { lappend calls [list pj_str $a] }
+foreach n {0 1 5} { lappend calls [list pj_fmt $n] }
+lappend calls {set ::trj {}; trace add execution join enter {lappend ::trj}; set r [pj_join {a b}]; trace remove execution join enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add execution ::tcl::string::first enter {lappend ::trj}; set r [pj_str hello]; trace remove execution ::tcl::string::first enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set r [pj_join {a b}]; interp limit {} command -value 100000000; set r2 [pj_join {a b}]; interp limit {} command -value {}; list $r $r2}
+lappend calls {rename join join_x; proc join {args} {return JOINED}; set r [pj_join {a b}]; rename join {}; rename join_x join; list $r [pj_join {a b}]}
+lappend calls {rename ::tcl::string::first ::tcl::string::first_x; proc ::tcl::string::first {args} {return 7}; set r [pj_str hello]; rename ::tcl::string::first {}; rename ::tcl::string::first_x ::tcl::string::first; list $r [pj_str hello]}
+lappend calls {pj_join {a b}} {pj_str hello}
+# string first / last / index / range
+set sfs [list hello {} o ll "hello world" "\u00e9\u20acx" [format a%cb 0] [binary format c3 {65 66 67}] 12345 0x1F " 5" {a b c} xxxxxxxxxxxx 1.5 "tab\there" "\u00e9" "x\u00e9y"]
+set sfi {0 1 2 5 -1 -9 end end-1 end+1 abc 1.5 2147483647 2147483648 9223372036854775807 -2147483649 " 1" 0x1 1+1 {}}
+foreach h $sfs { foreach n $sfs { lappend calls [list sf_first $n $h] [list sf_last $n $h] } }
+foreach h $sfs { foreach i $sfi { lappend calls [list sf_index $h $i] } }
+foreach h {hello {} "\u00e9\u20acx" 12345} { foreach a {0 1 -1 end 2 abc 99 2147483648} { foreach b {0 2 end 99 -1 abc end-1 9223372036854775807} { lappend calls [list sf_range $h $a $b] } } }
+foreach h $sfs { lappend calls [list sf_lit $h] [list sf_loop $h] }
+# == and != against the empty string
+foreach x {{} 0 1 -1 abc 1.5 0x10 " " "\u00e9" {a b} {{}} 9223372036854775807 NaN Inf} { lappend calls [list em_eq $x] }
+foreach l {{} {a {} b} {1 2 {}} {{} {} {}} {0 0.0 abc}} { lappend calls [list em_loop $l] }
+foreach n {0 1 5} { lappend calls [list em_num $n] }
+foreach x {0 1 2.5 -3} { lappend calls [list em_dbl $x] }
+lappend calls {em_eq} {em_eq 1 2}
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}

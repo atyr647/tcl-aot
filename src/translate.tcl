@@ -834,6 +834,7 @@ proc edgec {P from to} {
     return $c
 }
 set boxMode copy
+set DCNAMES {}
 # code boxing the typed locals that a fall-back needs: the live ones, and the vectors that slots of `slots` are views of
 proc boxLocals {key live slots} {
     global VK
@@ -1298,7 +1299,13 @@ proc stepT {key pc in} {
         }
         dictFirst - dictNext - unsetScalar { return $dead }
         listIn - listNotIn - strindex - strfind - strrfind - strrange - strreplace - strcaseUpper - strcaseLower - strcaseTitle - strtrim - strtrimLeft -
-        strtrimRight - strmatch - regexp - strrangeImm - listRangeImm - lindexMulti { return [stepCmdOp $key $pc $in $d $op $a] }
+        strtrimRight - strmatch - regexp - strrangeImm - listRangeImm - lindexMulti {
+            if {$op in {strfind strrfind strindex strrange strrangeImm}} {
+                set r [stepStrFast $key $pc $in $d $op $a]
+                if {$r ne ""} { return $r }
+            }
+            return [stepCmdOp $key $pc $in $d $op $a]
+        }
         jumpTable {
             lassign $a n tgts map
             set e [lindex $in $top]
@@ -1504,6 +1511,84 @@ proc stepT {key pc in} {
         }
         default { return $dead }
     }
+}
+
+# string first / last / index / range on one-byte characters, in place of the command (tbc_s_first and the others in tbc_runtime.h; they decline for any operand that
+# is not a plain ASCII string, and then the command is called as before).  "" when the operands are of a kind this does not handle.
+proc stepStrFast {key pc in d op a} {
+    global PI
+    lassign [keysplit $key] P sig
+    lassign [cmdOpSpec $op $a] n name pre post
+    set q [expr {$d - $n}]
+    set below [lrange $in 0 [expr {$q-1}]]
+    set operands [lrange $in $q end]
+    foreach e $operands { if {[kd $e] in {A N M Q K U}} { return "" } }
+    # integer operands (indices): {ok value} for a number held unboxed or an object that is an integer; "" for anything else
+    set ints {}
+    switch $op {
+        strfind - strrfind { set nint 0 }
+        strindex { set nint 1 }
+        strrange { set nint 2 }
+        strrangeImm {
+            set nint 0
+            foreach w [list [lindex $a 0] [lindex $a 1]] {
+                if {![regexp {^\.(-?\d+)$} $w -> v] || $v > 2147483647 || $v < -2147483648} { return "" }
+                lappend ints [list 1 "INT64_C($v)"]
+            }
+        }
+    }
+    set sk [expr {$op eq "strrangeImm" ? $q : $q + 1}]
+    if {$op in {strindex strrange}} {
+        for {set k [expr {$q + 1}]} {$k < $d} {incr k} {
+            set e [lindex $in $k]
+            switch [kd $e] {
+                I { lappend ints [list "si$k == (int32_t) si$k" si$k] }
+                B { lappend ints [list "tbc_isint(s$k) && tbc_wide(s$k) == (int32_t) tbc_wide(s$k)" "tbc_wide(s$k)"] }
+                default { return "" }
+            }
+        }
+    }
+    # boxing: the string operands always; an integer operand only where the command has to be called
+    set pre ""; set slots {}; set rel ""
+    set strops [expr {$op in {strfind strrfind} ? 2 : 1}]
+    for {set k $q} {$k < $q + $strops} {incr k} { append pre [boxc $P $k [lindex $in $k]] " "; lappend slots s$k; append rel " Tcl_DecrRefCount(s$k);" }
+    set boxint ""; set relint ""
+    for {set k [expr {$q + $strops}]} {$k < $d} {incr k} {
+        set e [lindex $in $k]
+        append boxint [boxc $P $k $e] " "; lappend slots s$k
+        if {[kd $e] eq "B"} { append relint " Tcl_DecrRefCount(s$k);" } else { append relint " Tcl_DecrRefCount(s$k);" }
+    }
+    # (a B integer operand is released in both branches; an I operand has no object in the fast branch)
+    set relfastint ""
+    for {set k [expr {$q + $strops}]} {$k < $d} {incr k} { if {[kd [lindex $in $k]] eq "B"} { append relfastint " Tcl_DecrRefCount(s$k);" } }
+    set st [list {*}$below {*}[lrepeat $n B]]
+    set okc [join [lmap i $ints {lindex $i 0}] " && "]
+    set vals [lmap i $ints {lindex $i 1}]
+    set av "{ [join $slots {, }], NULL }"
+    set callopts "Tcl_Obj *av_\[[expr {[llength $slots] + 1}]\] = $av, *r_;"
+    set fail "goto [fl $key $st]"
+    set s0 s$q
+    switch $op {
+        strfind - strrfind {
+            set fn [expr {$op eq "strfind" ? "tbc_s_first" : "tbc_s_last"}]
+            set c "$pre\{ int64_t m_; if (${fn}(s$q, s[expr {$q+1}], &m_)) \{$rel si$q = m_; \} else \{ $callopts if (tbc_cmdcall(interp, TBC_NM([cstring $name]), 2, av_, 0, &r_)) $fail;$rel \{ Tcl_WideInt w_ = 0; (void) Tcl_GetWideIntFromObj(NULL, r_, &w_); Tcl_DecrRefCount(r_); si$q = w_; \} \} \}"
+            return [R fall [list {*}$below I] $c]
+        }
+        strindex - strrange - strrangeImm {
+            set call [expr {$op eq "strindex" ? "tbc_s_index(s$q, [lindex $vals 0], &r_)" : "tbc_s_range(s$q, [lindex $vals 0], [lindex $vals 1], &r_)"}]
+            set cond [expr {$okc eq "" ? $call : "$okc && $call"}]
+            set callslots [expr {$op eq "strrangeImm" ? "tbc_cmdcall(interp, TBC_NM([cstring $name]), 1, av_, 0, &r_)" : "tbc_cmdcall(interp, TBC_NM([cstring $name]), [llength $slots], av_, 0, &r_)"}]
+            if {$op eq "strrangeImm"} {
+                # (the indices are words of the command: they are not stack slots)
+                set av "{ s$q, TBC_NM([cstring [lindex $post 0]]), TBC_NM([cstring [lindex $post 1]]), NULL }"
+                set callopts "Tcl_Obj *av_\[4\] = $av, *r_;"
+                set callslots "tbc_cmdcall(interp, TBC_NM([cstring $name]), 3, av_, 0, &r_)"
+            }
+            set c "$pre\{ Tcl_Obj *r_ = NULL; if ($cond) \{$rel$relfastint s$q = r_; \} else \{ $boxint$callopts if ($callslots) $fail;$rel$relint s$q = r_; \} \}"
+            return [R fall [list {*}$below B] $c]
+        }
+    }
+    return ""
 }
 
 # An instruction the executor implements as a call of a command that uses no variable (cmdOpSpec): the operands are boxed and the command is called,
@@ -1787,6 +1872,20 @@ proc operandOf {P pc p e} {
 proc stepArith {P pc op in d} {
     set pa [expr {$d-2}]; set pb [expr {$d-1}]
     set ea [lindex $in $pa]; set eb [lindex $in $pb]
+    # `$x == {}` and `$x != ""`: the empty string is not a number, so the operands are compared as strings: a number held unboxed is never equal to it, any other
+    # value is when its string form is empty
+    if {$op in {eq neq}} {
+        foreach {pe pk} [list $pb $pa $pa $pb] {
+            set le [lindex $in $pe]; set oe [lindex $in $pk]
+            if {[kd $le] ne "L" || [lindex $::PI($P,lits) [lt $le]] ne "" || [kd $oe] ni {I D B}} continue
+            set base [lrange $in 0 [expr {$pa-1}]]
+            set want [expr {$op eq "eq" ? 1 : 0}]
+            if {[kd $oe] eq "B"} {
+                return [R fall [list {*}$base I] "\{ int l_; (void) Tcl_GetStringFromObj(s$pk, &l_); Tcl_DecrRefCount(s$pk); si$pa = (l_ == 0) == $want; \}"]
+            }
+            return [R fall [list {*}$base I] "si$pa = [expr {$op eq "eq" ? 0 : 1}];"]
+        }
+    }
     lassign [operandOf $P $pc $pa $ea] ca ga xa
     lassign [operandOf $P $pc $pb $eb] cb gb xb
     set base [lrange $in 0 [expr {$pa-1}]]
@@ -2062,7 +2161,14 @@ proc stepInvoke {key pc in d n} {
     set st [list {*}$below {*}[lrepeat $n B]]
     # (the math functions are Tcl's own while tbc_mf_ok says so; otherwise the boxed code makes the call)
     set guard [expr {[isMathBuiltin $nm0] ? "if (TBC_UNLIKELY(!tbc_mf_ok)) goto D$pc; " : ""}]
-    set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp); \}"
+    # (a built-in that the module has pinned is called through its C procedure when nothing the interpreter's dispatch would do can matter: tbc_direct)
+    set call "Tcl_EvalObjv(interp, $n, ov_, TBC_EV)"
+    if {![isMathBuiltin $nm0]} {
+        set dcid dc_[cident $nm0]
+        dict set ::DCNAMES $nm0 $dcid
+        set call "(tbc_direct(interp, tbc_$dcid, $n, ov_) ? TCL_OK : $call)"
+    }
+    set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = $call; if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp); \}"
     return [R fall [list {*}$below B] $c]
 }
 
@@ -2351,6 +2457,33 @@ proc cmdOpSpec {op a} {
     return ""
 }
 
+# the one-byte-character fast path of string first / last / index / range in boxed code (see stepStrFast): the start of an if-statement whose else branch is the
+# call of the command, or "" for any other instruction
+proc gStrFast {d op a} {
+    set q0 s[expr {$d-1}]
+    switch $op {
+        strfind - strrfind {
+            set sa s[expr {$d-2}]; set sb s[expr {$d-1}]
+            set fn [expr {$op eq "strfind" ? "tbc_s_first" : "tbc_s_last"}]
+            return "\{ int64_t m_; if (${fn}($sa, $sb, &m_)) \{ Tcl_DecrRefCount($sa); Tcl_DecrRefCount($sb); $sa = tbc_newint(m_); \} "
+        }
+        strindex {
+            set ss s[expr {$d-2}]; set si s[expr {$d-1}]
+            return "\{ Tcl_Obj *r_; if (tbc_isint($si) && tbc_wide($si) == (int32_t) tbc_wide($si) && tbc_s_index($ss, tbc_wide($si), &r_)) \{ Tcl_DecrRefCount($ss); Tcl_DecrRefCount($si); $ss = r_; \} "
+        }
+        strrange {
+            set ss s[expr {$d-3}]; set s1 s[expr {$d-2}]; set s2 s[expr {$d-1}]
+            return "\{ Tcl_Obj *r_; if (tbc_isint($s1) && tbc_wide($s1) == (int32_t) tbc_wide($s1) && tbc_isint($s2) && tbc_wide($s2) == (int32_t) tbc_wide($s2) && tbc_s_range($ss, tbc_wide($s1), tbc_wide($s2), &r_)) \{ Tcl_DecrRefCount($ss); Tcl_DecrRefCount($s1); Tcl_DecrRefCount($s2); $ss = r_; \} "
+        }
+        strrangeImm {
+            foreach w [list [lindex $a 0] [lindex $a 1]] { if {![regexp {^\.(-?\d+)$} $w -> v] || $v > 2147483647 || $v < -2147483648} { return "" } }
+            regexp {^\.(-?\d+)$} [lindex $a 0] -> v1; regexp {^\.(-?\d+)$} [lindex $a 1] -> v2
+            return "\{ Tcl_Obj *r_; if (tbc_s_range($q0, INT64_C($v1), INT64_C($v2), &r_)) \{ Tcl_DecrRefCount($q0); $q0 = r_; \} "
+        }
+    }
+    return ""
+}
+
 # a command called in place of an instruction: the n topmost stack slots are its arguments (after the optional leading words pre and before the
 # trailing words post, given as index strings), the result replaces them
 proc gCmd {d n name nan {pre {}} {post {}}} {
@@ -2592,6 +2725,8 @@ proc genG {key pc d} {
         listIn - listNotIn - strindex - strfind - strrfind - strrange - strreplace - strcaseUpper - strcaseLower - strcaseTitle - strtrim - strtrimLeft -
         strtrimRight - strmatch - regexp - strrangeImm - listRangeImm - lindexMulti {
             lassign [cmdOpSpec $op $a] n name pre post
+            set fast [gStrFast $d $op $a]
+            if {$fast ne ""} { return "$fast else [gCmd $d $n $name 0 $pre $post] \}" }
             return [gCmd $d $n $name 0 $pre $post]
         }
         concatStk {
@@ -3325,7 +3460,7 @@ if {$typedMode} {
     }
 }
 if {[info commands ::tbc::fingerprint] eq ""} { error "translate.tcl must run under tcl-aot-sh, a tclsh with tbc::fingerprint linked in (tools/translator-shell.c)" }
-set out "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: [llength $translatable] procs, [llength $variants] typed variants.\n * Do not edit. */\n#include \"tbc_hook.h\"\n\n"
+set out "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: [llength $translatable] procs, [llength $variants] typed variants.\n * Do not edit. */\n#include \"tbc_hook.h\"\n\n/*@@DC@@*/\n"
 foreach P $translatable {
     set cid [cident $P]
     append out "static int tbc_valid_$cid = 0;\n"
@@ -3447,6 +3582,11 @@ if {[llength $refusedProcs]} {
 set regId 0
 append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_build(interp) != TCL_OK) return TCL_ERROR;\n    tbc_rt_init();\n    tbc_capture_builtins(interp);\n    tbc_install(interp);\n"
 if {[llength $gall]} { append out "    tbc_guard_register(interp, &tbc_guard_$initName);\n" }
+# the pinned commands that typed code calls directly (tbc_direct): from the guard's table, or none for a name the guard does not hold
+dict for {nm id} $DCNAMES {
+    set gi [lsearch -exact $gnames $nm]
+    append out "    tbc_$id = [expr {$gi >= 0 ? "tbc_guard_cmd(&tbc_guard_$initName, $gi)" : "NULL"}];\n"
+}
 foreach P $translatable {
     set i 0
     foreach l $PI($P,lits) {
@@ -3460,6 +3600,8 @@ if {[llength $refusedProcs]} { append out "    tbc_register_refused(tbc_refused_
 append out "#ifdef TBC_COV\n    Tcl_CreateObjCommand(interp, \"::tbc_coverage\", tbc_cov_cmd, NULL, NULL);\n#endif\n"
 append out "    return TCL_OK;\n\}\n"
 
+set dcDecl ""; set dcExtern ""; set dcDef ""
+dict for {nm id} $DCNAMES { append dcDecl "static Command *tbc_$id;\n"; append dcExtern "extern Command *tbc_$id;\n"; append dcDef "Command *tbc_$id;\n" }
 if {$splitN > 0} {
     # the same code in several files: what is shared between them has external linkage and is declared in a header; the typed code and the boxed code are
     # in files of their own (so that they can be compiled at different optimisation levels, and in parallel)
@@ -3470,6 +3612,7 @@ if {$splitN > 0} {
         append hdr "extern int tbc_valid_$cid;\n"
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append hdr "extern Tcl_Obj *L_${cid}_$i;\n" }
     }
+    append hdr $dcExtern
     foreach key $variants { append hdr [vproto $key] }
     foreach P $translatable { append hdr [gproto $P] }
     dict for {P gk} $REKEY { append hdr "[rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
@@ -3510,10 +3653,11 @@ if {$splitN > 0} {
         append init "int tbc_valid_$cid = 0;\n"
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append init "Tcl_Obj *L_${cid}_$i;\n" }
     }
-    append init "\n" [string range $out $outAfterG end]
+    append init $dcDef "\n" [string range $out $outAfterG end]
     set f [open $outFile w]; puts -nonewline $f $init; close $f
     puts "tcl-aot: split into [llength $files] code files + $base.h + $outFile"
 } else {
+    set out [string map [list "/*@@DC@@*/" $dcDecl] $out]
     set f [open $outFile w]; puts -nonewline $f $out; close $f
 }
 puts "tcl-aot: [llength $translatable] of [llength $procNames] procs compiled, [llength $variants] variants"

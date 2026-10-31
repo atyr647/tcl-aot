@@ -37,3 +37,21 @@ TCL
 "$TCLSH" src/translate.tcl "$tmp/k.tcl" "$tmp/k.c" Keytest >"$tmp/k.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/k.log"; exit 1; }
 if grep -q "tbc_cat_init" "$tmp/k.c"; then echo "typed: FAILED, a(\$i,\$j) builds a Tcl object for the key"; exit 1; fi
 echo "typed: a(\$i,\$j) keys are built as text, without objects: ok"
+
+# string first / last / index / range have a path for one-byte characters (tbc_s_*), and a built-in that needs no frame is called through its C procedure (tbc_direct)
+cat > "$tmp/s.tcl" <<'TCL'
+proc ts_str {s i} { list [string first o $s] [string last o $s] [string index $s $i] [string range $s $i end] [join [split $s o] +] }
+TCL
+"$TCLSH" src/translate.tcl "$tmp/s.tcl" "$tmp/s.c" Strtest >"$tmp/s.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/s.log"; exit 1; }
+for f in tbc_s_first tbc_s_last tbc_s_index tbc_s_range tbc_direct; do
+  grep -q "$f(" "$tmp/s.c" || { echo "typed: FAILED, the generated code of a string proc does not use $f"; exit 1; }
+done
+echo "typed: string first/last/index/range and join/split have their direct paths: ok"
+
+# == and != against the empty string do not hand over (a number is never equal to it; any other value is when its string form is empty)
+cat > "$tmp/e.tcl" <<'TCL'
+proc te_loop {l} { set n 0; foreach v $l { if {$v == {}} { continue }; if {$v != ""} { incr n } }; return $n }
+TCL
+out=$(TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/e.tcl" "$tmp/e.c" Emptytest 2>&1)
+if echo "$out" | grep -q -E '^DEADOP (eq|neq) '; then echo "typed: FAILED, == against the empty string hands over:"; echo "$out" | grep -E '^DEADOP (eq|neq) '; exit 1; fi
+echo "typed: == and != against the empty string stay in typed code: ok"
