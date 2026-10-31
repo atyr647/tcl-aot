@@ -604,3 +604,7 @@ Tests: `tests/hot.sh` (in `tests/run.sh`): the report lines for a typed proc, a 
 (a proc that never hands over, a sum that hands over once at the add and is then resumed in the tagged variant on every call, an unsupported `dict for` that hands over on every call, the sites of two
 variants merged), `-top`, `-reset` and a bad option, in a single-file and a split build; and a build without `-DTBC_COV` has no `tbc::hot`.
 
+Full-suite result for decision 31: the whole of `tests/run.sh` from a snapshot of `61333e2` (default policy), exit 0: differential in four modes, forced hand-over at three rates and two seeds, guard,
+typed, osr, hot, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind, 0 mismatches.  The change leaves the typed code as it was (the descriptions are only
+read when a module is built with `-DTBC_COV`), so the run with the forced tagged-number policy was not repeated.
+
