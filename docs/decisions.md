@@ -523,3 +523,30 @@ Checked: the full `tests/run.sh` passes on this tree, run from a copy of it with
 this work (c56dded, d9a8c17, 62bc9c2) were work-in-progress snapshots made while runs were pending; an earlier run, on the tree before the `string match` and `regexp` change,
 also passed completely.  The README speed table was regenerated with `bench/run.sh count` (`str_ops` 143.9M interpreted, 29.7M compiled: 4.8x); the tcllib figures are the
 instruction counts net of start-up of the eleven workloads of decision 19 and the nine census modules above.
+
+## 29. Numbers that are integers or doubles at run time: the tagged kind W
+
+Decision 28 left floating-point lists open: typed code took an object operand of an arithmetic instruction to be an integer and handed over when it was not, which for a list of
+doubles was the first addition of the first call (`math::statistics::BasicStats`, `math::linearalgebra`).  A result that is an integer or a double depending on the data cannot be
+given a kind in advance, so there is now a kind that carries its tag.
+
+* **W** is a number with a tag: in a stack slot (`sw<p>` the tag, `si<p>` the integer, `sd<p>` the double), in a local variable (`wt<v>`, `i<v>`, `d<v>`).  `+ - * /` of numbers of any
+  kinds give a W (integers by the integer rule with the same overflow and zero-divisor hand-overs, anything with a double by the double rule), `%` and the comparisons give an
+  integer (a mixed comparison hands over for an integer a double does not hold exactly, as before).  An object operand is loaded as a W (an integer or a finite double; text,
+  bignums and NaN hand over).  Unary `-`, `+`, `!`, truth tests, `dup`, `pop`, stores, loads, `incr` and returns take W.  A variable that is assigned integers and doubles, or a W,
+  is a W variable (before it was an object variable, with an allocation at every assignment).  `sqrt`, `sin`, `double`, ... take a W operand directly.
+* **Everything else takes W as an object.**  The state that goes into an instruction that does not take tagged numbers has its W slots boxed on the edge into it, so the
+  instructions that do not know W (list and string operations, calls, ...) are unchanged; a hand-over boxes W like any other slot.  A W that is stored into a typed variable
+  from an object must come back as it was, so it is accepted only in the forms the integer kind accepts (a canonical integer, a double without a string form of its own).
+* **Policy.**  Integer code must not pay for tags, so W is used only in a proc with a sign of floating-point numbers: a double literal or a call of `double`, `sqrt`, `sin`, ...,
+  `floor`, `ceil`.  Everything else is as before (the integer checksums are unchanged: sha1 1.75x, md5 4.55x, crc32 2.51x).  `TBC_FORCE_WPOLICY=1` makes the translator use W in every
+  proc; the whole test suite runs that way as well, which is how the kind was tested.  Procs that yield do not use it.
+* **Measured** (instruction counts net of start-up, results equal): `math::statistics` 1.14x to 1.84x, `math::linearalgebra` 1.02x to 1.39x; the other nine census modules and the eleven
+  workloads of decision 19 are within noise of before (all within 0.3%).
+* **Not done.**  A floating-point proc with no sign of one (arithmetic only on values that arrive as objects) keeps the integer assumption, hands over at the first double and runs
+  boxed; picking the policy by a failure at run time would need both versions of every such proc.  `int`, `round`, `abs` of a W go through the generic call.
+
+Tests: `wf_*` and `wm_*` procs (sums of lists of integers, doubles, mixed, non-canonical text, bignums, infinities and NaN; variables that stay integers when a loop does not run;
+comparisons and arithmetic of every pairing of those values; tagged numbers passed to procs, returned, incremented, compared, stored in arrays), run with the default policy and with
+the policy forced; `tests/typed.sh` checks that a sum over a list of numbers stays typed and uses W in a floating-point proc and not in an integer one.  Forced policy also ran the
+typed fuzz families (seeds 1-3, with forced hand-overs).

@@ -25,12 +25,10 @@ An item moves out of this file when it is measured, tested and written up there.
 * **Hand-over at every instruction, for the callee side**: the forced hand-over test covers typed to boxed; the other direction (boxed to typed at a loop head) does
   not exist yet and is the same entry point as above.
 
-## Arithmetic on numbers that arrive as objects
+## Floating-point procs with no sign of floating-point numbers
 
-Typed code takes an object operand of an arithmetic instruction to be an integer and hands over when it is not.  For a list of floating-point numbers (`math::statistics`,
-`math::linearalgebra`: 1.14x and 1.02x in the census, decision 28) that is the first addition of the first call.  A number kind that carries its tag (integer or double) through
-expressions and variables would keep such loops in typed code; it touches every arithmetic instruction, the variable kinds and the conversions at the boundaries.  This is the
-largest gap left for numeric library code.
+The tagged number kind (decision 29) is used in a proc that has a double literal or calls a function that gives a double.  A proc that only does arithmetic on values that arrive as
+objects keeps the integer assumption and runs boxed when they are doubles.  Choosing the policy by the first failure at run time needs both versions of such procs.
 
 ## Smaller items
 

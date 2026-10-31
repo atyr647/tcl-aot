@@ -1673,3 +1673,5 @@ proc wf_cond {l} { set k 0; set m 0.0; foreach v $l { if {$v > 2} { incr k }; if
 proc wf_neg {l} { set r {}; foreach v $l { lappend r [expr {-$v}] [expr {+$v}] [expr {$v - 0.0}] }; return $r }
 proc wf_store {n} { for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i * 0.5}]; set b $a($i); set c [expr {$b + 1}] }; list [array size a] [expr {$n ? $c : 0}] }
 proc wf_keep {x} { set v $x; set w [expr {$v + 0.5}]; list $v $w }
+proc wm_funcs {l} { set r {}; foreach v $l { set x [expr {$v * 1.0 + 0.0}]; lappend r [expr {sqrt(abs($x))}] [expr {double($v)}] [expr {sin($v)}] [expr {floor($v)}] [expr {ceil($x)}] [expr {pow($v, 2)}] [expr {atan2($v, 1)}] [expr {abs($v)}] [expr {int($v)}] [expr {round($v)}] }; return $r }
+proc wm_acc {l} { set s 0; set q 0.0; foreach v $l { set s [expr {$s + $v}]; set q [expr {$q + sqrt($v * $v)}] }; list $s $q [expr {sqrt($s)}] [expr {double($s)}] }

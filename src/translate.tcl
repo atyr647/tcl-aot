@@ -2338,6 +2338,10 @@ proc mathFunc {P pc in d n q mf} {
                 lappend xs "(double) si$p"
             }
             D { lappend xs "sd$p" }
+            W {
+                if {$exact ne ""} { append pre "if (TBC_UNLIKELY(!sw$p && (si$p < -INT64_C(9007199254740992) || si$p > INT64_C(9007199254740992)))) goto D$pc; " }
+                lappend xs "(sw$p ? sd$p : (double) si$p)"
+            }
             B { append pre "double x${k}_; if (TBC_UNLIKELY(!tbc_getdbl${exact}(s$p, &x${k}_))) goto D$pc; "; append rel " Tcl_DecrRefCount(s$p);"; lappend xs x${k}_ }
             default { return "" }
         }
@@ -2360,6 +2364,7 @@ proc mathFunc {P pc in d n q mf} {
         set c "\{ double r_; $pre${guard}errno = 0; r_ = tbc_opaque_dbl(${fn}([lindex $xs 0], [lindex $xs 1])); if (TBC_UNLIKELY(!TBC_MF_OK(r_, errno))) goto D$pc;$rel sd$q = r_; \}"
         return [R fall [list {*}$below D] $c]
     }
+    if {$mf in {int wide round abs} && [kd [lindex $args 0]] eq "W"} { return "" }
     switch $mf {
         double {
             return [R fall [list {*}$below D] "\{ $pre${guard}sd$q = [lindex $xs 0];$rel \}"]
@@ -2469,8 +2474,12 @@ proc wnorm {P out sop} {
     global PI wAware
     if {[lsearch -exact $out W] < 0 || $sop in $wAware} { return $out }
     lassign $PI($P,ins,$sop) op a
-    set pops [lindex [effect $op $a [llength $out] [lindex $PI($P,mk,$sop) end]] 0]
     set n [llength $out]
+    if {$op in {invokeStk1 invokeStk4}} {
+        set ce [lindex $out [expr {$n - [lindex $a 0]}]]
+        if {[kd $ce] eq "L" && [lt $ce] ne "" && [regexp {^(?:::)?tcl::mathfunc::(?:double|sqrt|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|log|log10|fmod|hypot|floor|ceil|pow)$} [lindex $PI($P,lits) [lt $ce]]]} { return $out }
+    }
+    set pops [lindex [effect $op $a [llength $out] [lindex $PI($P,mk,$sop) end]] 0]
     for {set i [expr {max($n - $pops, 0)}]} {$i < $n} {incr i} { if {[kd [lindex $out $i]] eq "W"} { set out [lreplace $out $i $i B] } }
     return $out
 }

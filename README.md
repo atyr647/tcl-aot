@@ -58,8 +58,8 @@ Wall-clock times vary; `bench/run.sh count` counts instructions instead:
 | namespace array fill | 2.1x |
 
 On tcllib-based workloads (`docs/decisions.md`, 19 to 28; instruction counts, results equal): md5 4.5x, md4 5.5x, rc4 3.3x, blowfish 2.7x, crc32 2.5x, numtheory 2.0x,
-sha1 1.7x, binary packing 1.5x; the text and data workloads (regexp-heavy splitting, JSON and CSV parsing, `struct::list`, YAML, statistics, linear algebra) between 0.97x and
-1.14x: their time is in Tcl's library, or in arithmetic on lists of floating-point numbers, which typed code does not do yet.  A Tcl built with `--disable-threads` (point
+sha1 1.7x, binary packing 1.5x, statistics 1.8x, linear algebra 1.4x; the text and data workloads (regexp-heavy splitting, JSON and CSV parsing, `struct::list`, YAML) between 0.97x and
+1.07x: their time is in Tcl's library.  A Tcl built with `--disable-threads` (point
 `TCL_SRC` and `TCL_OBJ` at it) used 6-20% fewer instructions on the two workloads measured, both interpreted and compiled.
 
 ## Use it on your program

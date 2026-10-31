@@ -270,6 +270,7 @@ set wfv {0 1 -1 3 7 2.5 -2.5 0.0 1e300 abc {} 0x10 " 5" 9223372036854775807 -922
 foreach a $wfv { foreach b {0 1 -2 2.5 0.0 abc 9223372036854775807} { lappend calls [list wf_cmp $a $b] [list wf_mod $a $b] } }
 foreach n {0 1 3 10 100 1000} { lappend calls [list wf_loop $n] [list wf_incr $n] [list wf_store $n] }
 foreach x {0 1 -1 2.5 -2.5 abc {} 9223372036854775807} { lappend calls [list wf_ret $x] [list wf_keep $x] }
+foreach l $wfl { lappend calls [list wm_funcs $l] [list wm_acc $l] }
 # tailcall
 foreach x {1 abc {}} { lappend calls [list ti_tc1 $x] [list ti_tc_catch $x] [list ti_tc_after $x] [list ti_tc_lambda $x] }
 lappend calls {ti_tc_loop 0} {ti_tc_loop 50} {ti_tc_loop 100000} {ti_tc_noarg} {ti_tc_ns} {ti_tc1} {ti_tc1 1 2}
