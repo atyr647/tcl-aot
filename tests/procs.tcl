@@ -1822,5 +1822,5 @@ proc pe_dsize {d} { return [dict size $d] }
 proc pe_dsizen {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [pe_dsize {a 1 b 2}] }; return $t }
 
 # the first call of a proc whose compiled body is attached at that call must not turn its arguments into text (an execution trace used to: it passes the command to its handler as text)
-proc tz_len {b} { return [string length $b] }
-proc tz_lazy {} { set buf [binary format c* [lrepeat 1000 7]]; set n [tz_len $buf]; return [list $n [string match {*, no string representation} [tcl::unsupported::representation $buf]]] }
+proc tzb_len {b} { return [string length $b] }
+proc tzb_lazy {} { set buf [binary format c* [lrepeat 1000 7]]; set n [tzb_len $buf]; return [list $n [string match {*, no string representation} [tcl::unsupported::representation $buf]]] }
