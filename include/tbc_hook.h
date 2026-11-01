@@ -35,6 +35,7 @@ typedef struct TbcEntry {
     int ngd;
     struct TbcGuard *guard;
     int yres;				/* it yields itself, and everything else it runs is yield-safe: its boxed code can suspend a coroutine */
+    unsigned char ens;			/* bit i: it uses a subcommand of ensemble tbc_ens_names[i] (an execution trace on the ensemble is the interpreter's to run: tbc_guard_ok) */
 } TbcEntry;
 
 typedef struct TbcRec {			/* one attached proc */
@@ -1579,8 +1580,24 @@ typedef struct TbcGuard {
     Namespace **nsp; long *nsid; int *cre, *rse;	/* per namespace: the namespace once it exists, and its epochs when last verified */
     unsigned char *bad;				/* per dependency: withdrawn */
 } TbcGuard;
+/* The ensembles whose subcommands the built-ins of the guard are (TbcEntry.ens is a mask over them), pinned once.  The interpreter dispatches `binary format` through the
+ * ensemble command `binary`, so an execution trace on it is run for that call; compiled code calls the subcommand and would not run it. */
+static const char *const tbc_ens_names[] = { "string", "binary", "list", "dict", "array" };
+TBC_SHARED Command *tbc_ens_pin[5];
+static void tbc_ens_pin_all(Tcl_Interp *interp) {
+    int i;
+    for (i = 0; i < 5; i++) {
+        Command *c;
+        if (tbc_ens_pin[i]) continue;
+        c = (Command *) Tcl_FindCommand(interp, tbc_ens_names[i], NULL, TCL_GLOBAL_ONLY);
+        if (!c || c->objProc == TclObjInterpProc) continue;
+        c->refCount++;
+        tbc_ens_pin[i] = c;
+    }
+}
 static void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
     int i;
+    tbc_ens_pin_all(interp);
     g->exp = (Command **) ckalloc((size_t) g->nnames * sizeof(Command *)); g->expEp = (int *) ckalloc((size_t) g->nnames * sizeof(int));
     g->nsp = (Namespace **) ckalloc((size_t) g->nnss * sizeof(Namespace *)); g->nsid = (long *) ckalloc((size_t) g->nnss * sizeof(long));
     g->cre = (int *) ckalloc((size_t) g->nnss * sizeof(int)); g->rse = (int *) ckalloc((size_t) g->nnss * sizeof(int));
@@ -1630,6 +1647,11 @@ static int tbc_guard_slow(Tcl_Interp *interp, const TbcEntry *e) {
 static int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
     TbcGuard *g = e->guard;
     int k;
+    if (TBC_UNLIKELY(e->ens)) {
+        /* (an execution trace on an ensemble the body uses a subcommand of, or the ensemble gone: this call is the interpreter's; nothing is withdrawn) */
+        unsigned m = e->ens;
+        for (k = 0; m; k++, m >>= 1) if ((m & 1) && tbc_ens_pin[k] && (tbc_ens_pin[k]->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES))) return 0;
+    }
     for (k = 0; k < e->ngd; k++) {
         int di = e->gdeps[k];
         const TbcGDep *dp = &g->deps[di];

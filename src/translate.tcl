@@ -905,15 +905,30 @@ proc gdeps {P} {
         if {$c in $seen || ![info exists PI($c,bins)]} continue
         lappend seen $c
         set ns [namespace qualifiers $c]; if {$ns eq ""} { set ns :: }
-        foreach b $PI($c,bins) {
-            lappend r [list $b $ns]
-            # (a built-in that is a subcommand of an ensemble (tcl::binary::format of `binary`) is also run through the ensemble's command by the interpreter: the module
-            # pins that as well, to see replacement of it and execution traces on it)
-            if {[regexp {^(?:::)?tcl::(\w+)::\w+$} $b -> ens] && $ens in {string binary list dict array}} { lappend r [list $ens $ns] }
-        }
+        foreach b $PI($c,bins) { lappend r [list $b $ns] }
         set todo [concat $todo $PI($c,callees)]
     }
     return [lsort -unique $r]
+}
+# The ensembles of Tcl (`string`, `binary`, ...) the built-ins a proc uses (and the procs it calls) are subcommands of, as a bit mask over tbcEnsembles: an execution
+# trace on the ensemble is run by the interpreter's dispatch of `binary format`, which compiled code skips, so an entry whose body uses a subcommand of one looks at its trace
+# flag when it is entered (tbc_guard_ok) - as one test of a command the runtime pinned, not as a dependency of the guard, which costs a lookup per name at every entry
+set tbcEnsembles {string binary list dict array}
+proc ensIndex {b} {
+    if {[regexp {^(?:::)?tcl::(\w+)::\w+$} $b -> ens]} { return [lsearch -exact $::tbcEnsembles $ens] }
+    return -1
+}
+proc ensMask {P} {
+    global PI
+    set seen {}; set todo [list $P]; set m 0
+    while {[llength $todo]} {
+        set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {$c in $seen || ![info exists PI($c,bins)]} continue
+        lappend seen $c
+        foreach b $PI($c,bins) { set i [ensIndex $b]; if {$i >= 0} { set m [expr {$m | (1 << $i)}] } }
+        set todo [concat $todo $PI($c,callees)]
+    }
+    return $m
 }
 proc flushSet {P pc} { global PI; expr {$PI($P,pure) ? $PI($P,live,$pc) : $PI($P,may,$pc)} }
 # A proc that can be asked about its variables by name (not pure) must write every variable that was assigned on some path into the frame when it leaves
@@ -2643,7 +2658,8 @@ proc stepInvoke {key pc in d n} {
         set dcid dc_[cident $nm0]
         dict set ::DCNAMES $nm0 $dcid
         set ecid NULL
-        if {[regexp {^(?:::)?tcl::(\w+)::\w+$} $nm0 -> ens] && $ens in {string binary list dict array}} { set ecid tbc_dce_$ens; dict set ::DCNAMES ens:$ens dce_$ens }
+        set ei [ensIndex $nm0]
+        if {$ei >= 0} { set ecid "tbc_ens_pin\[$ei\]" }
         # (an execution trace on the ensemble is run by the interpreter's dispatch of `binary format`, not by a call of ::tcl::binary::format by name: boxed code makes the call then)
         if {$ecid ne "NULL"} { append guard "if (TBC_UNLIKELY($ecid && ($ecid->flags & CMD_HAS_EXEC_TRACES))) goto D$pc; " }
         set call "(tbc_direct(interp, tbc_$dcid, $ecid, $n, ov_) ? TCL_OK : $call)"
@@ -4152,7 +4168,7 @@ foreach P $translatable {
     set gx [lmap d [gdeps $P] {lsearch -exact $gall $d}]
     if {[llength $gx]} { append out "static const unsigned short tbc_gx_$cid\[\] = { [join $gx {, }] };\n" }
     if {[llength [ydeps $P]]} { append out "static int *tbc_yd_$cid\[\] = { [join [lmap c [ydeps $P] {string cat &tbc_valid_[cident $c]}] {, }], NULL };\n" }
-    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring $PI($P,infoBody)], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}] \};\n"
+    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring $PI($P,infoBody)], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}], [ensMask $P] \};\n"
 }
 # the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled
 if {[llength $refusedProcs]} {
@@ -4169,7 +4185,7 @@ append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_bu
 if {[llength $gall]} { append out "    tbc_guard_register(interp, &tbc_guard_$initName);\n" }
 # the pinned commands that typed code calls directly (tbc_direct): from the guard's table, or none for a name the guard does not hold
 dict for {nm id} $DCNAMES {
-    set gi [lsearch -exact $gnames [regsub {^ens:} $nm {}]]
+    set gi [lsearch -exact $gnames $nm]
     append out "    tbc_$id = [expr {$gi >= 0 ? "tbc_guard_cmd(&tbc_guard_$initName, $gi)" : "NULL"}];\n"
 }
 foreach P $translatable {
