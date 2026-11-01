@@ -1,0 +1,39 @@
+#!/bin/bash
+# The tclbench programs, interpreted and compiled: for each file, a run with the capture on (the procs it builds), a module from what was captured, then the
+# file again, interpreted and compiled, timed by harness.tcl.   bench/real/run.sh [file.bench ...]   (bench/real/fetch.sh first)
+cd "$(dirname "$0")/../.." || exit 1
+. tools/env.sh || exit 1
+dir=build/tclbench/tclbench/tcl
+[ -d $dir ] || { echo "run bench/real/fetch.sh first" >&2; exit 1; }
+files=("$@"); [ ${#files[@]} -eq 0 ] && files=($dir/*.bench)
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+cat > "$tmp/main.c" <<'C'
+#include <tcl.h>
+extern int MODINIT(Tcl_Interp *);
+static int AppInit(Tcl_Interp *interp) { if (Tcl_Init(interp) != TCL_OK) return TCL_ERROR; Tcl_StaticPackage(NULL, "Realbench", MODINIT, NULL); return MODINIT(interp); }
+int main(int argc, char **argv) { Tcl_Main(argc, argv, AppInit); return 0; }
+C
+printf 'proc tbc_none {} {}\n' > "$tmp/none.tcl"
+"$TCLSH" src/translate.tcl "$tmp/none.tcl" "$tmp/none.c" Realbench >/dev/null 2>&1
+"$CC" -O1 -w -DMODINIT=Realbench_Init $TBC_INC "$tmp/main.c" "$tmp/none.c" $TBC_LIBS -o "$tmp/shell0" || exit 1
+cat > "$tmp/cap.tcl" <<'C'
+tbc::capture on
+set argv [list $env(BF)]
+cd [file dirname $env(BF)]
+catch { source bench/real/harness.tcl }
+tbc::capture write $env(CAPTURED)
+C
+printf "%-14s %-38s %10s %10s %8s\n" file benchmark "interp us" "comp us" speedup
+for f in "${files[@]}"; do
+  b=$(basename $f .bench); w="$tmp/$b"; mkdir -p $w
+  BF=$(realpath $f) CAPTURED=$w/cap.tcl timeout 300 "$tmp/shell0" "$tmp/cap.tcl" >/dev/null 2>&1 </dev/null
+  [ -s $w/cap.tcl ] || { echo "$b: nothing captured"; cp /dev/null $w/cap.tcl; }
+  "$TCLSH" src/translate.tcl $w/cap.tcl $w/m.c Realbench >$w/tr.log 2>&1 || { echo "$b: translate failed"; continue; }
+  "$CC" -O2 -w -DMODINIT=Realbench_Init $TBC_INC "$tmp/main.c" $w/m.c $TBC_LIBS -o $w/shell >$w/cc.log 2>&1 || { echo "$b: build failed"; continue; }
+  ( cd $(dirname $f); timeout 300 $OLDPWD/$w/shell $OLDPWD/bench/real/harness.tcl $(basename $f) > $OLDPWD/$w/i.txt 2>&1 </dev/null )
+  ( cd $(dirname $f); COMPILED=1 timeout 300 $OLDPWD/$w/shell $OLDPWD/bench/real/harness.tcl $(basename $f) > $OLDPWD/$w/c.txt 2>&1 </dev/null )
+  awk -v b=$b 'NR==FNR { if ($1=="BENCH") { n=$0; sub(/^BENCH [^ ]+ \{/,"",n); d=n; sub(/\}.*/,"",d); rest=n; sub(/^[^}]*\} /,"",rest); split(rest,p," "); it[d]=p[1]; ir[d]=substr(rest,length(p[1])+2) } next }
+    $1=="BENCH" { n=$0; sub(/^BENCH [^ ]+ \{/,"",n); d=n; sub(/\}.*/,"",d); rest=n; sub(/^[^}]*\} /,"",rest); split(rest,p," "); ct=p[1]; cr=substr(rest,length(p[1])+2);
+      if (!(d in it)) next; flag=(ir[d]!=cr ? "  RESULT DIFFERS" : "");
+      if (it[d] ~ /^[0-9]+$/ && ct ~ /^[0-9]+$/ && ct>0) printf "%-14s %-38.38s %10d %10d %7.2fx%s\n", b, d, it[d], ct, it[d]/ct, flag; else printf "%-14s %-38.38s %10s %10s%s\n", b, d, it[d], ct, flag }' $w/i.txt $w/c.txt
+done
