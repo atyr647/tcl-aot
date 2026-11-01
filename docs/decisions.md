@@ -715,7 +715,7 @@ integer loop 1.3x (1.3), Collatz 1.5x (1.7), `fib(30)` 5.1x (5.4), sieve 10.3x (
 
 Tests: `da_dbl`, `da_dmix`, `da_dinf` (Inf, -Inf, -0.0, 0.1 + 0.2, 1e22, 1/3: the text of unboxed doubles), `da_dlit`, `da_dover` (an integer overwritten by a double and back), `da_dstr`, `da_dincr` (the error of `incr` of a double),
 `da_dtwo`, `da_dmul`, `da_dnbody`; `da_kbranch`, `da_kboth`, `da_kif`, `da_kloop`, `da_kcall`, `da_kerr` (keys with branches, calls and errors in the value); `da_ord_asc/desc/hist/perm/sparse/late/two/col/get` (the order of `array names` and
-`array get` after each kind of fill: compared with the interpreter's), `da_unord`, `da_hole`, `da_holeinc`, `da_unordmix`, `da_unorddbl` (holes: absent elements, `info exists`, `incr` of a hole, mixed values): 519 more calls in the
+`array get` after each kind of fill: compared with the interpreter's), `da_unord`, `da_hole`, `da_holeinc`, `da_unordmix`, `da_unorddbl` (holes: absent elements, `info exists`, `incr` of a hole, mixed values): 216 more calls in the
 differential test, with the forced hand-over and forced tagged-number runs; `tests/hot.sh` counts the vector modes (ascending stays dense, descending and out of order make the unordered vector and not the table, a key above the limit makes the
 table); `tests/typed.sh` checks the generated code of a double array and of a mixed array.
 
