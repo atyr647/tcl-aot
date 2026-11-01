@@ -79,10 +79,14 @@ if {$census} { set procNames [lsort [::tbcx::allprocs ::]] }
 
 # built-in commands that neither reach the variables of the calling frame nor call back into scripts: a proc that uses nothing else
 # (and calls only such procs) is "pure": nothing can observe its frame, so it needs none of its own while it runs
-set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min}
+set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min tcl::binary::format}
 # built-ins that work on the variables of the frame they run in, and nothing else
 # the formats of `binary scan` typed code does itself: one of c s S i I, an optional u, and *
 set tbcScanFmt {^([cisSI])(u?)\*$}
+# the instructions with which the executor does `string` subcommands itself, and the commands they stand for
+set tbcStrOps {strindex ::tcl::string::index strfind ::tcl::string::first strrfind ::tcl::string::last strrange ::tcl::string::range strrangeImm ::tcl::string::range
+    strreplace ::tcl::string::replace strcaseUpper ::tcl::string::toupper strcaseLower ::tcl::string::tolower strcaseTitle ::tcl::string::totitle
+    strtrim ::tcl::string::trim strtrimLeft ::tcl::string::trimleft strtrimRight ::tcl::string::trimright strmatch ::tcl::string::match strmap ::tcl::string::map}
 set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan}
 # one of Tcl's own math functions that is a command written in C (max and min are procs of the Tcl library): it never uses the caller's variables
 proc isMathBuiltin {b} { expr {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f] && $f ni {max min}} }
@@ -491,6 +495,8 @@ proc prepare {P} {
         }
         # instructions that reach variables by name or link them to other frames make the proc impure
         if {$op in {upvar nsupvar variable infoLevelNumber infoLevelArgs currentNamespace} || ([string match *Stk $op] && $op ne "returnStk") || [string match *StkImm $op]} { set pure 0 }
+        # the string operations the executor does in place stand for commands of the `string` ensemble: the module's guard watches them (replacement, traces), like a call by name
+        if {[dict exists $::tbcStrOps $op]} { lappend bins [dict get $::tbcStrOps $op] }
         if {$op in {invokeStk1 invokeStk4}} {
             set n [lindex $a 0]; set q [expr {[llength $st] - $n}]
             set c [lindex $st $q]
@@ -899,7 +905,12 @@ proc gdeps {P} {
         if {$c in $seen || ![info exists PI($c,bins)]} continue
         lappend seen $c
         set ns [namespace qualifiers $c]; if {$ns eq ""} { set ns :: }
-        foreach b $PI($c,bins) { lappend r [list $b $ns] }
+        foreach b $PI($c,bins) {
+            lappend r [list $b $ns]
+            # (a built-in that is a subcommand of an ensemble (tcl::binary::format of `binary`) is also run through the ensemble's command by the interpreter: the module
+            # pins that as well, to see replacement of it and execution traces on it)
+            if {[regexp {^(?:::)?tcl::(\w+)::\w+$} $b -> ens] && $ens in {string binary list dict array}} { lappend r [list $ens $ns] }
+        }
         set todo [concat $todo $PI($c,callees)]
     }
     return [lsort -unique $r]
@@ -2631,7 +2642,11 @@ proc stepInvoke {key pc in d n} {
     if {![isMathBuiltin $nm0]} {
         set dcid dc_[cident $nm0]
         dict set ::DCNAMES $nm0 $dcid
-        set call "(tbc_direct(interp, tbc_$dcid, $n, ov_) ? TCL_OK : $call)"
+        set ecid NULL
+        if {[regexp {^(?:::)?tcl::(\w+)::\w+$} $nm0 -> ens] && $ens in {string binary list dict array}} { set ecid tbc_dce_$ens; dict set ::DCNAMES ens:$ens dce_$ens }
+        # (an execution trace on the ensemble is run by the interpreter's dispatch of `binary format`, not by a call of ::tcl::binary::format by name: boxed code makes the call then)
+        if {$ecid ne "NULL"} { append guard "if (TBC_UNLIKELY($ecid && ($ecid->flags & CMD_HAS_EXEC_TRACES))) goto D$pc; " }
+        set call "(tbc_direct(interp, tbc_$dcid, $ecid, $n, ov_) ? TCL_OK : $call)"
     }
     set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = $call; if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp); \}"
     return [R fall [list {*}$below B] $c]
@@ -4154,7 +4169,7 @@ append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_bu
 if {[llength $gall]} { append out "    tbc_guard_register(interp, &tbc_guard_$initName);\n" }
 # the pinned commands that typed code calls directly (tbc_direct): from the guard's table, or none for a name the guard does not hold
 dict for {nm id} $DCNAMES {
-    set gi [lsearch -exact $gnames $nm]
+    set gi [lsearch -exact $gnames [regsub {^ens:} $nm {}]]
     append out "    tbc_$id = [expr {$gi >= 0 ? "tbc_guard_cmd(&tbc_guard_$initName, $gi)" : "NULL"}];\n"
 }
 foreach P $translatable {

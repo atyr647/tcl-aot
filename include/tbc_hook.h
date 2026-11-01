@@ -1617,7 +1617,13 @@ static int tbc_guard_slow(Tcl_Interp *interp, const TbcEntry *e) {
     TbcGuard *g = e->guard;
     int k, ok = 1;
     for (k = 0; k < e->ngd; k++) tbc_guard_verify(interp, g, g->deps[e->gdeps[k]].ns);
-    for (k = 0; k < e->ngd; k++) if (g->bad[e->gdeps[k]]) ok = 0;
+    for (k = 0; k < e->ngd; k++) {
+        int di = e->gdeps[k];
+        Command *c = g->exp[g->deps[di].name];
+        /* (an execution trace on a built-in the body uses, or on its ensemble: the interpreter runs the commands the trace is on through its dispatch, which the compiled
+         * code skips for them; this call is the interpreter's, and the dependency is not withdrawn: the next call after the trace is removed is compiled again) */
+        if (g->bad[di] || (c && (c->flags & CMD_HAS_EXEC_TRACES))) ok = 0;
+    }
     return ok;
 }
 /* do the built-ins this body, and the procs it calls, were analysed against still resolve to themselves?  A few compares when nothing has changed. */
@@ -1630,7 +1636,7 @@ static int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
         Namespace *ns = g->nsp[dp->ns];
         Command *c = g->exp[dp->name];
         if (TBC_UNLIKELY(g->bad[di] || !ns || !c || ns->nsId != g->nsid[dp->ns] || ns->cmdRefEpoch != g->cre[dp->ns] || ns->resolverEpoch != g->rse[dp->ns]
-                || c->cmdEpoch != g->expEp[dp->name] || (c->flags & CMD_IS_DELETED))) return tbc_guard_slow(interp, e);
+                || c->cmdEpoch != g->expEp[dp->name] || (c->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return tbc_guard_slow(interp, e);
     }
     return 1;
 }
@@ -1643,11 +1649,12 @@ static Command *tbc_guard_cmd(const TbcGuard *g, int i) { return g->exp[i]; }
  * every case where one of those things could matter is left to it, so the observable behaviour is the same (the command count is kept):
  *   - the interpreter deleted, a script cancelled or unwinding, a pending async handler, resource limits set, the stack of nested evaluations at its limit
  *     (TclInterpReady, TclLimitExceeded, the checks in NRCommand);
- *   - execution traces on the command or on the interpreter (EvalObjvCore);
+ *   - execution traces on the command, on the ensemble it is a subcommand of (`binary` for ::tcl::binary::format), or on the interpreter (EvalObjvCore);
  *   - the command deleted since the module pinned it, a procedure that uses the NR trampoline, or a Tcl proc.
  * An error is not reported from here: the call is made again through the interpreter (the built-ins this is used for are pure), which raises it with its error info. */
-static int tbc_direct(Tcl_Interp *interp, Command *c, int objc, Tcl_Obj *const objv[]) {
+static int tbc_direct(Tcl_Interp *interp, Command *c, Command *ens, int objc, Tcl_Obj *const objv[]) {
     Interp *iPtr = (Interp *) interp;
+    if (TBC_UNLIKELY(ens && (ens->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return 0;
     if (TBC_UNLIKELY(!c || c->nreProc || !c->objProc || c->objProc == TclObjInterpProc || (c->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return 0;
     if (TBC_UNLIKELY((iPtr->flags & (DELETED | CANCELED | TCL_CANCEL_UNWIND)) || iPtr->execEnvPtr->rewind || iPtr->tracePtr || iPtr->limit.active || iPtr->limit.exceeded
             || iPtr->numLevels + 1 > iPtr->maxNestingDepth || TclAsyncReady(iPtr))) return 0;

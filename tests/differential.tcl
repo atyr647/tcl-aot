@@ -242,6 +242,28 @@ lappend calls {set r [pj_join {a b}]; interp limit {} command -value 100000000; 
 lappend calls {rename join join_x; proc join {args} {return JOINED}; set r [pj_join {a b}]; rename join {}; rename join_x join; list $r [pj_join {a b}]}
 lappend calls {rename ::tcl::string::first ::tcl::string::first_x; proc ::tcl::string::first {args} {return 7}; set r [pj_str hello]; rename ::tcl::string::first {}; rename ::tcl::string::first_x ::tcl::string::first; list $r [pj_str hello]}
 lappend calls {pj_join {a b}} {pj_str hello}
+# binary format as a built-in the compiled code treats as pure: results, errors, execution traces, replacements
+foreach n {0 1 7 300} { lappend calls [list pb_loop $n] [list pb_chain $n] }
+foreach a {0 1 -1 127 128 255 256 65535 65536 4294967295 4294967296 9223372036854775807 -9223372036854775808 0x10 " 5" 1.5 abc {} 1e3 100000000000000000000} {
+    foreach f {c cu S s I i W w a3 A3 a* b4 B4 h2 H2 x f d} { lappend calls [list pb_catch $f $a] }
+}
+foreach a {0 1 {1 2} {1 2 3} {} abc} { foreach f {c* S* cu* a2 c2 c3 @2} { lappend calls [list pb_catch $f $a] } }
+foreach f {c S Z @ a1x} { lappend calls [list pb_err $f] }
+foreach f {SI cS Ia4 a4I} { lappend calls [list pb_two $f 1 2] [list pb_two $f abc def] }
+lappend calls {pb_lit} {pb_all} {pb_scan 5} {pb_scan 70000} {pb_pack 1} {pb_pack 1 2 3}
+lappend calls {set ::trj {}; trace add execution ::tcl::binary::format enter {lappend ::trj}; set r [pb_loop 3]; trace remove execution ::tcl::binary::format enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add execution binary enter {lappend ::trj}; set r [pb_loop 3]; trace remove execution binary enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add execution ::tcl::binary::format leave {lappend ::trj}; set r [pb_chain 2]; trace remove execution ::tcl::binary::format leave {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {rename ::tcl::binary::format ::tcl::binary::format_x; proc ::tcl::binary::format {args} {uplevel 1 {set x 99}; return FORMATTED}; set r [list [pb_pack 1 2] [pb_loop 2]]; rename ::tcl::binary::format {}; rename ::tcl::binary::format_x ::tcl::binary::format; list $r [pb_pack 1 2]}
+lappend calls {rename binary binary_x; proc binary {args} {return BIN}; set r [list [pb_pack 1 2] [pb_loop 2]]; rename binary {}; rename binary_x binary; list $r [pb_pack 1 2]}
+lappend calls {rename ::tcl::binary::format ::tcl::binary::format_x; interp alias {} ::tcl::binary::format {} list; set r [list [pb_pack 1 2] [pb_loop 2]]; interp alias {} ::tcl::binary::format {}; rename ::tcl::binary::format_x ::tcl::binary::format; list $r [pb_pack 1 2]}
+lappend calls {pb_loop 3} {pb_pack 4 5}
+# execution traces on an ensemble (string, dict) and on its subcommand, with the call made from compiled code through a compiled callee
+foreach {cmd call} {string {pe_mapn 3} ::tcl::string::map {pe_mapn 3} dict {pe_dsizen 3} ::tcl::dict::size {pe_dsizen 3} string {pe_firstn 3} ::tcl::string::first {pe_firstn 3}} {
+    lappend calls "set ::trj {}; trace add execution $cmd enter {lappend ::trj}; set r \[$call\]; trace remove execution $cmd enter {lappend ::trj}; list \$r \[llength \$::trj\]"
+}
+lappend calls {pe_mapn 3} {pe_dsizen 3} {pe_firstn 3}
+lappend calls {interp limit {} command -value 100000000; set r [pb_loop 3]; interp limit {} command -value {}; set r}
 # string first / last / index / range
 set sfs [list hello {} o ll "hello world" "\u00e9\u20acx" [format a%cb 0] [binary format c3 {65 66 67}] 12345 0x1F " 5" {a b c} xxxxxxxxxxxx 1.5 "tab\there" "\u00e9" "x\u00e9y"]
 set sfi {0 1 2 5 -1 -9 end end-1 end+1 abc 1.5 2147483647 2147483648 9223372036854775807 -2147483649 " 1" 0x1 1+1 {}}

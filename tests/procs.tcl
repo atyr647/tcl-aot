@@ -1802,3 +1802,21 @@ proc cm_neq {l key} { set n 0; foreach v $l { if {$v != $key} { incr n } }; retu
 proc cm_min {l} { set m [lindex $l 0]; foreach v $l { if {$v < $m} { set m $v } }; return $m }
 proc cm_eqrec {a b} { if {[llength $a] != [llength $b]} { return 0 }; if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return [string equal $a $b] }; foreach i $a j $b { if {![cm_eqrec $i $j]} { return 0 } }; return 1 }
 proc cm_mixed {x n} { list [expr {$x == $n}] [expr {$n < $x}] [expr {$x != 2.5}] [expr {$x <= 0x10}] }
+
+# binary format is a built-in that neither reaches the frame nor runs a script: a proc that uses it needs no frame of its own when called from compiled code
+proc pb_pack {a b} { return [binary format SIa4 [expr {$a & 0x7fff}] $b abcd] }
+proc pb_loop {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [string length [pb_pack $i [expr {$i * 7}]]] }; return $t }
+proc pb_fmt {f a} { return [binary format $f $a] }
+proc pb_two {f a b} { return [binary format $f $a $b] }
+proc pb_lit {} { return [binary format cu3 {1 255 256}] }
+proc pb_all {} { return [list [binary format cSsIiWwfd 1 2 3 4 5 6 7 1.5 2.5] [binary format a5A5 ab cd] [binary format b8B8 10110000 10110000] [binary format h3H3 abc abc] [binary format x3a1X2 z] [binary format a*@6 abc] [binary format c* {1 2 3}]] }
+proc pb_chain {n} { set r {}; for {set i 0} {$i < $n} {incr i} { append r [pb_pack $i $n] }; return [string length $r] }
+proc pb_err {f} { binary format $f 1 }
+proc pb_catch {f a} { set r [catch {binary format $f $a} m]; return [list $r $m] }
+proc pb_scan {n} { set x [pb_pack $n 5]; binary scan $x S a; return $a }
+proc pe_map {s} { return [string map {a A} $s] }
+proc pe_mapn {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [string length [pe_map abca]] }; return $t }
+proc pe_first {s} { return [string first o $s] }
+proc pe_firstn {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [pe_first hello] }; return $t }
+proc pe_dsize {d} { return [dict size $d] }
+proc pe_dsizen {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [pe_dsize {a 1 b 2}] }; return $t }
