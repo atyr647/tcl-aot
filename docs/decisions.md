@@ -667,3 +667,30 @@ Full-suite result: the whole of `tests/run.sh` from a snapshot of `a2b6024`, exi
 names, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The generated C was also compared byte for byte with the previous translator's on the test module and five
 workloads (identical), so the run with the forced tagged-number policy was not repeated.
 
+## 34. Dense native arrays, and the first measurement against C
+
+**The goal and the first measurement against it.**  The aim is that unmodified Tcl compiles to code as fast as possible for any Tcl.  Every figure in the README is against the interpreter; nothing had been measured against C.
+`bench/vs-c.sh` now does (the same eight kernels in Tcl and in C at `-O2`, wall time, best of three, results compared).  Before this decision, on four of them: integer loop 1.3x C, `fib(30)` 4.4x, sieve of 3M **250x**, 120x120
+matrix product **134x**: a native array (kind R) was a hash table keyed by the text of the key, with a boxed object for every element, although the code that used it was entirely typed.
+
+**Dense mode.**  An array a compiled proc keeps for itself (kind R) whose elements all have keys that are canonical non-negative integers (`0 ... 2147483647`; `01`, `+1`, ` 1`, `-1` are other keys), or all keys `i,j` of two such
+integers, and were made in order without a gap, is a vector.  One-dimensional: keys `base, base+1, ...`.  Two-dimensional: the keys of a matrix filled row by row, the first row giving the width.  An integer element is held unboxed
+(8 bytes beside a pointer for any other value, 16 bytes a slot); anything else, an element made out of order, a key of another form, turns the array into the table it was, the elements in the order they were made (which is the order
+of the vector), so what typed code writes into the frame when it hands over, and the errors of absent elements, are what they were.  An array that was never used becomes dense with its first element.
+* **Integer keys** reach elements without formatting the key as text (`tbc_r*_k`); a key `$i,$j` of two integers is carried as the two integers (stack kind `K:2`) and its text is only made if something needs it (`tbc_r*_k2`).
+* **Element kinds.**  The translator tracks, per array, whether everything stored in it is an integer in canonical form (an integer register, a canonical integer literal): a load from such an array pushes an unboxed integer; a missing
+  element, or one that is not an integer, hands over.  An integer literal is stored as the integer, not as the literal's object.
+* **Measured** (wall time, compiled against C): sieve of 3M 1988 ms to 83 ms (C 7.6 ms, 10.9x); matrix product 107 ms to 9.8 ms (C 0.76 ms, 12.9x); the 21 workloads of decisions 19 and 28 are unchanged (compiled instruction
+  counts within 0.1%, results equal).
+* **The whole table** (`bench/vs-c.sh`, compiled / C): integer loop 1.3x, Collatz 1.7x, `fib(30)` 5.4x, sieve 10.9x, matrix product 12.9x, histogram 23x, array of doubles dot product 24x, longest common subsequence 129x.  What is
+  left on arrays: 16 bytes a slot where C uses 1 to 8 (the sieve's 3M elements are 48 MB, C's 3 MB: a narrower vector that widens on demand); arrays of doubles are objects (element kind D); a histogram makes its keys out of order,
+  so it stays the table; the LCS kernel computes its keys (`$d([expr {$i - 1}],$j)`) and calls `string index` in the loop.  These are the next steps, in this order of size.
+
+Tests: `da_*` procs (ascending from 0, 1 and 5, descending, with a gap, strings, hex and `007` as values, negative and huge keys, keys `01`, `+3`, ` 4`, absent elements, `info exists`, `incr` of integers, of a string, at the
+limit, matrices by row, by column, ragged, with a gap, with other keys, `$i, $j` with a space, 3-part keys; 277 more calls in the differential test, and the forced hand-over and forced tagged-number runs); `tests/hot.sh` counts the
+conversions (`X:array dense ...` counters of a `-DTBC_COV` build): ascending 1-D and row-wise 2-D arrays stay dense, a descending one is turned into the table (this fails without dense mode); `tests/typed.sh`: the generated code
+of a sieve and a matrix uses `tbc_rseti_k`, `tbc_rgetw_k`, `tbc_rseti_k2`, `tbc_rgetw_k2`.
+
+Full-suite result: the whole of `tests/run.sh` from a snapshot of `cc95679`, exit 0 (16980 calls in the differential test in four modes, forced hand-over at three rates and two seeds, guard, typed, osr, hot, cmdmap, names,
+nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The quick suite also ran with `TBC_FORCE_WPOLICY=1`: 0 mismatches.
+
