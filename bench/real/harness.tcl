@@ -17,4 +17,8 @@ proc bench {args} {
     puts "BENCH $::benchfile {$o(-desc)} $best [string range [string map {\n { }} $res] 0 40]"
 }
 set ::BENCH(ITERS) 1
+# libbench's helpers: temporary files in the directory the program runs in
+proc bench_tmpfile {} { return [file join [pwd] tclbench[pid][incr ::BENCH(uniqid)].dat] }
+proc bench_rm {args} { foreach f $args { catch { file delete $f } } }
+set ::BENCH(uniqid) 0
 source [lindex $argv 0]
