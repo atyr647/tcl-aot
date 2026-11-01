@@ -4066,6 +4066,29 @@ if {$hintFile ne ""} {
     foreach l [split $txt \n] { if {[llength $l] >= 2} { set hn [lindex $l 0]; dict set hints [expr {[string match ::* $hn] ? $hn : "::$hn"}] [lrange $l 1 end] } }
 }
 # the `args` parameter is always a list: boxed
+# A signature from how the body uses each argument (decision 41): I for an argument that some use takes as a number (arithmetic, a numeric comparison,
+# `incr`, an index of lindex/lset/string index), B for one that is only passed on, used as a name (upvar), as text or as a container.  A proc that takes a
+# count and an array name gets the variant IB, where the all-integer variant could never be chosen and the generic one hands over at the arithmetic.
+proc useSig {P} {
+    global PI
+    set num {}
+    set numops {add sub mult div mod expon lt gt le ge eq neq bitand bitor bitxor lshift rshift uminus uplus tryCvtToNumeric}
+    foreach pc $PI($P,reach) {
+        lassign $PI($P,ins,$pc) op a
+        if {$op in {incrScalar1 incrScalar1Imm incrScalar4 incrScalar4Imm}} { set v [operand [lindex $a 0]]; if {$v < $PI($P,nargs)} { dict set num $v 1 } }
+        if {$op ni {loadScalar1 loadScalar4}} continue
+        set v [operand [lindex $a 0]]
+        if {$v >= $PI($P,nargs) || [dict exists $num $v]} continue
+        set users [slotUsers $P $pc $PI($P,depth,$pc)]
+        foreach u $users {
+            lassign $u uop pos upc
+            if {$uop in $numops || ($uop in {listIndex strindex} && $pos == 0) || ($uop eq "lsetList" && $pos == 1)} { dict set num $v 1; break }
+        }
+    }
+    set sig ""
+    for {set v 0} {$v < $PI($P,nargs)} {incr v} { append sig [expr {[dict exists $num $v] ? "I" : "B"}] }
+    return $sig
+}
 proc fixSig {P sig} {
     global PI
     set i $PI($P,argsIdx)
@@ -4079,6 +4102,7 @@ foreach P $translatable {
     set entries [list [string repeat B $k]]
     if {$typedMode} {
         set sigs [list [fixSig $P [string repeat I $k]]]
+        lappend sigs [fixSig $P [useSig $P]]
         if {[dict exists $hints $P]} { set sigs [concat [lmap h [dict get $hints $P] {fixSig $P $h}] $sigs] }
         foreach s [lsort -unique $sigs] {
             if {[string length $s] != $k || [regexp {[^IDB]} $s]} continue
@@ -4187,10 +4211,16 @@ proc entryCall {cid s cargs rk ind} {
     }
 }
 
+proc sigOrder {a b} {
+    set na [string length [string map {B {}} $a]]; set nb [string length [string map {B {}} $b]]
+    if {$na != $nb} { return [expr {$nb - $na}] }
+    return [string compare $a $b]
+}
 # the entry of a compiled body: the interpreter has set up the frame and bound the arguments; pick a typed variant if they fit
 foreach P $translatable {
     set cid [cident $P]; set k $PI($P,nargs)
-    set sigs [lsort -unique $ENTRIES($P)]
+    # (the most specific signature first: the first that fits the arguments is taken)
+    set sigs [lsort -command sigOrder [lsort -unique $ENTRIES($P)]]
     set e "static int tbc_nat_${cid}(Tcl_Interp *interp, Proc *procPtr)\n\{\n    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    Tcl_Obj *objv\[[expr {$k+1}]\];\n    (void) procPtr;\n    objv\[0\] = NULL;\n"
     for {set v 0} {$v < $k} {incr v} { append e "    objv\[[expr {$v+1}]\] = loc_\[$v\].value.objPtr;\n" }
     append e "    tbc_maxdepth = Tcl_SetRecursionLimit(interp, 0);\n"

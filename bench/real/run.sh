@@ -24,11 +24,22 @@ cd [file dirname $env(BF)]
 catch { source $env(H) }
 tbc::capture write $env(CAPTURED)
 C
-printf "%-14s %-38s %10s %10s %8s\n" file benchmark "interp us" "comp us" speedup
+printf "%-14s %-38s %10s %10s %8s\n" file benchmark "interp ns" "comp ns" speedup
 for f in "${files[@]}"; do
   b=$(basename $f .bench); w="$tmp/$b"; mkdir -p $w
   BF=$(realpath $f) CAPTURED=$w/cap.tcl timeout 300 "$tmp/shell0" "$tmp/cap.tcl" >/dev/null 2>&1 </dev/null
   [ -s $w/cap.tcl ] || { echo "$b: nothing captured"; cp /dev/null $w/cap.tcl; }
+  # (the harness's own procs are left to the interpreter: the timing runs inside `bench`)
+  python3 - $w/cap.tcl <<'PY'
+import re, sys
+p = sys.argv[1]; src = open(p).read()
+out, keep, depth = [], True, 0
+for line in src.splitlines(True):
+    if depth == 0: keep = not re.match(r'proc ::bench(_tmpfile|_rm)? ', line)
+    if keep: out.append(line)
+    depth += line.count('{') - line.count('}')
+open(p, 'w').write(''.join(out))
+PY
   "$TCLSH" src/translate.tcl $w/cap.tcl $w/m.c Realbench >$w/tr.log 2>&1 || { echo "$b: translate failed"; continue; }
   "$CC" -O2 -w -DMODINIT=Realbench_Init $TBC_INC "$tmp/main.c" $w/m.c $TBC_LIBS -o $w/shell >$w/cc.log 2>&1 || { echo "$b: build failed"; continue; }
   ( cd $(dirname $f); timeout 300 $w/shell $H $(basename $f) > $w/i.txt 2>&1 </dev/null )
