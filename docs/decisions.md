@@ -721,5 +721,8 @@ table); `tests/typed.sh` checks the generated code of a double array and of a mi
 
 Full-suite result: the whole of `tests/run.sh` from a snapshot of `512df78` (it covers the work-in-progress commits of this decision), exit 0 (17196 calls in the differential test in four modes, forced hand-over at three rates and two seeds,
 guard, typed, osr, hot, cmdmap, names, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The quick suite also ran with `TBC_FORCE_WPOLICY=1` after each change: 0 mismatches.  The 21
-workloads of decisions 19 and 28 are unchanged: see the next paragraph when that run has finished.
+workloads of decisions 19 and 28 are unchanged: compiled instruction counts within 0.1% of before the arrays (the largest change +0.1%, `textutil`), results equal, measured on the last commit of this decision.
+
+The kernels added to `bench/vs-c.sh` after it, first measurement (compiled / C): list built with `lappend` and read with `lindex` 34x, `foreach` over a list 42x, `lset` over a vector made by `lrepeat` 1.7x (the vector of decision 12
+already does it), `dict incr` of computed integer keys 124x, string built with `append` and read with `string index` 36x.  Those are the next gaps.
 
