@@ -23,3 +23,9 @@ proc k_lcs {n} {
         if {[string index $x [expr {$i - 1}]] eq [string index $y [expr {$j - 1}]]} { set d($i,$j) [expr {$d([expr {$i - 1}],[expr {$j - 1}]) + 1}] } else { set u $d([expr {$i - 1}],$j); set l $d($i,[expr {$j - 1}]); set d($i,$j) [expr {$u > $l ? $u : $l}] } } }
     return $d($n,$n)
 }
+proc k_lsum {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 3 % 1001}] }; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [lindex $l $i] }; return $s }
+proc k_lfor {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 7 % 1009}] }; set s 0; foreach v $l { if {$v > 500} { incr s $v } }; return $s }
+proc k_lset {n} { set l [lrepeat $n 0]; for {set i 0} {$i < $n} {incr i} { lset l $i [expr {$i * $i % 997}] }; set s 0; for {set i 1} {$i < $n} {incr i} { incr s [expr {[lindex $l $i] - [lindex $l [expr {$i - 1}]]}] }; return $s }
+proc k_dict {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i * 13 % 5000}] }; set s 0; dict for {k v} $d { incr s [expr {$k * $v}] }; return $s }
+proc k_str {n} { set s ""; for {set i 0} {$i < $n} {incr i} { append s [string index abcdefghij [expr {$i % 10}]] }; set c 0; for {set i 0} {$i < $n} {incr i} { if {[string index $s $i] eq "e"} { incr c } }; return [list $c [string length $s]] }
+

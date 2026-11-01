@@ -14,10 +14,11 @@ gcc -O2 -o "$tmp/c" bench/c/kernels.c || exit 1
 cat > "$tmp/time.tcl" <<'T'
 if {[info exists ::env(COMPILED)]} { load {} Kernels }
 source bench/c/kernels.tcl
-foreach {p a} {k_arith 20000000 k_collatz 100000 k_fib 30 k_sieve 3000000 k_mat 120 k_hist 3000000 k_dotd 1000000 k_lcs 600} {
+foreach {p a} {k_arith 20000000 k_collatz 100000 k_fib 30 k_sieve 3000000 k_mat 120 k_hist 3000000 k_dotd 1000000 k_lcs 600 k_lsum 1000000 k_lfor 1000000 k_lset 1000000 k_dict 1000000 k_str 1000000} {
     set best 1e30
     for {set k 0} {$k < 3} {incr k} { set t0 [clock microseconds]; set r [$p $a]; set t [expr {([clock microseconds] - $t0) / 1000.0}]; if {$t < $best} { set best $t } }
     if {$p eq "k_dotd"} { set r [expr {int($r)}] }
+    if {$p eq "k_str"} { set r [expr {[lindex $r 0] * 1000000000 + [lindex $r 1]}] }
     puts "$p $r $best"
 }
 T
