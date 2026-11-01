@@ -64,13 +64,22 @@ typedef struct TbcDef {
     const char *reason;			/* for the report; static text, or the translator's for a refused proc */
     unsigned long icalls;		/* calls of the interpreter's version seen while profiling */
     struct TbcRec *rec;			/* the attached record, when compiled */
-    struct TbcEntry *lazyEntry;		/* armed: the compiled code to retry at the proc's first call (see tbc_lazy_cmd) */
+    struct TbcEntry *lazyEntry;		/* armed: the compiled code to attach at the proc's first call (see tbc_lazy_fire) */
     Proc *lazyProc;
     Proc *proc;				/* the Proc this record is about (a deleted or redefined proc is no longer reported) */
 } TbcDef;
 
 TBC_SHARED Tcl_HashTable tbc_by_body, tbc_by_name, tbc_recs, tbc_refused_by_key, tbc_defs_by_name, tbc_defs_by_proc;
 TBC_SHARED int tbc_reg_ready;
+
+/* A proc whose compiled body is attached at its first call is armed with entry points of ours in place of the interpreter's (objProc and nreProc of its command,
+ * which hold the same client data, the Proc, as before: `info body`, `info args` and the like go by the delete procedure and are not affected).  The first call restores
+ * the interpreter's, attaches, and makes the call as the interpreter would have.  (An execution trace on the proc would do it too, and is what this was; but a trace
+ * passes the whole command to its handler as text, which for an argument of a few hundred kilobytes costs milliseconds at the first call.)  A command that is a proc,
+ * armed or not, has one of these two as its objProc. */
+static int tbc_lazy_obj(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+static int tbc_lazy_nre(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#define TBC_IS_PROC_OBJPROC(f) ((f) == TclObjInterpProc || (f) == tbc_lazy_obj)
 
 static uint64_t tbc_fingerprint(const ByteCode *bc) {
     uint64_t h = UINT64_C(1469598103934665603);
@@ -1278,7 +1287,7 @@ static ByteCode *tbc_mop_get(Tcl_Interp *interp, int op) {
     Tcl_IncrRefCount(cmd);
     k = Tcl_GetCommandInfo(interp, Tcl_GetString(cmd), &ci);
     Tcl_DecrRefCount(cmd);
-    if (!k || ci.objProc != TclObjInterpProc) return NULL;
+    if (!k || !TBC_IS_PROC_OBJPROC(ci.objProc)) return NULL;
     p = (Proc *) ci.objClientData;
     if (TclProcCompileProc(interp, p, p->bodyPtr, p->cmdPtr->nsPtr, "body of proc", "tbc-mop") != TCL_OK) { Tcl_ResetResult(interp); return NULL; }
     if (p->bodyPtr->typePtr != &tclByteCodeType) return NULL;
@@ -1377,7 +1386,7 @@ typedef struct { Command *c; int epoch; int state; } TbcPin;
 static void tbc_pin_resolve(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm) {
     Command *c = (Command *) Tcl_FindCommand(interp, Tcl_GetString(nm), NULL, TCL_GLOBAL_ONLY);
     pin->state = 1;
-    if (!c || c->nreProc || !c->objProc || c->objProc == TclObjInterpProc) return;
+    if (!c || c->nreProc || !c->objProc || TBC_IS_PROC_OBJPROC(c->objProc)) return;
     c->refCount++;						/* (kept alive, as Tcl does for the commands it caches) */
     pin->c = c; pin->epoch = c->cmdEpoch;
 }
@@ -1590,7 +1599,7 @@ static void tbc_ens_pin_all(Tcl_Interp *interp) {
         Command *c;
         if (tbc_ens_pin[i]) continue;
         c = (Command *) Tcl_FindCommand(interp, tbc_ens_names[i], NULL, TCL_GLOBAL_ONLY);
-        if (!c || c->objProc == TclObjInterpProc) continue;
+        if (!c || TBC_IS_PROC_OBJPROC(c->objProc)) continue;
         c->refCount++;
         tbc_ens_pin[i] = c;
     }
@@ -1605,7 +1614,7 @@ static void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
     memset(g->bad, 0, (size_t) g->ndeps); memset(g->nsp, 0, (size_t) g->nnss * sizeof(Namespace *));
     for (i = 0; i < g->nnames; i++) {
         Command *c = (Command *) Tcl_FindCommand(interp, g->names[i], NULL, TCL_GLOBAL_ONLY);
-        if (c && c->objProc == TclObjInterpProc) c = NULL;	/* (already a proc of the program: not the built-in) */
+        if (c && TBC_IS_PROC_OBJPROC(c->objProc)) c = NULL;	/* (already a proc of the program: not the built-in) */
         if (c) c->refCount++;					/* (kept alive, as Tcl does for the commands it caches) */
         g->exp[i] = c; g->expEp[i] = c ? c->cmdEpoch : 0;
     }
@@ -1677,7 +1686,7 @@ static Command *tbc_guard_cmd(const TbcGuard *g, int i) { return g->exp[i]; }
 static int tbc_direct(Tcl_Interp *interp, Command *c, Command *ens, int objc, Tcl_Obj *const objv[]) {
     Interp *iPtr = (Interp *) interp;
     if (TBC_UNLIKELY(ens && (ens->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return 0;
-    if (TBC_UNLIKELY(!c || c->nreProc || !c->objProc || c->objProc == TclObjInterpProc || (c->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return 0;
+    if (TBC_UNLIKELY(!c || c->nreProc || !c->objProc || TBC_IS_PROC_OBJPROC(c->objProc) || (c->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return 0;
     if (TBC_UNLIKELY((iPtr->flags & (DELETED | CANCELED | TCL_CANCEL_UNWIND)) || iPtr->execEnvPtr->rewind || iPtr->tracePtr || iPtr->limit.active || iPtr->limit.exceeded
             || iPtr->numLevels + 1 > iPtr->maxNestingDepth || TclAsyncReady(iPtr))) return 0;
     Tcl_ResetResult(interp);
@@ -1864,10 +1873,20 @@ static int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char
 
 /* attach at the proc's first call: the interpreter compiles a body then too, so a proc that is never called costs nothing, and the bytecode compared is
  * the one the interpreter has when it runs the proc */
+static void tbc_arm_hook(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName) {
+    TbcDef *d = (TbcDef *) Tcl_GetHashValue(Tcl_FindHashEntry(&tbc_defs_by_name, fullName));
+    Command *c = p->cmdPtr;
+    if (c && c->objProc == TclObjInterpProc && c->nreProc == TclNRInterpProc) {
+        d->lazyEntry = e; d->lazyProc = p;
+        c->objProc = tbc_lazy_obj; c->nreProc = tbc_lazy_nre;
+    } else {
+        /* (a command that something else has taken the entry points of: no first call to wait for) */
+        tbc_attach_entry(interp, p, e, fullName);
+    }
+}
 static void tbc_arm_lazy(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName, int status, const char *reason) {
-    TbcDef *d = tbc_note_def(p, fullName, status, reason);
-    d->lazyEntry = e; d->lazyProc = p;
-    tbc_trace(interp, "add", "execution", fullName, "enter", "::tbc::lazy", 1);
+    (void) tbc_note_def(p, fullName, status, reason);
+    tbc_arm_hook(interp, p, e, fullName);
 }
 
 /* the proc `fullName` (a command of ours or the program's) has just been defined: attach a compiled body if there is one for it */
@@ -1905,56 +1924,42 @@ static void tbc_attach(Tcl_Interp *interp, Proc *p, struct Namespace *nsPtr, con
         else if (rc == 2) {
             /* The compile at definition time gave other bytecode than the translator's: that happens when something the compiler looks at changed after
              * the translator's compile (a package that redefines a core command or extends an ensemble: the compile epoch moves, and the interpreter
-             * compiles the proc again at its first call).  Look again then, with a one-shot trace on the proc (the interface the program itself has). */
-            TbcDef *d = (TbcDef *) Tcl_GetHashValue(Tcl_FindHashEntry(&tbc_defs_by_name, fullName));
-            d->lazyEntry = e; d->lazyProc = p;
-            tbc_trace(interp, "add", "execution", fullName, "enter", "::tbc::lazy", 1);
+             * compiles the proc again at its first call).  Look again then, as for a proc armed at its definition. */
+            tbc_arm_hook(interp, p, e, fullName);
         }
     }
 }
 
-/* ::tbc::lazy name {cmd args} enter -- the first call of a proc whose bytecode was not the compiled one when it was defined: the interpreter compiles
- * it now, at the current compile epoch, so the check is made again.  One-shot. */
-static int tbc_lazy_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+/* The first call of an armed proc: put the interpreter's entry points back, attach the compiled body (the interpreter compiles the body now, at the current compile
+ * epoch, so the bytecode compared is the one it runs), and let the call go on as it would have.  One-shot. */
+static void tbc_lazy_fire(Tcl_Interp *interp, Proc *p) {
+    Command *c = p->cmdPtr;
     Tcl_HashEntry *h;
-    Tcl_CmdInfo ci;
     TbcDef *d;
-    const char *armed, *name;
-    Tcl_Command tok;
-    Tcl_Obj *full;
-    (void) cd;
-    if (objc < 2 || !tbc_reg_ready) return TCL_OK;
-    armed = Tcl_GetString(objv[1]);
-    name = armed;
-    h = Tcl_FindHashEntry(&tbc_defs_by_name, armed);
+    if (c->objProc == tbc_lazy_obj) { c->objProc = TclObjInterpProc; c->nreProc = TclNRInterpProc; }
+    h = Tcl_FindHashEntry(&tbc_defs_by_proc, (char *) p);
     d = h ? (TbcDef *) Tcl_GetHashValue(h) : NULL;
-    /* the command this call is to: the proc under the name it was armed with, or, if it has been renamed since, under the name it is being called by */
-    if (!d || !d->lazyEntry || !Tcl_GetCommandInfo(interp, armed, &ci) || ci.objProc != TclObjInterpProc || (Proc *) ci.objClientData != d->lazyProc) {
-        Tcl_Obj **w; int n;
-        if (objc < 3 || Tcl_ListObjGetElements(NULL, objv[2], &n, &w) != TCL_OK || n < 1) return TCL_OK;
-        name = Tcl_GetString(w[0]);
-        if (!d || !d->lazyEntry || !Tcl_GetCommandInfo(interp, name, &ci) || ci.objProc != TclObjInterpProc || (Proc *) ci.objClientData != d->lazyProc) {
-            /* not this proc (an alias, or a later definition of the name): leave the trace, which goes with its command */
-            return TCL_OK;
-        }
-    }
-    tok = Tcl_FindCommand(interp, name, NULL, 0);
-    if (!tok) return TCL_OK;
-    full = Tcl_NewObj();
-    Tcl_IncrRefCount(full);
-    Tcl_GetCommandFullName(interp, tok, full);
-    tbc_trace2(interp, "remove", "execution", Tcl_GetString(full), "enter", "::tbc::lazy", armed);
+    if (!d || !d->lazyEntry || d->lazyProc != p || !tbc_reg_ready) return;
     {
         TbcEntry *e = d->lazyEntry;
-        Proc *p = d->lazyProc;
+        Tcl_Obj *full = Tcl_NewObj();
+        Tcl_IncrRefCount(full);
         d->lazyEntry = NULL; d->lazyProc = NULL;
+        Tcl_GetCommandFullName(interp, (Tcl_Command) c, full);
         if (tbc_attach_entry(interp, p, e, Tcl_GetString(full)) == 2) {
-            TbcDef *nd = (TbcDef *) Tcl_GetHashValue(Tcl_FindHashEntry(&tbc_defs_by_name, Tcl_GetString(full)));
-            nd->reason = "the interpreter's bytecode for this definition differs from the compiled one, also at its first call";
+            Tcl_HashEntry *nh = Tcl_FindHashEntry(&tbc_defs_by_name, Tcl_GetString(full));
+            if (nh) ((TbcDef *) Tcl_GetHashValue(nh))->reason = "the interpreter's bytecode for this definition differs from the compiled one, also at its first call";
         }
+        Tcl_DecrRefCount(full);
     }
-    Tcl_DecrRefCount(full);
-    return TCL_OK;
+}
+static int tbc_lazy_obj(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+    tbc_lazy_fire(interp, (Proc *) cd);
+    return TclObjInterpProc(cd, interp, objc, objv);
+}
+static int tbc_lazy_nre(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+    tbc_lazy_fire(interp, (Proc *) cd);
+    return TclNRInterpProc(cd, interp, objc, objv);
 }
 
 /* `proc` itself, with the interpreter's own implementation called first and a look at what it defined afterwards: no trace on `proc`, so no copy of every
@@ -1976,7 +1981,7 @@ static int tbc_proc_wrap(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *c
     TclGetNamespaceForQualName(interp, Tcl_GetString(objv[1]), ((Interp *) interp)->varFramePtr->nsPtr, 0, &nsPtr, &altPtr, &cxtPtr, &simple);
     if (!nsPtr || !simple) return rc;
     tok = Tcl_FindCommand(interp, simple, (Tcl_Namespace *) nsPtr, TCL_NAMESPACE_ONLY);
-    if (!tok || !Tcl_GetCommandInfoFromToken(tok, &ci) || ci.objProc != TclObjInterpProc) return rc;
+    if (!tok || !Tcl_GetCommandInfoFromToken(tok, &ci) || !TBC_IS_PROC_OBJPROC(ci.objProc)) return rc;
     full = Tcl_NewObj();
     Tcl_IncrRefCount(full);
     Tcl_GetCommandFullName(interp, tok, full);
@@ -2088,7 +2093,7 @@ static int tbc_fp_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *cons
     Proc *p;
     (void) cd;
     if (objc != 2) { Tcl_WrongNumArgs(interp, 1, objv, "procname"); return TCL_ERROR; }
-    if (!Tcl_GetCommandInfo(interp, Tcl_GetString(objv[1]), &ci) || ci.objProc != TclObjInterpProc) { Tcl_SetObjResult(interp, Tcl_NewStringObj("not a proc", -1)); return TCL_ERROR; }
+    if (!Tcl_GetCommandInfo(interp, Tcl_GetString(objv[1]), &ci) || !TBC_IS_PROC_OBJPROC(ci.objProc)) { Tcl_SetObjResult(interp, Tcl_NewStringObj("not a proc", -1)); return TCL_ERROR; }
     p = (Proc *) ci.objClientData;
     if (TclProcCompileProc(interp, p, p->bodyPtr, p->cmdPtr->nsPtr, "body of proc", Tcl_GetString(objv[1])) != TCL_OK) return TCL_ERROR;
     if (p->bodyPtr->typePtr != &tclByteCodeType) { Tcl_SetObjResult(interp, Tcl_NewStringObj("not compiled", -1)); return TCL_ERROR; }
@@ -2106,7 +2111,7 @@ static int tbc_attached_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj
         for (h = Tcl_FirstHashEntry(&tbc_recs, &hs); h; h = Tcl_NextHashEntry(&hs)) {
             TbcRec *rec = (TbcRec *) Tcl_GetHashValue(h);
             Tcl_CmdInfo ci;
-            if (Tcl_GetCommandInfo(interp, rec->name, &ci) && ci.objProc == TclObjInterpProc && (Proc *) ci.objClientData == rec->p && !rec->demoted)
+            if (Tcl_GetCommandInfo(interp, rec->name, &ci) && TBC_IS_PROC_OBJPROC(ci.objProc) && (Proc *) ci.objClientData == rec->p && !rec->demoted)
                 Tcl_ListObjAppendElement(NULL, r, Tcl_NewStringObj(rec->name, -1));
         }
     }
@@ -2170,7 +2175,7 @@ static int tbc_prof_cb(ClientData cd, Tcl_Interp *interp, int level, const char 
     Tcl_CmdInfo ci;
     (void) cd; (void) level; (void) cmdString;
     if (!Tcl_GetCommandInfoFromToken(tok, &ci)) return TCL_OK;
-    if (ci.objProc == TclObjInterpProc) {
+    if (TBC_IS_PROC_OBJPROC(ci.objProc)) {
         Tcl_HashEntry *h = Tcl_FindHashEntry(&tbc_defs_by_proc, (char *) ci.objClientData);
         TbcDef *d;
         if (!h) {
@@ -2324,7 +2329,7 @@ static int tbc_report_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *
             TbcDef *d = (TbcDef *) Tcl_GetHashValue(h);
             Tcl_CmdInfo ci;
             /* a proc that was deleted or defined again since is not reported */
-            if (!Tcl_GetCommandInfo(interp, d->name, &ci) || ci.objProc != TclObjInterpProc || (Proc *) ci.objClientData != d->proc) continue;
+            if (!Tcl_GetCommandInfo(interp, d->name, &ci) || !TBC_IS_PROC_OBJPROC(ci.objProc) || (Proc *) ci.objClientData != d->proc) continue;
             if (d->rec) { ccalls += d->rec->calls; cocalls += d->rec->fallbacks; }
             if (d->status == TBC_DEF_PENDING) { npend++; Tcl_ListObjAppendElement(NULL, pendNames, Tcl_NewStringObj(d->name, -1)); }
             else if (tbc_def_interpreted(d)) { ds[nd++] = d; icalls += d->icalls; } else ncomp++;
@@ -2466,7 +2471,7 @@ static void tbc_mf_setup(Tcl_Interp *interp) {
         Tcl_CmdInfo ci;
         Tcl_Obj *full = Tcl_ObjPrintf("::tcl::mathfunc::%s", names[i]);
         Tcl_IncrRefCount(full);
-        if (!Tcl_GetCommandInfo(interp, Tcl_GetString(full), &ci) || !ci.isNativeObjectProc || ci.objProc == TclObjInterpProc) ok = 0;
+        if (!Tcl_GetCommandInfo(interp, Tcl_GetString(full), &ci) || !ci.isNativeObjectProc || TBC_IS_PROC_OBJPROC(ci.objProc)) ok = 0;
         else tbc_trace(interp, "add", "command", Tcl_GetString(full), "rename delete", "::tbc::invalidate", 1);
         Tcl_DecrRefCount(full);
     }
@@ -2485,7 +2490,6 @@ static void tbc_install(Tcl_Interp *interp) {
     Tcl_CreateObjCommand(interp, "::tbc::report", tbc_report_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::profile", tbc_profile_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::capture", tbc_capture_cmd, NULL, NULL);
-    Tcl_CreateObjCommand(interp, "::tbc::lazy", tbc_lazy_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::attach", tbc_attach_cmd, NULL, NULL);
     tbc_mf_setup(interp);
     if (getenv("TBC_EAGER") && getenv("TBC_EAGER")[0] == '1') tbc_eager = 1;

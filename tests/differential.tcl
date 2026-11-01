@@ -263,6 +263,8 @@ foreach {cmd call} {string {pe_mapn 3} ::tcl::string::map {pe_mapn 3} dict {pe_d
     lappend calls "set ::trj {}; trace add execution $cmd enter {lappend ::trj}; set r \[$call\]; trace remove execution $cmd enter {lappend ::trj}; list \$r \[llength \$::trj\]"
 }
 lappend calls {pe_mapn 3} {pe_dsizen 3} {pe_firstn 3}
+# the first call of a proc attached lazily leaves the arguments as they were (no string form made for a byte array)
+lappend calls {tz_lazy}
 lappend calls {interp limit {} command -value 100000000; set r [pb_loop 3]; interp limit {} command -value {}; set r}
 # string first / last / index / range
 set sfs [list hello {} o ll "hello world" "\u00e9\u20acx" [format a%cb 0] [binary format c3 {65 66 67}] 12345 0x1F " 5" {a b c} xxxxxxxxxxxx 1.5 "tab\there" "\u00e9" "x\u00e9y"]

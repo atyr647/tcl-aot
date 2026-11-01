@@ -83,7 +83,7 @@ The module adds commands in the `::tbc` namespace:
 | `tbc::attach eager\|lazy\|status` | when compiled bodies are attached |
 | `tbc::profile on\|off\|reset\|status` | count the calls of procs left to the interpreter and the scripts evaluated at run time (`eval`, `uplevel`, `source`...). It runs a Tcl trace on every command: a measuring tool, not for production |
 | `tbc::capture on\|off\|clear\|count\|get\|write path` | record the definitions of procs the module has no code for, as `proc` commands. Translating that file and linking the result in gives procs a program builds at run time (from `regsub`, `string map`...) their compiled bodies; `tests/capture.sh` is the whole loop |
-| `tbc::fingerprint`, `tbc::invalidate`, `tbc::lazy` | internal |
+| `tbc::fingerprint`, `tbc::invalidate` | internal |
 
 ## Limits
 
