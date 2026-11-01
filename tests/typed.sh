@@ -131,3 +131,18 @@ TCL
 "$TCLSH" src/translate.tcl "$tmp/l.tcl" "$tmp/l.c" Littest >"$tmp/l.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/l.log"; exit 1; }
 if ! grep -q 'L__3a_3atl_5flit_[0-9]* = tbc_lit("1e3", 3)' "$tmp/l.c"; then echo "typed: FAILED, the literal 1e3 lost its text:"; grep 'L__3a_3atl_5flit' "$tmp/l.c" | head -3; exit 1; fi
 echo "typed: a literal 1e3 keeps its text when a number is parsed from it: ok"
+
+# a list built by lappend that does not escape is a native vector of integers (tbc_ivec_push), and a foreach over it does not hand over
+cat > "$tmp/v.tcl" <<'TCL'
+proc tv_sum {n} {
+    set l {}
+    for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 3}] }
+    set s 0
+    foreach v $l { incr s $v }
+    return $s
+}
+TCL
+TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/v.tcl" "$tmp/v.c" Vectest >"$tmp/v.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/v.log"; exit 1; }
+if ! grep -q "tbc_ivec_push" "$tmp/v.c"; then echo "typed: FAILED, lappend does not build a native vector"; exit 1; fi
+if grep -E '^DEADOP (lappendScalar|foreach_start|foreach_step|foreach_end|add|incrScalar1) .*tv_sum' "$tmp/v.log"; then echo "typed: FAILED, the vector loop hands over"; exit 1; fi
+echo "typed: a list built by lappend and read by foreach is a native vector, without hand-over: ok"
