@@ -30,5 +30,14 @@ check "runs" [ta_catch_opts 0] {{divide by zero} 1 1}
 check "wrong # args" [catch {proc a b} m] 1
 check "message" $m {wrong # args: should be "proc name args body"}
 check "bad arg list" [catch {proc bad {{a b c}} {}} m] 1
+# the module initialised again, in another interpreter: the first one keeps its compiled bodies (a second initialisation re-registered every entry under its
+# own name, which made a cycle that the next proc definition looped on for ever, and pinned the other interpreter's commands in the guard)
+set ci [interp create]
+check "loaded into a child interpreter" [catch { load {} Testprocs $ci } m] 0
+proc dt_empty {} { set d {}; return [dict size $d] }
+check "a proc defined after it is attached" [expr {"::dt_empty" in [tbc::attached]}] 1
+check "and runs" [dt_empty] 0
+check "the child runs it interpreted, with the same result" [$ci eval {proc dt_empty {} { set d {}; return [dict size $d] }; dt_empty}] 0
+interp delete $ci
 puts [expr {$fails ? "$fails FAILED" : "all proc wrapper checks passed"}]
 exit [expr {$fails ? 1 : 0}]

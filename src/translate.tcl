@@ -4263,7 +4263,9 @@ if {[llength $refusedProcs]} {
     append out "\};\n"
 }
 set regId 0
-append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_build(interp) != TCL_OK) return TCL_ERROR;\n    tbc_rt_init();\n    tbc_capture_builtins(interp);\n    tbc_install(interp);\n"
+append out "\nint ${initName}_Init(Tcl_Interp *interp)\n\{\n    if (tbc_check_build(interp) != TCL_OK) return TCL_ERROR;\n    /* (the registry of compiled bodies and the guard's pinned commands are the process's, and serve the first interpreter the module is initialised in: a later
+     * initialisation, in that interpreter again or in another one, changes nothing, and the procs of another interpreter run interpreted - decision 40) */
+    \{ static Tcl_Interp *first_; if (first_) return TCL_OK; first_ = interp; \}\n    tbc_rt_init();\n    tbc_capture_builtins(interp);\n    tbc_install(interp);\n"
 if {[llength $gall]} { append out "    tbc_guard_register(interp, &tbc_guard_$initName);\n" }
 # the pinned commands that typed code calls directly (tbc_direct): from the guard's table, or none for a name the guard does not hold
 dict for {nm id} $DCNAMES {
