@@ -27,6 +27,7 @@ extern void TclExprFloatError(Tcl_Interp *, double value);   /* "domain error" f
 
 #define TBC_INLINE static inline __attribute__((always_inline))
 #define TBC_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define TBC_LIKELY(x) __builtin_expect(!!(x), 1)
 
 /* The state the compiled code shares.  A module in one file keeps it static.  A module split over several files (translate.tcl -split) defines it in one of them
  * (TBC_SPLIT_OWNER, the file with the module's Init) and the others declare it (TBC_SPLIT_USER). */

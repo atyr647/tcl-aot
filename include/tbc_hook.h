@@ -366,7 +366,7 @@ typedef struct {
  * (TBC_RABS) and ord lists the keys in the order they were made, for tbc_rflush and the table.  "Any order" has a limit: a key above four times the number of elements, and above 4096,
  * is the table's. */
 typedef struct { int64_t i; Tcl_Obj *o; } tbc_rslot;
-typedef struct { tbc_rent *e; int32_t *tab; size_t n, cap, tcap; tbc_rent ie[TBC_RSMALL]; int32_t itab[TBC_RSMALL * 2]; tbc_rslot *d; size_t dn, dcap, dw; int dmode; int64_t dbase, dbase2; int32_t *ord; size_t on, ocap; } tbc_rmap;
+typedef struct { tbc_rent *e; int32_t *tab; size_t n, cap, tcap; tbc_rent ie[TBC_RSMALL]; int32_t itab[TBC_RSMALL * 2]; tbc_rslot *d; size_t dn, dcap, dw, dwe; int dmode; int64_t dbase, dbase2; int32_t *ord; size_t on, ocap; } tbc_rmap;
 #define TBC_RDBL ((Tcl_Obj *) 1)
 #define TBC_RABS ((Tcl_Obj *) 2)		/* a slot of an unordered vector (dmode 3) that holds no element */
 TBC_INLINE int64_t tbc_d2i(double d) { int64_t i; memcpy(&i, &d, sizeof i); return i; }
@@ -484,12 +484,11 @@ TBC_INLINE tbc_rslot *tbc_rdslot(const tbc_rmap *m, int64_t k) {
     uint64_t x = (uint64_t) k - (uint64_t) m->dbase;
     return (x < m->dn && m->d[x].o != TBC_RABS) ? &m->d[x] : NULL;
 }
+/* (dwe, the width of a row: dw, or the length of the first row while it is the only one, is kept by tbc_rdappend) */
 TBC_INLINE tbc_rslot *tbc_rd2slot(const tbc_rmap *m, int64_t i, int64_t j) {
     uint64_t ii = (uint64_t) i - (uint64_t) m->dbase, jj = (uint64_t) j - (uint64_t) m->dbase2;
-    uint64_t w = m->dw ? m->dw : m->dn, x;
-    if (jj >= w) return NULL;
-    x = ii * w + jj;
-    return x < m->dn ? &m->d[x] : NULL;
+    uint64_t x = ii * m->dwe + jj;
+    return (jj < m->dwe && x < m->dn) ? &m->d[x] : NULL;
 }
 /* is (i, j) the next element of a two-dimensional vector? */
 TBC_INLINE int tbc_rd2next(const tbc_rmap *m, int64_t i, int64_t j) {
@@ -525,7 +524,7 @@ static int tbc_rd2c(tbc_rmap *m) {
         (void) tbc_radd(m, kb, kl, tbc_hash(kb, kl), v);
     }
     free(d); free(m->ord);
-    m->d = NULL; m->dn = m->dcap = m->dw = 0; m->dmode = 0; m->dbase = m->dbase2 = 0; m->ord = NULL; m->on = m->ocap = 0;
+    m->d = NULL; m->dn = m->dcap = m->dw = m->dwe = 0; m->dmode = 0; m->dbase = m->dbase2 = 0; m->ord = NULL; m->on = m->ocap = 0;
     return 1;
 }
 /* the next element of the vector; o is NULL (the integer i), TBC_RDBL (the double with the bits i) or a reference the vector then owns.  0 when memory runs out */
@@ -537,6 +536,7 @@ static int tbc_rdappend(tbc_rmap *m, int64_t i, Tcl_Obj *o) {
         m->d = nd; m->dcap = nc;
     }
     m->d[m->dn].i = i; m->d[m->dn].o = o; m->dn++;
+    if (m->dmode == 2) m->dwe = m->dw ? m->dw : m->dn;
     return 1;
 }
 /* append the next element of a two-dimensional vector (tbc_rd2next has accepted its key; row is its first coordinate): the second row fixes the width */
@@ -544,13 +544,13 @@ static int tbc_rd2append(tbc_rmap *m, int64_t row, int64_t i, Tcl_Obj *o) {
     size_t odw = m->dw;
     if (!m->dw && row == m->dbase + 1) m->dw = m->dn;
     if (tbc_rdappend(m, i, o)) return 1;
-    m->dw = odw;
+    m->dw = odw; m->dwe = odw ? odw : m->dn;
     return 0;
 }
 /* the first element of an empty map makes it dense: one-dimensional for the key k (dmode 1), two-dimensional for the key (k, k2) (dmode 2) */
 static int tbc_rdstart(tbc_rmap *m, int mode, int64_t k, int64_t k2, int64_t i, Tcl_Obj *o) {
     if (mode == 1) TBC_HIT("X:array dense 1-d start"); else TBC_HIT("X:array dense 2-d start");
-    m->dmode = mode; m->dbase = k; m->dbase2 = k2; m->dw = 0;
+    m->dmode = mode; m->dbase = k; m->dbase2 = k2; m->dw = 0; m->dwe = 0;
     if (!tbc_rdappend(m, i, o)) { m->dmode = 0; return 0; }
     return 1;
 }
@@ -824,21 +824,21 @@ TBC_INLINE int tbc_rgetn_k(const tbc_rmap *m, int64_t key, int *tag, int64_t *iv
     if (m->dmode & 1) { tbc_rslot *sl = tbc_rdslot(m, key); return sl ? tbc_rslotn(sl, tag, iv, dv) : 0; }
     return tbc_rgetn_k_slow(m, key, tag, iv, dv);
 }
+static int tbc_rgetw_k_slow(const tbc_rmap *m, int64_t key, int64_t *w) { int tag; double dv; return tbc_rgetn_k(m, key, &tag, w, &dv) && !tag; }
 TBC_INLINE int tbc_rgetw_k(const tbc_rmap *m, int64_t key, int64_t *w) {
-    if (m->dmode & 1) {
+    if (TBC_LIKELY(m->dmode & 1)) {
         tbc_rslot *sl = tbc_rdslot(m, key);
-        if (!sl) return 0;
-        if (!sl->o) { *w = sl->i; return 1; }
+        if (TBC_LIKELY(sl && !sl->o)) { *w = sl->i; return 1; }
     }
-    { int tag; double dv; return tbc_rgetn_k(m, key, &tag, w, &dv) && !tag; }
+    return tbc_rgetw_k_slow(m, key, w);
 }
+static int tbc_rgetd_k_slow(const tbc_rmap *m, int64_t key, double *d) { int tag; int64_t iv; return tbc_rgetn_k(m, key, &tag, &iv, d) && tag; }
 TBC_INLINE int tbc_rgetd_k(const tbc_rmap *m, int64_t key, double *d) {
-    if (m->dmode & 1) {
+    if (TBC_LIKELY(m->dmode & 1)) {
         tbc_rslot *sl = tbc_rdslot(m, key);
-        if (!sl) return 0;
-        if (sl->o == TBC_RDBL) { *d = tbc_i2d(sl->i); return 1; }
+        if (TBC_LIKELY(sl && sl->o == TBC_RDBL)) { *d = tbc_i2d(sl->i); return 1; }
     }
-    { int tag; int64_t iv; return tbc_rgetn_k(m, key, &tag, &iv, d) && tag; }
+    return tbc_rgetd_k_slow(m, key, d);
 }
 static int tbc_rhas_k_slow(const tbc_rmap *m, int64_t key) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rhas(m, kb, kl); }
 TBC_INLINE int tbc_rhas_k(const tbc_rmap *m, int64_t key) {
@@ -883,21 +883,21 @@ TBC_INLINE int tbc_rgetn_k2(const tbc_rmap *m, int64_t i, int64_t j, int *tag, i
     if (m->dmode == 2) { tbc_rslot *sl = tbc_rd2slot(m, i, j); return sl ? tbc_rslotn(sl, tag, iv, dv) : 0; }
     return tbc_rgetn_k2_slow(m, i, j, tag, iv, dv);
 }
+static int tbc_rgetw_k2_slow(const tbc_rmap *m, int64_t i, int64_t j, int64_t *w) { int tag; double dv; return tbc_rgetn_k2(m, i, j, &tag, w, &dv) && !tag; }
 TBC_INLINE int tbc_rgetw_k2(const tbc_rmap *m, int64_t i, int64_t j, int64_t *w) {
-    if (m->dmode == 2) {
+    if (TBC_LIKELY(m->dmode == 2)) {
         tbc_rslot *sl = tbc_rd2slot(m, i, j);
-        if (!sl) return 0;
-        if (!sl->o) { *w = sl->i; return 1; }
+        if (TBC_LIKELY(sl && !sl->o)) { *w = sl->i; return 1; }
     }
-    { int tag; double dv; return tbc_rgetn_k2(m, i, j, &tag, w, &dv) && !tag; }
+    return tbc_rgetw_k2_slow(m, i, j, w);
 }
+static int tbc_rgetd_k2_slow(const tbc_rmap *m, int64_t i, int64_t j, double *d) { int tag; int64_t iv; return tbc_rgetn_k2(m, i, j, &tag, &iv, d) && tag; }
 TBC_INLINE int tbc_rgetd_k2(const tbc_rmap *m, int64_t i, int64_t j, double *d) {
-    if (m->dmode == 2) {
+    if (TBC_LIKELY(m->dmode == 2)) {
         tbc_rslot *sl = tbc_rd2slot(m, i, j);
-        if (!sl) return 0;
-        if (sl->o == TBC_RDBL) { *d = tbc_i2d(sl->i); return 1; }
+        if (TBC_LIKELY(sl && sl->o == TBC_RDBL)) { *d = tbc_i2d(sl->i); return 1; }
     }
-    { int tag; int64_t iv; return tbc_rgetn_k2(m, i, j, &tag, &iv, d) && tag; }
+    return tbc_rgetd_k2_slow(m, i, j, d);
 }
 static int tbc_rhas_k2_slow(const tbc_rmap *m, int64_t i, int64_t j) { char kb[48]; int kl = tbc_fmt_pair(kb, i, j); return tbc_rhas(m, kb, kl); }
 TBC_INLINE int tbc_rhas_k2(const tbc_rmap *m, int64_t i, int64_t j) {
