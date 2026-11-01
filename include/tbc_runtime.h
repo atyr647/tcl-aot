@@ -780,6 +780,8 @@ static int tbc_s_range(Tcl_Obj *s, int64_t first, int64_t last, Tcl_Obj **out) {
     return 1;
 }
 /* an owned string object (one reference) of a key held as text in a buffer of typed code */
+TBC_INLINE int tbc_fmt_i64(char *buf, int64_t w);
+TBC_INLINE Tcl_Obj *tbc_newpair(int64_t i, int64_t j) { char kb[48]; int n, k; n = k = 0; { char t[24]; int a = 0; uint64_t u = i < 0 ? (uint64_t) 0 - (uint64_t) i : (uint64_t) i; do { t[a++] = (char) ('0' + u % 10); u /= 10; } while (u); if (i < 0) kb[n++] = '-'; while (a) kb[n++] = t[--a]; } kb[n++] = ','; { char t[24]; int a = 0; uint64_t u = j < 0 ? (uint64_t) 0 - (uint64_t) j : (uint64_t) j; do { t[a++] = (char) ('0' + u % 10); u /= 10; } while (u); if (j < 0) kb[n++] = '-'; while (a) kb[n++] = t[--a]; } (void) k; { Tcl_Obj *o = Tcl_NewStringObj(kb, n); Tcl_IncrRefCount(o); return o; } }
 TBC_INLINE Tcl_Obj *tbc_newkey(const char *s, int n) { Tcl_Obj *o = Tcl_NewStringObj(s, n); Tcl_IncrRefCount(o); return o; }
 TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) { Tcl_Obj *o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); return o; }
 /* `binary scan $data <t>[u]* var` for t one of c s S i I: the list tclBinary.c's BinaryScanCmd builds (ScanNumber's byte order and sign extension; a

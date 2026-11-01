@@ -98,3 +98,15 @@ if echo "$out" | grep -q -E '^DEADOP (eq|neq|lt|le|gt|ge) '; then echo "typed: F
 grep -q "tbc_cmpo(" "$tmp/c.c" || { echo "typed: FAILED, no generic comparison in the code of tc_lit"; exit 1; }
 echo "typed: comparisons of objects and of text literals stay in typed code: ok"
 
+
+# a native array reached by integer keys, or by `$i,$j` of two integers, is reached without building the key's text (tbc_r*_k, tbc_r*_k2), and a load from an array that only
+# integers are stored in gives an unboxed integer
+cat > "$tmp/d.tcl" <<'TCL'
+proc td_sieve {n} { for {set i 0} {$i <= $n} {incr i} { set p($i) 1 }; set c 0; for {set i 2} {$i <= $n} {incr i} { if {$p($i)} { incr c } }; return $c }
+proc td_mat {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set a($i,$j) [expr {$i + $j}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { incr s $a($i,$j) } }; return $s }
+TCL
+"$TCLSH" src/translate.tcl "$tmp/d.tcl" "$tmp/d.c" Densetest >"$tmp/d.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/d.log"; exit 1; }
+for f in tbc_rseti_k tbc_rgetw_k tbc_rseti_k2 tbc_rgetw_k2; do
+  grep -q "$f(" "$tmp/d.c" || { echo "typed: FAILED, the generated code of the array procs does not use $f"; exit 1; }
+done
+echo "typed: arrays by integer keys and by \$i,\$j are reached without key text, loads give unboxed integers: ok"

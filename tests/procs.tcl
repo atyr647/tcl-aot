@@ -1684,6 +1684,52 @@ proc wa_scale {l k} { set r {}; foreach v $l { lappend r [expr {$v * $k - 1}] };
 proc wa_max {l} { set m [lindex $l 0]; foreach v $l { if {$v > $m} { set m $v } }; return $m }
 proc wa_poly {x} { set r 0; foreach c {3 -2 5} { set r [expr {$r * $x + $c}] }; return $r }
 proc wa_twice {l} { list [wa_sum $l] [wa_sum $l] }
+# dense native arrays: keys that are canonical integers made in ascending order without a gap are held in a vector (decisions 34), anything else turns the array into the
+# table; the elements, their text and the errors must be what the interpreter's arrays give
+proc da_asc {n base} { for {set i 0} {$i < $n} {incr i} { set a([expr {$base + $i}]) [expr {$i * 2}] }; set s 0; for {set i 0} {$i < $n} {incr i} { incr s $a([expr {$base + $i}]) }; return $s }
+proc da_fill {n} { for {set i 0} {$i <= $n} {incr i} { set p($i) 1 }; for {set i 2} {$i * $i <= $n} {incr i} { if {$p($i)} { for {set j [expr {$i * $i}]} {$j <= $n} {incr j $i} { set p($j) 0 } } }; set c 0; for {set i 2} {$i <= $n} {incr i} { if {$p($i)} { incr c } }; return $c }
+proc da_gap {n} { for {set i 0} {$i < $n} {incr i 2} { set a($i) $i }; set s 0; for {set i 0} {$i < $n} {incr i 2} { incr s $a($i) }; return $s }
+proc da_desc {n} { for {set i $n} {$i > 0} {incr i -1} { set a($i) [expr {$i * $i}] }; set s 0; for {set i 1} {$i <= $n} {incr i} { incr s $a($i) }; return $s }
+proc da_str {} { set a(0) 5; set a(1) abc; set a(2) 0x10; set a(3) 007; set a(4) 1.50; set a(5) {x y}; set a(6) 100000000000000000000; return [list $a(0) $a(1) $a(2) $a(3) $a(4) $a(5) $a(6)] }
+proc da_strlate {n} { for {set i 0} {$i < $n} {incr i} { set a($i) $i }; set a($n) late; set a(1) [expr {$a(1) + 1}]; return [list $a(0) $a(1) $a($n)] }
+proc da_neg {} { set a(-1) 1; set a(0) 2; set a(1) 3; return [list $a(-1) $a(0) $a(1)] }
+proc da_big {} { set a(4294967296) 1; set a(2147483647) 2; set a(2147483648) 3; return [list $a(4294967296) $a(2147483647) $a(2147483648)] }
+proc da_edge {n} { for {set i 0} {$i < $n} {incr i} { set a($i) $i }; set a(01) x; set a(+3) y; set a( 4) z; return [list $a(0) $a(1) $a(01) $a(+3) $a( 4)] }
+proc da_missing {n} { for {set i 0} {$i < $n} {incr i} { set a($i) $i }; return $a(5) }
+proc da_missing0 {} { set a(0) 1; set a(2) 2; return $a(1) }
+proc da_exists {n k} { for {set i 0} {$i < $n} {incr i} { set a($i) $i }; list [info exists a($k)] [info exists a(0)] [info exists a([expr {$n - 1}])] [info exists a($n)] }
+proc da_incr {n} { for {set i 0} {$i < $n} {incr i} { incr h([expr {$i % 7}]) }; set s 0; for {set k 0} {$k < 7} {incr k} { append s ,$h($k) }; return $s }
+proc da_incr2 {n} { for {set i 0} {$i < $n} {incr i} { incr h([expr {($i * 3) % 7}]) [expr {$i + 1}] }; set s 0; for {set k 0} {$k < 7} {incr k} { append s ,$h($k) }; return $s }
+proc da_incrstr {} { set a(0) 1; set a(1) abc; incr a(0) 5; return [list $a(0) [catch {incr a(1)} m] $m] }
+proc da_overflow {} { set a(0) 9223372036854775807; set a(1) 1; incr a(0); return $a(0) }
+proc da_base1 {n} { for {set i 1} {$i <= $n} {incr i} { set a($i) [expr {$i % 3}] }; set s 0; for {set i 1} {$i <= $n} {incr i} { incr s $a($i) }; return $s }
+proc da_mixed {} { set a(0) 1; set a(1) 2; set a(x) 3; set a(2) 4; return [list $a(0) $a(1) $a(x) $a(2)] }
+proc da_dbl {n} { for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i / 4.0}] }; set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $a($i)}] }; return $s }
+proc da_two {n m} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $m} {incr j} { set a($i,$j) [expr {$i * 10 + $j}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $m} {incr j} { incr s $a($i,$j) } }; return $s }
+proc da_two1 {n m} { for {set i 1} {$i <= $n} {incr i} { for {set j 1} {$j <= $m} {incr j} { set a($i,$j) [expr {$i - $j}] } }; set s 0; for {set i 1} {$i <= $n} {incr i} { for {set j 1} {$j <= $m} {incr j} { incr s [expr {$a($i,$j) * 2}] } }; return $s }
+proc da_col {n m} { for {set j 0} {$j < $m} {incr j} { for {set i 0} {$i < $n} {incr i} { set a($i,$j) [expr {$i + $j}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $m} {incr j} { incr s $a($i,$j) } }; return $s }
+proc da_ragged {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j <= $i} {incr j} { set a($i,$j) [expr {$i * $j}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j <= $i} {incr j} { incr s $a($i,$j) } }; return $s }
+proc da_twogap {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {incr j} { if {$j != 1 || $i != 1} { set a($i,$j) [expr {$i + $j}] } } }; return [list $a(0,0) $a(1,0) $a(2,2)] }
+proc da_twomissing {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {incr j} { set a($i,$j) 1 } }; return $a(1,3) }
+proc da_twoexists {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {incr j} { set a($i,$j) 1 } }; list [info exists a(1,2)] [info exists a(1,3)] [info exists a(3,0)] [info exists a(0,0)] [info exists a(2,-1)] }
+proc da_twoincr {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 4} {incr j} { incr c($i,$j) [expr {$i + 1}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 4} {incr j} { incr s $c($i,$j) } }; return $s }
+proc da_twostr {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 2} {incr j} { set a($i,$j) "v$i$j" } }; return [list $a(0,0) $a(1,1) $a([expr {$n - 1}],1)] }
+proc da_twomix {} { set a(0,0) 1; set a(0,1) 2; set a(1,0) 3; set a(x) 4; set a(1,1) 5; return [list $a(0,0) $a(0,1) $a(1,0) $a(x) $a(1,1)] }
+proc da_twokeys {} { set i 1; set j 2; set a($i,$j) 1; set a($i, $j) 2; set a(1,02) 3; set a($i,$j,$i) 4; return [list $a(1,2) $a(1, 2) $a(1,02) $a(1,2,1)] }
+proc da_twodim {} { set a(0,0) 1; set a(1) 2; return [list $a(0,0) $a(1)] }
+proc da_matmul {n} {
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set a($i,$j) [expr {$i + $j}]; set b($i,$j) [expr {$i - $j}] } }
+    set t 0
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set s 0; for {set k 0} {$k < $n} {incr k} { incr s [expr {$a($i,$k) * $b($k,$j)}] }; incr t $s } }
+    return $t
+}
+proc da_lcs {x y} {
+    set n [string length $x]; set m [string length $y]
+    for {set i 0} {$i <= $n} {incr i} { for {set j 0} {$j <= $m} {incr j} { set d($i,$j) 0 } }
+    for {set i 1} {$i <= $n} {incr i} { for {set j 1} {$j <= $m} {incr j} {
+        if {[string index $x [expr {$i - 1}]] eq [string index $y [expr {$j - 1}]]} { set d($i,$j) [expr {$d([expr {$i - 1}],[expr {$j - 1}]) + 1}] } else { set u $d([expr {$i - 1}],$j); set l $d($i,[expr {$j - 1}]); set d($i,$j) [expr {$u > $l ? $u : $l}] } } }
+    return $d($n,$m)
+}
 # comparisons of objects that are not integers (text, lists, doubles, bignums, empty) stay in typed code and take the interpreter's rule: numbers as numbers, anything else as strings
 proc cm_lit {x} { if {$x == "plain"} { return 1 }; if {$x != "left"} { return 2 }; return 3 }
 proc cm_order {x} { list [expr {$x < "m"}] [expr {$x >= "abc"}] [expr {"b" > $x}] }

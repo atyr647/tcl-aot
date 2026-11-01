@@ -13,6 +13,9 @@ proc h_ok {x} { return [expr {$x * 2}] }
 proc h_dict {d} { set n 0; dict for {k v} $d { incr n $v }; return $n }
 proc h_cmp {a b} { if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return 1 }; if {$a != "left"} { return 2 }; return 3 }
 proc h_nan {x} { set NaN $x; set Inf [expr {$NaN + 1}]; return $Inf }
+proc h_dn {n} { for {set i 0} {$i < $n} {incr i} { set a($i) $i }; set s 0; for {set i 0} {$i < $n} {incr i} { incr s $a($i) }; return $s }
+proc h_dm {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set m($i,$j) [expr {$i * $j}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { incr s $m($i,$j) } }; return $s }
+proc h_dc {n} { for {set i $n} {$i > 0} {incr i -1} { set a($i) $i }; set s 0; for {set i 1} {$i <= $n} {incr i} { incr s $a($i) }; return $s }
 proc h_two {n} { set x [dict create a 1]; dict for {k v} $x { }; return $n }
 TCL
 cat > "$tmp/run.tcl" <<'TCL'
@@ -23,6 +26,15 @@ for {set k 0} {$k < 6} {incr k} { h_sum $l; h_ok $k; h_dict {a 1 b 2} }
 h_two 5; h_two abc; h_two 7
 foreach x {{a b c} abc 1.5 {} left {1 2}} { h_cmp $x $x; h_cmp $x abc }
 if {[info exists ::env(HOT_NONE)]} { puts "hot-command: [llength [info commands tbc::hot]]"; exit }
+# arrays whose keys are integers made in ascending order are held as vectors (X:array dense...), anything else is turned into the table
+proc cnt {name} { set n 0; foreach {k v} [tbc_coverage] { if {$k eq $name} { incr n $v } }; return $n }
+set c0 [cnt "X:array dense 1-d start"]; set t0 [cnt "X:array dense to table"]; set m0 [cnt "X:array dense 2-d start"]
+h_dn 100
+set c1 [cnt "X:array dense 1-d start"]; set t1 [cnt "X:array dense to table"]
+h_dm 20
+set m1 [cnt "X:array dense 2-d start"]; set t2 [cnt "X:array dense to table"]
+h_dc 20
+set t3 [cnt "X:array dense to table"]; set c3 [cnt "X:array dense 1-d start"]
 set d [tbc::hot -dict]
 proc check {what cond} { if {![uplevel 1 [list expr $cond]]} { puts "FAILED: $what"; incr ::bad } }
 set bad 0
@@ -43,6 +55,9 @@ check "reset" {![dict exists [tbc::hot -dict] ::h_dict]}
 check "sites of the variants of a proc are merged" {[llength [dict get $d ::h_two sites]] == 1 && [lindex [dict get $d ::h_two sites] 0 4] == 3}
 # == and != of objects that are not integers (text, lists, doubles) are done in typed code, by the generic comparison: no hand-over at them
 check "comparisons of text and lists stay typed" {[dict get $d ::h_cmp handovers] == 0 && [dict get $d ::h_cmp sites] eq ""}
+check "an array filled in ascending order is dense and stays so" {$c1 == $c0 + 1 && $t1 == $t0}
+check "a matrix filled row by row is two-dimensional and stays so" {$m1 == $m0 + 1 && $t2 == $t1}
+check "an array filled in descending order is turned into the table" {$t3 == $t2 + 1}
 check "bad option" {[catch {tbc::hot -nosuch}]}
 puts "checks failed: $bad"
 TCL

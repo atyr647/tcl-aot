@@ -880,7 +880,7 @@ proc boxe {P p e} {
             # the iteration state of a foreach (the stack slot of the interpreter's foreach holds an object with the iteration number and the count)
             return "({ Tcl_Obj *c_ = Tcl_NewObj(); c_->internalRep.twoPtrValue.ptr1 = INT2PTR(fit_[lt $e]); c_->internalRep.twoPtrValue.ptr2 = INT2PTR(fmax_[lt $e]); Tcl_IncrRefCount(c_); c_; })"
         }
-        K { return "tbc_newkey(kb$p, kl$p)" }
+        K { if {[lt $e] eq "2"} { return "tbc_newpair(ka$p, kj$p)" }; return "tbc_newkey(kb$p, kl$p)" }
         W { return "(sw$p ? tbc_newdbl(sd$p) : tbc_newint(si$p))" }
         N { return "tbc_ivec_list(&sv$p, 1)" }
         M {
@@ -956,13 +956,18 @@ proc newVariant {P sig} {
         dict set kap $v [expr {$v in $PI($P,fvars) ? "F" : $v in $PI($P,rvars) ? "R" : $v < $PI($P,nargs) ? [string index $sig $v] : "-"}]
     }
     set VK($key,kap) $kap; set VK($key,ret) "-"; set VK($key,calls) {}
+    # kinds of the elements of the native arrays (kind R): I while everything stored in the array is an integer in its canonical form, so that a load gives an unboxed integer
+    set ekap {}
+    foreach v $PI($P,rvars) { dict set ekap $v - }
+    set VK($key,ekap) $ekap
     return $key
 }
 
 proc kap {key v} { global VK; dict get $VK($key,kap) $v }
+proc ekap {key v} { global VK; dict get $VK($key,ekap) $v }
 
 # result of one typed step
-proc R {flow out code args} { dict create flow $flow out $out code $code stores {} ret "" calls {} stub "" {*}$args }
+proc R {flow out code args} { dict create flow $flow out $out code $code stores {} estores {} ret "" calls {} stub "" {*}$args }
 
 # (beginCatch4 and endCatch change nothing in typed code: a catch is the business of the exception range table.  Typed code that fails inside a catch body
 # hands over to the boxed code at that instruction, which dispatches to the handler; the handler itself is reached from boxed code only.)
@@ -1188,6 +1193,13 @@ proc stepT {key pc in} {
             set parts ""; set rel ""
             # a key that a native array operation (kind R) is about to use is built in a buffer of the slot, as text, without an object (kind K)
             set kc [keyConsumer $P $pc $q]
+            # `$i,$j` of two integers: the key is held as the two integers (kind K:2); the text is only made if something needs it (see keyArgs, boxe)
+            if {$kc ne "" && [kap $key [lindex $kc 1]] eq "R" && $n == 3} {
+                set e1 [lindex $in $q]; set e2 [lindex $in [expr {$q+1}]]; set e3 [lindex $in [expr {$q+2}]]
+                if {[kd $e2] eq "L" && [lindex $PI($P,lits) [lt $e2]] eq "," && [keyInt $P $q $e1] ne "" && [keyInt $P [expr {$q+2}] $e3] ne ""} {
+                    return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] K:2] "ka$q = [keyInt $P $q $e1]; kj$q = [keyInt $P [expr {$q+2}] $e3];"]
+                }
+            }
             if {$kc ne "" && [kap $key [lindex $kc 1]] eq "R"} {
                 set kcode ""; set ok 1; set maxl 0
                 for {set k $q} {$k < $d && $ok} {incr k} {
@@ -1459,6 +1471,24 @@ proc stepT {key pc in} {
             if {[kap $key $v] eq "R"} {
                 set e [lindex $in $top]
                 if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                set ek [ekap $key $v]
+                if {$ek eq "-"} { return [R fall [lreplace $in $top $top U] ""] }
+                set k2 [keyInt2 $P $top $e]
+                if {$k2 ne ""} {
+                    lassign $k2 ka kj
+                    if {$ek eq "I"} { return [R fall [lreplace $in $top $top I] "\{ int64_t w_; if (TBC_UNLIKELY(!tbc_rgetw_k2(&rv$v, $ka, $kj, &w_))) goto D$pc; si$top = w_; \}"] }
+                    return [R fall [lreplace $in $top $top B] "\{ Tcl_Obj *o_ = tbc_rget_k2(&rv$v, $ka, $kj); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_); s$top = o_; \}"]
+                }
+                set ki [keyInt $P $top $e]
+                if {$ek eq "I"} {
+                    # (every element stored is an integer: the load gives an unboxed one; a missing element, or one that is not, is for the boxed code)
+                    if {$ki ne ""} { return [R fall [lreplace $in $top $top I] "\{ int64_t w_; if (TBC_UNLIKELY(!tbc_rgetw_k(&rv$v, $ki, &w_))) goto D$pc; si$top = w_; \}"] }
+                    set kb [keyArgs $P $top $e]
+                    if {$kb eq ""} { return $dead }
+                    lassign $kb kpre kptr klen krel
+                    return [R fall [lreplace $in $top $top I] "\{ $kpre int64_t w_; if (TBC_UNLIKELY(!tbc_rgetw(&rv$v, $kptr, $klen, &w_))) goto D$pc;$krel si$top = w_; \}"]
+                }
+                if {$ki ne ""} { return [R fall [lreplace $in $top $top B] "\{ Tcl_Obj *o_ = tbc_rget_k(&rv$v, $ki); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_); s$top = o_; \}"] }
                 set kb [keyArgs $P $top $e]
                 if {$kb eq ""} { return $dead }
                 lassign $kb kpre kptr klen krel
@@ -1479,16 +1509,34 @@ proc stepT {key pc in} {
                 set ek [lindex $in $pk]; set ev [lindex $in $pv]
                 set base [lrange $in 0 [expr {$pk-1}]]
                 if {"U" in [list [kd $ek] [kd $ev]]} { return [R fall [list {*}$base U] ""] }
-                set kb [keyArgs $P $pk $ek]
-                if {$kb eq ""} { return $dead }
-                lassign $kb kpre kptr klen krel
-                set ok [fvalue $P $pv $ev "tbc_rset(&rv$v, $kptr, $klen, @V@)" "tbc_rseti(&rv$v, $kptr, $klen, @I@)"]
+                set k2 [keyInt2 $P $pk $ek]
+                if {$k2 ne ""} {
+                    lassign $k2 ka kj
+                    set kpre ""; set krel ""; set ki ""
+                    set ok [fvalue $P $pv $ev "tbc_rset_k2(&rv$v, $ka, $kj, @V@)" "tbc_rseti_k2(&rv$v, $ka, $kj, @I@)"]
+                } else {
+                    set kb [keyArgs $P $pk $ek]
+                    if {$kb eq ""} { return $dead }
+                    lassign $kb kpre kptr klen krel
+                    set ki [keyInt $P $pk $ek]
+                    if {$ki ne ""} {
+                        set ok [fvalue $P $pv $ev "tbc_rset_k(&rv$v, $ki, @V@)" "tbc_rseti_k(&rv$v, $ki, @I@)"]
+                        set kpre ""
+                    } else {
+                        set ok [fvalue $P $pv $ev "tbc_rset(&rv$v, $kptr, $klen, @V@)" "tbc_rseti(&rv$v, $kptr, $klen, @I@)"]
+                    }
+                }
+                # (an integer literal in canonical form is stored as the integer, not as the literal's object, which would be parsed again at every store)
+                if {[kd $ev] eq "I" && [lt $ev] ne "" && [evKind $P $ev] eq "I"} {
+                    set lit [lindex $PI($P,lits) [lt $ev]]
+                    if {$k2 ne ""} { set ok [list "" "tbc_rseti_k2(&rv$v, $ka, $kj, [c_int $lit])" ""] } elseif {$ki ne ""} { set ok [list "" "tbc_rseti_k(&rv$v, $ki, [c_int $lit])" ""] } else { set ok [list "" "tbc_rseti(&rv$v, $kptr, $klen, [c_int $lit])" ""] }
+                }
                 if {$ok eq ""} { return $dead }
                 lassign $ok vpre call vrel
                 switch [kd $ev] {
                     I { set mv "si$pk = si$pv;" } D { set mv "sd$pk = sd$pv;" } B { set mv "s$pk = s$pv;" } default { set mv "" }
                 }
-                return [R fall [list {*}$base $ev] "\{ $kpre $vpre if (TBC_UNLIKELY(!($call))) \{$vrel goto D$pc; \}$vrel$krel $mv \}"]
+                return [R fall [list {*}$base $ev] "\{ $kpre $vpre if (TBC_UNLIKELY(!($call))) \{$vrel goto D$pc; \}$vrel$krel $mv \}" estores [list [list $v [evKind $P $ev]]]]
             }
             if {[kap $key $v] ne "F"} { return $dead }
             set pk [expr {$d-2}]; set pv [expr {$d-1}]
@@ -1511,10 +1559,14 @@ proc stepT {key pc in} {
             if {[kap $key $v] eq "R"} {
                 set e [lindex $in $top]
                 if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                set k2 [keyInt2 $P $top $e]
+                if {$k2 ne ""} { lassign $k2 ka kj; return [R fall [lreplace $in $top $top I] "\{ int64_t w_; if (TBC_UNLIKELY(!tbc_rinc_k2(&rv$v, $ka, $kj, INT64_C($imm), &w_))) goto D$pc; si$top = w_; \}" estores [list [list $v I]]] }
                 set kb [keyArgs $P $top $e]
                 if {$kb eq ""} { return $dead }
                 lassign $kb kpre kptr klen krel
-                return [R fall [lreplace $in $top $top I] "\{ $kpre int64_t w_; if (TBC_UNLIKELY(!tbc_rinc(&rv$v, $kptr, $klen, INT64_C($imm), &w_))) goto D$pc;$krel si$top = w_; \}"]
+                set ki [keyInt $P $top $e]
+                if {$ki ne ""} { return [R fall [lreplace $in $top $top I] "\{ int64_t w_; if (TBC_UNLIKELY(!tbc_rinc_k(&rv$v, $ki, INT64_C($imm), &w_))) goto D$pc; si$top = w_; \}" estores [list [list $v I]]] }
+                return [R fall [lreplace $in $top $top I] "\{ $kpre int64_t w_; if (TBC_UNLIKELY(!tbc_rinc(&rv$v, $kptr, $klen, INT64_C($imm), &w_))) goto D$pc;$krel si$top = w_; \}" estores [list [list $v I]]]
             }
             if {[kap $key $v] ne "F"} { return $dead }
             set e [lindex $in $top]
@@ -1536,7 +1588,11 @@ proc stepT {key pc in} {
                 if {$kb eq "" || $ci ne "I"} { return $dead }
                 lassign $kb kpre kptr klen krel
                 set irel ""; if {[kd $ei] eq "B"} { set irel " Tcl_DecrRefCount(s$pi);" }
-                return [R fall [list {*}$base I] "\{ $kpre int64_t w_; $gi if (TBC_UNLIKELY(!tbc_rinc(&rv$v, $kptr, $klen, $xi, &w_))) goto D$pc;$irel$krel si$pk = w_; \}"]
+                set k2 [keyInt2 $P $pk $ek]
+                if {$k2 ne ""} { lassign $k2 ka kj; return [R fall [list {*}$base I] "\{ int64_t w_; $gi if (TBC_UNLIKELY(!tbc_rinc_k2(&rv$v, $ka, $kj, $xi, &w_))) goto D$pc;$irel si$pk = w_; \}" estores [list [list $v I]]] }
+                set ki [keyInt $P $pk $ek]
+                if {$ki ne ""} { return [R fall [list {*}$base I] "\{ int64_t w_; $gi if (TBC_UNLIKELY(!tbc_rinc_k(&rv$v, $ki, $xi, &w_))) goto D$pc;$irel si$pk = w_; \}" estores [list [list $v I]]] }
+                return [R fall [list {*}$base I] "\{ $kpre int64_t w_; $gi if (TBC_UNLIKELY(!tbc_rinc(&rv$v, $kptr, $klen, $xi, &w_))) goto D$pc;$irel$krel si$pk = w_; \}" estores [list [list $v I]]]
             }
             if {[kap $key $v] ne "F"} { return $dead }
             set pk [expr {$d-2}]; set pi [expr {$d-1}]
@@ -1558,6 +1614,10 @@ proc stepT {key pc in} {
                 set kb [keyArgs $P $top $e]
                 if {$kb eq ""} { return $dead }
                 lassign $kb kpre kptr klen krel
+                set k2 [keyInt2 $P $top $e]
+                if {$k2 ne ""} { lassign $k2 ka kj; return [R fall [lreplace $in $top $top I] "\{ int r_ = tbc_rhas_k2(&rv$v, $ka, $kj); si$top = r_; \}"] }
+                set ki [keyInt $P $top $e]
+                if {$ki ne ""} { return [R fall [lreplace $in $top $top I] "\{ int r_ = tbc_rhas_k(&rv$v, $ki); si$top = r_; \}"] }
                 return [R fall [lreplace $in $top $top I] "\{ $kpre int r_ = tbc_rhas(&rv$v, $kptr, $klen);$krel si$top = r_; \}"]
             }
             if {[kap $key $v] ne "F"} { return $dead }
@@ -1901,10 +1961,37 @@ proc keyConsumer {P pc q} {
 }
 
 # a dict key held in slot p (described by e) as bytes: {setup pointer length release key-object}, or "" if the kind is not handled
+# The key of a native array element as an integer, when it is one whose text is its canonical decimal form (a computed integer, or an integer literal written so): the elements
+# of an array in dense mode are reached by it without the text (tbc_r*_k).  "" for any other key.
+proc keyInt {P p e} {
+    global PI
+    if {[kd $e] ne "I"} { return "" }
+    if {[lt $e] eq ""} { return si$p }
+    set lit [lindex $PI($P,lits) [lt $e]]
+    if {[regexp {^-?(0|[1-9][0-9]*)$} $lit] && $lit ne "-0" && $lit >= -9223372036854775808 && $lit <= 9223372036854775807} { return [c_int $lit] }
+    return ""
+}
+# The key of a native array element held as two integers (a key `$i,$j` of integers, kind K:2): their C expressions, else "".
+proc keyInt2 {P p e} {
+    if {[kd $e] eq "K" && [lt $e] eq "2"} { return [list ka$p kj$p] }
+    return ""
+}
+# the kind an element value gives its array: I for an integer in canonical form (a computed one, or a literal written so), else B
+proc evKind {P e} {
+    global PI
+    if {[kd $e] ne "I"} { return B }
+    if {[lt $e] eq ""} { return I }
+    set lit [lindex $PI($P,lits) [lt $e]]
+    if {[regexp {^-?(0|[1-9][0-9]*)$} $lit] && $lit ne "-0" && $lit >= -9223372036854775808 && $lit <= 9223372036854775807} { return I }
+    return B
+}
 proc keyArgs {P p e} {
     global PI
     switch [kd $e] {
-        K { return [list "" kb$p kl$p "" NULL] }
+        K {
+            if {[lt $e] eq "2"} { return [list "char kb_\[48\]; int kl_ = tbc_fmt_pair(kb_, ka$p, kj$p); const char *kp_ = kb_;" kp_ kl_ "" NULL] }
+            return [list "" kb$p kl$p "" NULL]
+        }
         B { return [list "int kl_; const char *kp_ = Tcl_GetStringFromObj(s$p, &kl_);" kp_ kl_ " Tcl_DecrRefCount(s$p);" s$p] }
         L - I {
             if {[lt $e] ne ""} {
@@ -2614,11 +2701,12 @@ proc analyze {key} {
         array unset IN
         set IN(0) {}
         set work [list 0]
-        set stores {}; set rets {}; set calls {}
+        set stores {}; set estores {}; set rets {}; set calls {}
         while {[llength $work]} {
             set pc [lindex $work end]; set work [lrange $work 0 end-1]
             set r [stepT $key $pc $IN($pc)]
             foreach s [dict get $r stores] { lappend stores $s }
+            foreach s [dict get $r estores] { lappend estores $s }
             if {[dict get $r ret] ne ""} { lappend rets [dict get $r ret] }
             set flow [dict get $r flow]
             set out [dict get $r out]
@@ -2667,12 +2755,17 @@ proc analyze {key} {
         foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M W}} { dict set nk $v B } }
         foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M W}} { dict set nk $v B } }
         if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M}} { dict set nk $v B } } }
-        if {$nk eq $kap} {
+        set ekap $VK($key,ekap)
+        set nek $ekap
+        foreach s $estores { lassign $s v k; dict set nek $v [jk [dict get $nek $v] $k] }
+        if {$nk eq $kap && $nek eq $ekap} {
             set pending 0
             dict for {v k} $nk { if {$k eq "-"} { dict set nk $v B; set pending 1 } elseif {$k eq "S"} { dict set nk $v B; set pending 1 } }
+            dict for {v k} $nek { if {$k eq "-"} { dict set nek $v B; set pending 1 } }
             if {!$pending} break
         }
         set VK($key,kap) $nk
+        set VK($key,ekap) $nek
     }
     foreach k [array names VK [globEsc $key],in,*] { unset VK($k) }
     foreach k [array names IN] { set VK($key,in,$k) $IN($k) }
@@ -3673,6 +3766,7 @@ proc emitVariant {key recursive {resume 0}} {
         if {[string first "sv$k" $fn] >= 0} { append decls "    tbc_ivec sv$k = {NULL, 0}; (void) sv$k;\n" }
         if {[string first "qv$k" $fn] >= 0} { append decls "    tbc_imap qv$k; memset(&qv$k, 0, sizeof qv$k);\n" }
         if {[string first "kb$k" $fn] >= 0} { append decls "    char kb$k\[104\]; int kl$k = 0; (void) kl$k;\n" }
+        if {[string first "ka$k" $fn] >= 0} { append decls "    int64_t ka$k = 0, kj$k = 0; (void) ka$k; (void) kj$k;\n" }
     }
     set fn [string map [list @@VECDECLS@@ $decls] $fn]
     # a variant that was entered from the boxed code, and every hand-over from it, must not make the boxed code enter typed code again (see osrAttempt)

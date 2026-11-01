@@ -276,6 +276,15 @@ set wal [list {1 2 3} {} {1.5 2.5} {1 2 3 4.5} {0.1 0.2 0.3} {7 8} {0x10 3} {1e3
 foreach l $wal { lappend calls [list wa_sum $l] [list wa_mean $l] [list wa_max $l] [list wa_twice $l] [list wa_scale $l 2] [list wa_scale $l 0.5] [list wa_dot $l $l] }
 foreach x {0 1 2 -3 0.5 2.5 abc 1e10 9223372036854775807} { lappend calls [list wa_poly $x] }
 lappend calls {list [wa_sum {1 2 3}] [wa_sum {1.5 2}] [wa_sum {4 5}] [wa_sum {0.25 0.25}] [wa_sum {7}]}
+# dense native arrays
+foreach n {0 1 2 3 5 63 64 65 200 1000} { foreach base {0 1 5} { lappend calls [list da_asc $n $base] } }
+foreach n {10 100 3000} { lappend calls [list da_fill $n] }
+foreach n {0 1 2 7 100} { lappend calls [list da_gap $n] [list da_desc $n] [list da_strlate $n] [list da_edge $n] [list da_missing $n] [list da_incr $n] [list da_incr2 $n] [list da_base1 $n] [list da_dbl $n] [list da_twoexists $n] [list da_twomissing $n] }
+lappend calls {da_str} {da_neg} {da_big} {da_missing0} {da_incrstr} {da_overflow} {da_mixed} {da_twomix} {da_twokeys} {da_twodim}
+foreach n {0 1 3 70} { foreach k {0 1 2 x 01 -1 69 70 {}} { lappend calls [list da_exists $n $k] } }
+foreach n {0 1 2 4 9 70} { foreach m {0 1 2 3 8 70} { lappend calls [list da_two $n $m] [list da_two1 $n $m] [list da_col $n $m] } }
+foreach n {0 1 2 3 6 40} { lappend calls [list da_ragged $n] [list da_twogap $n] [list da_twoincr $n] [list da_twostr $n] [list da_matmul $n] }
+foreach {x y} {abcbdab bdcaba {} abc abc {} aaaa aa xyz xyz} { lappend calls [list da_lcs $x $y] }
 # comparisons of objects that are not integers
 set cmv {0 1 -1 2.5 1.0 1e3 0x10 010 " 5" abc plain left m {} {a b} {1 2} {{a b} c} 100000000000000000000 NaN Inf -0.0 1e400 true {a\ b} "\u00e9" "\u00e9a"}
 foreach x $cmv { lappend calls [list cm_lit $x] [list cm_order $x] [list cm_cnt [list 1 a 1.0 $x abc {} $x] $x] [list cm_neq [list 1 a 1.0 $x abc {} $x] $x] [list cm_min [list $x 3 abc 2.5 $x]] }
