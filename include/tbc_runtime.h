@@ -734,6 +734,14 @@ static int tbc_s_last(Tcl_Obj *needle, Tcl_Obj *hay, int64_t *out) {
     }
     return 1;
 }
+/* `scan $s %c var` as Tcl_ScanObjCmd does it: -1 for an empty string (the variable is not set), else 1 and the code of the first character (TclUtfToUCS4,
+ * which reads a surrogate pair as one character, as the command does) */
+static int tbc_scan_c(Tcl_Obj *s, int *ch) {
+    const char *p = Tcl_GetString(s);
+    if (*p == '\0') return -1;
+    (void) TclUtfToUCS4(p, ch);
+    return 1;
+}
 /* (the one-character strings are shared: an object that something may change in place is never shared, so a reference count above one is all that is needed) */
 static Tcl_Obj *tbc_chr1[128];
 static int tbc_s_index(Tcl_Obj *s, int64_t i, Tcl_Obj **out) {

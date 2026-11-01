@@ -1842,3 +1842,9 @@ proc dt_twice {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d $i 
 proc dt_reset {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d $i; if {$i == 3} { set d {} } }; return $d }
 proc dt_neg_keys {n} { set d {}; for {set i -3} {$i < $n} {incr i} { dict incr d $i }; return $d }
 proc dt_big {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i * 1000003}] }; set s 0; dict for {k v} $d { incr s $v }; return [list [dict size $d] $s] }
+
+# `scan $s %c var` done inline: empty strings (-1, nothing set), non-ASCII, a character outside the BMP, NUL, a variable that was unset
+proc sc_one {s} { set x old; set r [scan $s %c x]; return [list $r $x] }
+proc sc_unset {s} { set r [scan $s %c x]; return [list $r [info exists x] [expr {[info exists x] ? $x : {}}]] }
+proc sc_sum {s} { set t 0; foreach c [split $s ""] { scan $c %c v; incr t $v }; return $t }
+proc sc_loop {s} { set r {}; for {set i 0} {$i < [string length $s]} {incr i} { scan [string index $s $i] %c x; lappend r $x }; return $r }
