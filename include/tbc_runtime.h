@@ -1168,12 +1168,14 @@ static Tcl_Obj *tbc_ivec_list(tbc_ivec *a, int take) {
     return l;
 }
 /* Typed string -> int map: a dict local that holds integer values only and never leaves the proc.  Entries keep their insertion order, as
- * a Tcl dict does; keys are shared Tcl_Obj references compared by their string form.  tbc_imap_dict turns it into a real dict. */
-typedef struct { Tcl_Obj **keys; int64_t *vals; uint64_t *hs; int32_t *tab; size_t n, cap, tcap; } tbc_imap;
+ * a Tcl dict does.  A key that is a canonical integer (the text of an int64: no sign but -, no leading zero, not -0) is held as the integer, with no key object
+ * (keys[e] == NULL, iks[e] the integer), whether it came in as an integer or as text; any other key is a shared Tcl_Obj reference compared by its string form.
+ * tbc_imap_dict turns the map into a real dict. */
+typedef struct { Tcl_Obj **keys; int64_t *vals; int64_t *iks; uint64_t *hs; int32_t *tab; size_t n, cap, tcap; } tbc_imap;
 static void tbc_imap_free(tbc_imap *m) {
     size_t i;
-    for (i = 0; i < m->n; i++) Tcl_DecrRefCount(m->keys[i]);
-    free(m->keys); free(m->vals); free(m->hs); free(m->tab);
+    for (i = 0; i < m->n; i++) if (m->keys[i]) Tcl_DecrRefCount(m->keys[i]);
+    free(m->keys); free(m->vals); free(m->iks); free(m->hs); free(m->tab);
     memset(m, 0, sizeof *m);
 }
 static int tbc_imap_init(tbc_imap *m) {
@@ -1181,9 +1183,10 @@ static int tbc_imap_init(tbc_imap *m) {
     m->cap = 16; m->tcap = 32;
     m->keys = (Tcl_Obj **) malloc(m->cap * sizeof(Tcl_Obj *));
     m->vals = (int64_t *) malloc(m->cap * sizeof(int64_t));
+    m->iks = (int64_t *) malloc(m->cap * sizeof(int64_t));
     m->hs = (uint64_t *) malloc(m->cap * sizeof(uint64_t));
     m->tab = (int32_t *) calloc(m->tcap, sizeof(int32_t));
-    if (!m->keys || !m->vals || !m->hs || !m->tab) { free(m->keys); free(m->vals); free(m->hs); free(m->tab); memset(m, 0, sizeof *m); return 0; }
+    if (!m->keys || !m->vals || !m->iks || !m->hs || !m->tab) { free(m->keys); free(m->vals); free(m->iks); free(m->hs); free(m->tab); memset(m, 0, sizeof *m); return 0; }
     return 1;
 }
 TBC_INLINE uint64_t tbc_hash(const char *s, int len) {
@@ -1192,13 +1195,45 @@ TBC_INLINE uint64_t tbc_hash(const char *s, int len) {
     for (i = 0; i < len; i++) { h ^= (unsigned char) s[i]; h *= UINT64_C(1099511628211); }
     return h ^ (h >> 29);
 }
-TBC_INLINE int64_t tbc_imap_find(const tbc_imap *m, const char *s, int len, uint64_t h) {
+TBC_INLINE uint64_t tbc_ihash(int64_t k) {
+    uint64_t h = (uint64_t) k * UINT64_C(0x9E3779B97F4A7C15);
+    return h ^ (h >> 32);
+}
+/* is the text the canonical decimal form of an int64?  (then *k is the integer) */
+TBC_INLINE int tbc_canon_int(const char *s, int len, int64_t *k) {
+    uint64_t v = 0;
+    int i = 0, neg = 0;
+    if (len <= 0 || len > 20) return 0;
+    if (s[0] == '-') { neg = 1; i = 1; if (len == 1) return 0; }
+    if (s[i] == '0' && len - i > 1) return 0;
+    if (neg && s[i] == '0') return 0;
+    for (; i < len; i++) {
+        unsigned d = (unsigned char) s[i] - '0';
+        if (d > 9) return 0;
+        if (v > (UINT64_MAX - d) / 10) return 0;
+        v = v * 10 + d;
+    }
+    if (neg) { if (v > UINT64_C(9223372036854775808)) return 0; *k = (int64_t) (0 - v); }
+    else { if (v > UINT64_C(9223372036854775807)) return 0; *k = (int64_t) v; }
+    return 1;
+}
+TBC_INLINE int64_t tbc_imap_find_i(const tbc_imap *m, int64_t k, uint64_t h) {
     size_t mask = m->tcap - 1, i = (size_t) h & mask;
     for (;;) {
         int32_t e = m->tab[i];
         if (!e) return -1;
         e--;
-        if (m->hs[e] == h) {
+        if (m->hs[e] == h && !m->keys[e] && m->iks[e] == k) return e;
+        i = (i + 1) & mask;
+    }
+}
+TBC_INLINE int64_t tbc_imap_find_s(const tbc_imap *m, const char *s, int len, uint64_t h) {
+    size_t mask = m->tcap - 1, i = (size_t) h & mask;
+    for (;;) {
+        int32_t e = m->tab[i];
+        if (!e) return -1;
+        e--;
+        if (m->hs[e] == h && m->keys[e]) {
             int kl;
             const char *ks = Tcl_GetStringFromObj(m->keys[e], &kl);
             if (kl == len && memcmp(ks, s, (size_t) len) == 0) return e;
@@ -1206,11 +1241,17 @@ TBC_INLINE int64_t tbc_imap_find(const tbc_imap *m, const char *s, int len, uint
         i = (i + 1) & mask;
     }
 }
-TBC_INLINE int tbc_imap_has(const tbc_imap *m, const char *s, int len) { return tbc_imap_find(m, s, len, tbc_hash(s, len)) >= 0; }
+TBC_INLINE int64_t tbc_imap_find(const tbc_imap *m, const char *s, int len) {
+    int64_t k;
+    if (tbc_canon_int(s, len, &k)) return tbc_imap_find_i(m, k, tbc_ihash(k));
+    return tbc_imap_find_s(m, s, len, tbc_hash(s, len));
+}
+TBC_INLINE int tbc_imap_has(const tbc_imap *m, const char *s, int len) { return tbc_imap_find(m, s, len) >= 0; }
+TBC_INLINE int tbc_imap_has_i(const tbc_imap *m, int64_t k) { return tbc_imap_find_i(m, k, tbc_ihash(k)) >= 0; }
 static int tbc_imap_grow(tbc_imap *m) {
     size_t ncap = m->cap * 2, ntcap = m->tcap * 2, i;
     Tcl_Obj **nk = (Tcl_Obj **) realloc(m->keys, ncap * sizeof(Tcl_Obj *));
-    int64_t *nv;
+    int64_t *nv, *ni;
     uint64_t *nh;
     int32_t *nt;
     if (!nk) return 0;
@@ -1218,6 +1259,9 @@ static int tbc_imap_grow(tbc_imap *m) {
     nv = (int64_t *) realloc(m->vals, ncap * sizeof(int64_t));
     if (!nv) return 0;
     m->vals = nv;
+    ni = (int64_t *) realloc(m->iks, ncap * sizeof(int64_t));
+    if (!ni) return 0;
+    m->iks = ni;
     nh = (uint64_t *) realloc(m->hs, ncap * sizeof(uint64_t));
     if (!nh) return 0;
     m->hs = nh;
@@ -1233,39 +1277,64 @@ static int tbc_imap_grow(tbc_imap *m) {
     m->tab = nt; m->tcap = ntcap;
     return 1;
 }
-/* dict incr by an immediate.  key: the key object when one exists (else NULL: one is made when the key is new).  Returns 1, changing
- * nothing, if the sum overflows or memory runs out (the caller then falls back to the generic code). */
-static int tbc_imap_incr(tbc_imap *m, const char *s, int len, Tcl_Obj *key, int64_t imm) {
-    uint64_t h = tbc_hash(s, len);
-    int64_t e = tbc_imap_find(m, s, len, h);
+/* add a new entry (the key is not in the map): ik/key as described above.  Returns 1 when memory runs out. */
+static int tbc_imap_add(tbc_imap *m, Tcl_Obj *key, int64_t ik, uint64_t h, int64_t val) {
     size_t j;
-    if (e >= 0) {
-        int64_t r;
-        if (__builtin_add_overflow(m->vals[e], imm, &r)) return 1;
-        m->vals[e] = r;
-        return 0;
-    }
     if (m->n >= (size_t) INT32_MAX / 2) return 1;
     if ((m->n + 1) * 2 > m->tcap || m->n == m->cap) { if (!tbc_imap_grow(m)) return 1; }
-    if (key) Tcl_IncrRefCount(key); else { key = Tcl_NewStringObj(s, len); Tcl_IncrRefCount(key); }
-    m->keys[m->n] = key; m->vals[m->n] = imm; m->hs[m->n] = h;
+    m->keys[m->n] = key; m->iks[m->n] = ik; m->vals[m->n] = val; m->hs[m->n] = h;
     j = (size_t) h & (m->tcap - 1);
     while (m->tab[j]) j = (j + 1) & (m->tcap - 1);
     m->tab[j] = (int32_t) (m->n + 1);
     m->n++;
     return 0;
 }
+/* dict incr by an immediate, key an integer.  Returns 1, changing nothing, if the sum overflows or memory runs out (the caller then falls back to the generic code). */
+static int tbc_imap_incr_i(tbc_imap *m, int64_t k, int64_t imm) {
+    uint64_t h = tbc_ihash(k);
+    int64_t e = tbc_imap_find_i(m, k, h);
+    if (e >= 0) {
+        int64_t r;
+        if (__builtin_add_overflow(m->vals[e], imm, &r)) return 1;
+        m->vals[e] = r;
+        return 0;
+    }
+    return tbc_imap_add(m, NULL, k, h, imm);
+}
+/* the same, key as text; key: the key object when one exists (else NULL: one is made when the key is new and not an integer) */
+static int tbc_imap_incr(tbc_imap *m, const char *s, int len, Tcl_Obj *key, int64_t imm) {
+    int64_t k, e;
+    uint64_t h;
+    if (tbc_canon_int(s, len, &k)) return tbc_imap_incr_i(m, k, imm);
+    h = tbc_hash(s, len);
+    e = tbc_imap_find_s(m, s, len, h);
+    if (e >= 0) {
+        int64_t r;
+        if (__builtin_add_overflow(m->vals[e], imm, &r)) return 1;
+        m->vals[e] = r;
+        return 0;
+    }
+    if (key) Tcl_IncrRefCount(key); else { key = Tcl_NewStringObj(s, len); Tcl_IncrRefCount(key); }
+    if (tbc_imap_add(m, key, 0, h, imm)) { Tcl_DecrRefCount(key); return 1; }
+    return 0;
+}
 /* a dict object (one reference) with the map's contents; take != 0 releases the map */
 static Tcl_Obj *tbc_imap_dict(tbc_imap *m, int take) {
     Tcl_Obj *d = Tcl_NewDictObj();
     size_t i;
-    for (i = 0; i < m->n; i++) Tcl_DictObjPut(NULL, d, m->keys[i], Tcl_NewWideIntObj(m->vals[i]));
+    for (i = 0; i < m->n; i++) Tcl_DictObjPut(NULL, d, m->keys[i] ? m->keys[i] : Tcl_NewWideIntObj(m->iks[i]), Tcl_NewWideIntObj(m->vals[i]));
     Tcl_IncrRefCount(d);
     if (take) tbc_imap_free(m);
     return d;
 }
 static int tbc_imap_get(const tbc_imap *m, const char *s, int len, int64_t *out) {
-    int64_t e = tbc_imap_find(m, s, len, tbc_hash(s, len));
+    int64_t e = tbc_imap_find(m, s, len);
+    if (e < 0) return 0;
+    *out = m->vals[e];
+    return 1;
+}
+static int tbc_imap_get_i(const tbc_imap *m, int64_t k, int64_t *out) {
+    int64_t e = tbc_imap_find_i(m, k, tbc_ihash(k));
     if (e < 0) return 0;
     *out = m->vals[e];
     return 1;

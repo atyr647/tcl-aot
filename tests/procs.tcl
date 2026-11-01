@@ -1824,3 +1824,21 @@ proc pe_dsizen {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [pe_dsiz
 # the first call of a proc whose compiled body is attached at that call must not turn its arguments into text (an execution trace used to: it passes the command to its handler as text)
 proc tzb_len {b} { return [string length $b] }
 proc tzb_lazy {} { set buf [binary format c* [lrepeat 1000 7]]; set n [tzb_len $buf]; return [list $n [string match {*, no string representation} [tcl::unsupported::representation $buf]]] }
+
+# dict locals held as native maps (decision 39): counting by integer or text keys, the order of the keys, escapes, overflow
+proc dt_count {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i * 7 % 11}] }; set s 0; dict for {k v} $d { incr s [expr {$k * $v}] }; return $s }
+proc dt_order {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {($i * 5 + 3) % 7}] }; return $d }
+proc dt_keys {} { set d {}; dict incr d 5; dict incr d 05; dict incr d -0; dict incr d +5; dict incr d " 5"; dict incr d 9223372036854775807; dict incr d -9223372036854775808; dict incr d 9223372036854775808; dict incr d 5; dict incr d -5; return $d }
+proc dt_keyarg {k} { set d {}; dict incr d $k; dict incr d 5; dict incr d $k 3; return $d }
+proc dt_get {n k} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i % 4}] 2 }; return [list [dict exists $d $k] [dict exists $d [expr {$k + 1}]] [dict get $d $k]] }
+proc dt_getmiss {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i % 4}] }; return [dict get $d 9] }
+proc dt_escape_loop {n} { set d {}; set t 0; for {set i 0} {$i < $n} {incr i} { dict incr d $i; incr t [dict size $d] }; return $t }
+proc dt_neg {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i % 3}] -2 }; return $d }
+proc dt_ovf {} { set d {}; dict incr d a 9223372036854775807; dict incr d a 5; return $d }
+proc dt_ovf2 {k} { set d {}; dict incr d $k 9223372036854775807; dict incr d $k 1; return $d }
+proc dt_empty {} { set d {}; return [dict size $d] }
+proc dt_forbody {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i % 6}] }; set r {}; dict for {k v} $d { lappend r $k:$v }; return $r }
+proc dt_twice {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d $i }; set e $d; dict incr d 0; return [list [dict size $e] [dict get $d 0] [dict get $e 0]] }
+proc dt_reset {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d $i; if {$i == 3} { set d {} } }; return $d }
+proc dt_neg_keys {n} { set d {}; for {set i -3} {$i < $n} {incr i} { dict incr d $i }; return $d }
+proc dt_big {n} { set d {}; for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i * 1000003}] }; set s 0; dict for {k v} $d { incr s $v }; return [list [dict size $d] $s] }

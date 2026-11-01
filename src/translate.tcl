@@ -702,6 +702,7 @@ proc prepare {P} {
     foreach pc $reach { set PI($P,depth,$pc) $depth($pc); set PI($P,succ,$pc) $succ($pc); set PI($P,live,$pc) $liveIn($pc); set PI($P,may,$pc) $mayIn($pc) }
     set PI($P,reach) $reach
     set PI($P,vecok) [vecEligible $P]
+    set PI($P,mapok) [mapEligible $P]
     # literal classes: canonical integers and doubles can be used as numbers; everything else stays a string
     set cls {}
     foreach s $PI($P,lits) {
@@ -830,6 +831,78 @@ proc vecEligible {P} {
         if {![dict exists $bad $v] && $v ni $PI($P,fvars) && $v ni $PI($P,rvars)} { lappend r $v }
     }
     return $r
+}
+
+# The pcs that lie on a cycle of the flow graph (loops): a pc is on one if it can reach itself.
+proc cyclePcs {P} {
+    global PI
+    set on {}
+    foreach h $PI($P,loopheads) {
+        # forward from the head, backward from it, over the successors recorded: the loop is the pcs both reachable from the head and reaching it
+        set fw {}; set todo [list $h]
+        while {[llength $todo]} { set c [lindex $todo end]; set todo [lrange $todo 0 end-1]; if {[dict exists $fw $c]} continue; dict set fw $c 1; foreach s $PI($P,succ,$c) { lappend todo $s } }
+        set bw {}; dict set bw $h 1; set changed 1
+        while {$changed} {
+            set changed 0
+            foreach c [dict keys $fw] { if {[dict exists $bw $c]} continue; foreach s $PI($P,succ,$c) { if {[dict exists $bw $s]} { dict set bw $c 1; set changed 1; break } } }
+        }
+        foreach c [dict keys $bw] { if {[dict exists $fw $c]} { dict set on $c 1 } }
+    }
+    return $on
+}
+# The local variables that may be held as native maps (decision 39): a dict that is incremented (`dict incr d $k`) and that is begun empty (`set d {}`); what else is done to it is
+# read by key (`dict get`, `dict exists`, one key) or is an escape - anything the typed code does not do on a map, which boxes a copy of it - and an escape may not be in a loop, so
+# that the copy is made once: a loop that works on the map and a `dict for` after it is the common shape.
+proc mapEligible {P} {
+    global PI
+    set cand {}
+    foreach pc $PI($P,reach) {
+        lassign $PI($P,ins,$pc) op a
+        if {$op eq "dictIncrImm"} { dict set cand [operand [lindex $a 1]] 1 }
+    }
+    if {![dict size $cand]} { return {} }
+    set cyc [cyclePcs $P]
+    set bad {}
+    foreach pc $PI($P,reach) {
+        lassign $PI($P,ins,$pc) op a
+        if {$op eq "dictIncrImm"} continue
+        lassign [usedef $op $a] uses defs
+        set vs {}
+        foreach v [concat $uses $defs] { if {[dict exists $cand $v]} { lappend vs $v } }
+        if {![llength $vs]} continue
+        set inloop [dict exists $cyc $pc]
+        if {$op in {storeScalar1 storeScalar4}} {
+            # (the begin: an empty value; any other store is an escape from the map, which is a use that is wrong in a loop)
+            if {$inloop && [mapStoreNotEmpty $P $pc]} { foreach v $vs { dict set bad $v 1 } }
+            continue
+        }
+        if {$op in {loadScalar1 loadScalar4}} {
+            set v [operand [lindex $a 0]]
+            set users [slotUsers $P $pc $PI($P,depth,$pc)]
+            set ok 1
+            if {$users eq ""} { set ok 0 }
+            foreach u $users {
+                lassign $u uop pos upc
+                if {!($uop in {dictGet dictExists} && $pos == 1 && [lindex [lindex $PI($P,ins,$upc) 1] 0] == 1)} { set ok 0 }
+            }
+            if {!$ok && $inloop} { dict set bad $v 1 }
+            continue
+        }
+        if {$inloop} { foreach v $vs { dict set bad $v 1 } }
+    }
+    set r {}
+    foreach v [dict keys $cand] { if {![dict exists $bad $v] && $v >= $PI($P,nargs) && $v ni $PI($P,fvars) && $v ni $PI($P,rvars)} { lappend r $v } }
+    return [lsort -integer $r]
+}
+# does the store at pc store something other than the empty string? (the instruction before it pushed a literal)
+proc mapStoreNotEmpty {P pc} {
+    global PI
+    set i [lsearch -exact $PI($P,pcs) $pc]
+    if {$i < 1} { return 1 }
+    set pp [lindex $PI($P,pcs) [expr {$i - 1}]]
+    lassign $PI($P,ins,$pp) op a
+    if {$op in {push1 push4}} { return [expr {[lindex $PI($P,lits) [operand [lindex $a 0]]] ne ""}] }
+    return 1
 }
 
 set refusedProcs {}
@@ -1190,6 +1263,10 @@ proc stepT {key pc in} {
                 # `set l {}` of a list that is only built and read as a vector: an empty native vector (decision 36)
                 return [R fall [lreplace $in $top $top A:$v] "free(av$v.p); av$v.p = NULL; av$v.n = av$v.cap = 0;" stores [list [list $v A]]]
             }
+            if {$k eq "L" && [lindex $PI($P,lits) [lt $e]] eq "" && $v in $PI($P,mapok) && [kap $key $v] in {M -} && "M:$v" ni [lrange $in 0 [expr {$top-1}]]} {
+                # `set d {}` of a dict that is counted in as a native map (decision 39): an empty map
+                return [R fall [lreplace $in $top $top M:$v] "tbc_imap_free(&mv$v); if (TBC_UNLIKELY(!tbc_imap_init(&mv$v))) goto D$pc;" stores [list [list $v M]]]
+            }
             if {$k in {A N M Q}} {
                 set kv [kap $key $v]
                 set fam [expr {$k in {A N} ? "A" : "M"}]
@@ -1461,6 +1538,7 @@ proc stepT {key pc in} {
             set ed [lindex $in $pd]; set ek [lindex $in $pk]
             if {"U" in [list [kd $ed] [kd $ek]]} { return [R fall [list {*}[lrange $in 0 $pd-1] U] ""] }
             if {[kd $ed] eq "M"} {
+                if {[mapKeyI $pk $ek] ne ""} { return [R fall [list {*}[lrange $in 0 [expr {$pd-1}]] I] "\{ int64_t r_; if (TBC_UNLIKELY(!tbc_imap_get_i(&mv[lt $ed], [mapKeyI $pk $ek], &r_))) goto D$pc; si$pd = r_; \}"] }
                 set kb [keyArgs $P $pk $ek]
                 if {$kb eq ""} { return $dead }
                 lassign $kb kpre kptr klen krel kobj
@@ -1495,6 +1573,7 @@ proc stepT {key pc in} {
             set ed [lindex $in $pd]; set ek [lindex $in $pk]
             if {"U" in [list [kd $ed] [kd $ek]]} { return [R fall [list {*}[lrange $in 0 $pd-1] U] ""] }
             if {[kd $ed] eq "M"} {
+                if {[mapKeyI $pk $ek] ne ""} { return [R fall [list {*}[lrange $in 0 [expr {$pd-1}]] I] "si$pd = tbc_imap_has_i(&mv[lt $ed], [mapKeyI $pk $ek]);"] }
                 set kb [keyArgs $P $pk $ek]
                 if {$kb eq ""} { return $dead }
                 lassign $kb kpre kptr klen krel kobj
@@ -1510,6 +1589,7 @@ proc stepT {key pc in} {
             if {[kd $e] in {A N M Q}} { return $dead }
             if {[kap $key $v] eq "M"} {
                 if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                if {[mapKeyI $top $e] ne ""} { return [R fall [lreplace $in $top $top M:$v] "if (TBC_UNLIKELY(tbc_imap_incr_i(&mv$v, [mapKeyI $top $e], INT64_C($imm)))) goto D$pc;"] }
                 set kb [keyArgs $P $top $e]
                 if {$kb eq ""} { return $dead }
                 lassign $kb kpre kptr klen krel kobj
@@ -2181,6 +2261,8 @@ proc rvalue {P p e v suf kargs} {
     }
     return ""
 }
+# the C integer of a map key held unboxed (an integer value that is not a literal), "" for any other key
+proc mapKeyI {p e} { expr {[kd $e] eq "I" && [lt $e] eq "" ? "si$p" : ""} }
 proc keyArgs {P p e} {
     global PI
     switch [kd $e] {

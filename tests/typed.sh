@@ -146,3 +146,18 @@ TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/v.tcl" "$tmp/v.c" Vectest >"$tmp/
 if ! grep -q "tbc_ivec_push" "$tmp/v.c"; then echo "typed: FAILED, lappend does not build a native vector"; exit 1; fi
 if grep -E '^DEADOP (lappendScalar|foreach_start|foreach_step|foreach_end|add|incrScalar1) .*tv_sum' "$tmp/v.log"; then echo "typed: FAILED, the vector loop hands over"; exit 1; fi
 echo "typed: a list built by lappend and read by foreach is a native vector, without hand-over: ok"
+
+# a dict that is begun empty, counted into by integer keys and then read by `dict for` is a native map with integer keys: no key text, and the loop does not hand over
+cat > "$tmp/m.tcl" <<'TCL'
+proc tm_count {n} {
+    set d {}
+    for {set i 0} {$i < $n} {incr i} { dict incr d [expr {$i * 13 % 5000}] }
+    set s 0
+    dict for {k v} $d { incr s [expr {$k * $v}] }
+    return $s
+}
+TCL
+TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/m.tcl" "$tmp/m.c" Maptest >"$tmp/m.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/m.log"; exit 1; }
+if ! grep -q "tbc_imap_incr_i" "$tmp/m.c"; then echo "typed: FAILED, dict incr of integer keys is not on a native map"; exit 1; fi
+if grep -E '^DEADOP (dictIncrImm|storeScalar|add|incrScalar1) .*tm_count' "$tmp/m.log"; then echo "typed: FAILED, the counting loop hands over"; exit 1; fi
+echo "typed: a dict counted into by integer keys is a native map, without hand-over in the loop: ok"

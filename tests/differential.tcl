@@ -265,6 +265,12 @@ foreach {cmd call} {string {pe_mapn 3} ::tcl::string::map {pe_mapn 3} dict {pe_d
 lappend calls {pe_mapn 3} {pe_dsizen 3} {pe_firstn 3}
 # the first call of a proc attached lazily leaves the arguments as they were (no string form made for a byte array)
 lappend calls {tzb_lazy}
+# dict locals held as native maps: key spellings, order, escapes, overflow
+foreach n {0 1 2 7 11 12 100 3000} { lappend calls [list dt_count $n] [list dt_order $n] [list dt_forbody $n] [list dt_escape_loop [expr {$n % 50}]] [list dt_neg $n] [list dt_twice [expr {$n % 40 + 1}]] [list dt_reset $n] [list dt_neg_keys $n] [list dt_big $n] }
+lappend calls {dt_keys} {dt_ovf} {dt_empty}
+foreach k {5 05 -0 +5 " 5" 5.0 abc {} 9223372036854775807 -9223372036854775808 9223372036854775808 1e3 0x5 -5 007} { lappend calls [list dt_keyarg $k] [list dt_ovf2 $k] }
+foreach {n k} {8 0 8 1 8 3 8 4 8 7 8 -1 0 0 1 1} { lappend calls [list dt_get $n $k] }
+foreach n {0 1 8} { lappend calls [list dt_getmiss $n] }
 lappend calls {interp limit {} command -value 100000000; set r [pb_loop 3]; interp limit {} command -value {}; set r}
 # string first / last / index / range
 set sfs [list hello {} o ll "hello world" "\u00e9\u20acx" [format a%cb 0] [binary format c3 {65 66 67}] 12345 0x1F " 5" {a b c} xxxxxxxxxxxx 1.5 "tab\there" "\u00e9" "x\u00e9y"]
