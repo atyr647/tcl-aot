@@ -121,3 +121,13 @@ for f in tbc_rsetd_k tbc_rgetd_k tbc_rgetn_k; do
   grep -q "$f(" "$tmp/dd.c" || { echo "typed: FAILED, the generated code of the array procs does not use $f"; exit 1; }
 done
 echo "typed: arrays of doubles and of tagged numbers are held unboxed: ok"
+
+# a literal written 1e3 keeps its text when another proc in the same file uses it as a number (the compiler shares the literal object, and a number
+# parsed from it must not replace its text: appended to a list it is 1e3, not 1000.0)
+cat > "$tmp/l.tcl" <<'TCL'
+proc da_dlit {} { set a(0) 0.5; set a(1) 1e3; set a(2) 0.50; set a(3) 2.0; return [list $a(0) $a(1) $a(2) $a(3)] }
+proc tl_lit {} { set l {}; lappend l 1e3; return $l }
+TCL
+"$TCLSH" src/translate.tcl "$tmp/l.tcl" "$tmp/l.c" Littest >"$tmp/l.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/l.log"; exit 1; }
+if ! grep -q 'L__3a_3atl_5flit_[0-9]* = tbc_lit("1e3", 3)' "$tmp/l.c"; then echo "typed: FAILED, the literal 1e3 lost its text:"; grep 'L__3a_3atl_5flit' "$tmp/l.c" | head -3; exit 1; fi
+echo "typed: a literal 1e3 keeps its text when a number is parsed from it: ok"

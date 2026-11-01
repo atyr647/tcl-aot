@@ -566,15 +566,31 @@ proc prepare {P} {
     array set use {}; array set def {}
     foreach pc $reach { lassign $ins($pc) op a; lassign [usedef $op $a] use($pc) def($pc) }
     foreach pc [array names scanVar] { if {[info exists use($pc)]} { lappend use($pc) $scanVar($pc); lappend def($pc) $scanVar($pc) } }
-    array set liveIn {}; foreach pc $reach { set liveIn($pc) {} }
-    set changed 1
-    while {$changed} {
-        set changed 0
-        foreach pc [lreverse $reach] {
-            set out {}
-            foreach s $dsucc($pc) { set out [lsort -integer -unique [concat $out $liveIn($s)]] }
-            set nl [lsort -integer -unique [concat $use($pc) [lmap v $out {expr {$v in $def($pc) ? [continue] : $v}}]]]
-            if {$nl ne $liveIn($pc)} { set liveIn($pc) $nl; set changed 1 }
+    array set liveIn {}
+    # (two rounds: a foreach step reads its variables, because they keep their values when the loop ends, and that makes them live from the start of the proc, so unset
+    # there, so boxed; the second round keeps that read only for the variables that are live where the loop ends, the ones something after the loop reads)
+    for {set round 0} {$round < 2} {incr round} {
+        if {$round == 1} {
+            set refined 0
+            foreach pc $reach {
+                if {[lindex $ins($pc) 0] ne "foreach_step"} continue
+                set vs [lsort -integer -unique [concat {*}[lindex [lindex $ins($pc) 1] 3]]]
+                set exitLive $liveIn($nxtOf($pc))
+                set keep [lmap v $vs {expr {$v in $exitLive ? $v : [continue]}}]
+                if {$keep ne $use($pc)} { set use($pc) $keep; set refined 1 }
+            }
+            if {!$refined} break
+        }
+        foreach pc $reach { set liveIn($pc) {} }
+        set changed 1
+        while {$changed} {
+            set changed 0
+            foreach pc [lreverse $reach] {
+                set out {}
+                foreach s $dsucc($pc) { set out [lsort -integer -unique [concat $out $liveIn($s)]] }
+                set nl [lsort -integer -unique [concat $use($pc) [lmap v $out {expr {$v in $def($pc) ? [continue] : $v}}]]]
+                if {$nl ne $liveIn($pc)} { set liveIn($pc) $nl; set changed 1 }
+            }
         }
     }
     set allv {}; for {set v 0} {$v < [llength $vnames]} {incr v} { lappend allv $v }
@@ -654,7 +670,13 @@ proc prepare {P} {
     set litd {}
     # (not through expr: its ?: result is parsed as a number and printed again the short way, which gives 2^64 back as the double below)
     foreach l $PI($P,lits) {
-        if {[string match {value is a double *} [tcl::unsupported::representation $l]]} { lappend litd [c_dbl $l] } else { lappend litd "" }
+        # a literal written in the source has its text, and the text must be kept when it reads back as the same number (1e3 is not 1000.0, even
+        # after something has parsed it as a double); an object whose text does not read back as its value (Tcl's own text for 2^64) is taken by value
+        if {![string match {value is a double *} [tcl::unsupported::representation $l]]} { lappend litd ""; continue }
+        set dv [c_dbl $l]
+        if {[string match {*, no string representation} [tcl::unsupported::representation $l]]} { lappend litd $dv; continue }
+        set txt [string cat [string range $l 0 0] [string range $l 1 end]]
+        if {[string is double -strict $txt] && [c_dbl $txt] eq $dv} { lappend litd "" } else { lappend litd $dv }
     }
     set PI($P,litd) $litd
     set PI($P,pcs) $pcs; set PI($P,reach) $reach; set PI($P,maxd) $maxd; set PI($P,targets) [lsort -unique $targets]
@@ -672,6 +694,8 @@ proc prepare {P} {
     }
     foreach pc $pcs { set PI($P,ins,$pc) $ins($pc) }
     foreach pc $reach { set PI($P,depth,$pc) $depth($pc); set PI($P,succ,$pc) $succ($pc); set PI($P,live,$pc) $liveIn($pc); set PI($P,may,$pc) $mayIn($pc) }
+    set PI($P,reach) $reach
+    set PI($P,vecok) [vecEligible $P]
     # literal classes: canonical integers and doubles can be used as numbers; everything else stays a string
     set cls {}
     foreach s $PI($P,lits) {
@@ -720,6 +744,86 @@ proc prepare {P} {
         }
     }
     set PI($P,wadapt) [expr {!$fl && $data && !$hasYield && [llength $PI($P,loopheads)] && ![info exists ::env(TBC_FORCE_WPOLICY)]}]
+}
+
+# Where the value that the instruction at pc pushed in slot q goes: every path from there must end at an instruction that takes the slot, and each such instruction is returned as
+# {op position-from-the-top pc}.  "" when the paths are too many or an instruction uses the slot without taking it (dup, over, reverse, an argument expansion).
+proc slotUsers {P pc q} {
+    global PI
+    set users {}
+    set seen {}
+    set todo [list $PI($P,next,$pc)]
+    set steps 0
+    while {[llength $todo]} {
+        set cur [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {[dict exists $seen $cur]} continue
+        dict set seen $cur 1
+        if {[incr steps] > 600} { return "" }
+        if {![info exists PI($P,depth,$cur)]} { return "" }
+        lassign $PI($P,ins,$cur) op a
+        set d $PI($P,depth,$cur)
+        if {$d <= $q} continue
+        switch -- $op {
+            expandStart - expandStkTop - invokeExpanded - expandDrop { return "" }
+            dup { if {$d - 1 == $q} { lappend users [list dup 0 $cur]; continue } }
+            over { if {$d - 1 - [operand [lindex $a 0]] == $q} { lappend users [list over 0 $cur]; continue } }
+            reverse { if {$d - [lindex $a 0] <= $q} { lappend users [list reverse 0 $cur]; continue } }
+        }
+        lassign [effect $op $a $d {}] pops pushes kind
+        if {$d - $pops <= $q} { lappend users [list $op [expr {$d - 1 - $q}] $cur]; continue }
+        if {$kind ni {fall jump cond}} { return "" }
+        foreach sc $PI($P,succ,$cur) { lappend todo $sc }
+    }
+    return $users
+}
+# The local variables that may be held as native integer vectors when a list of integers is built in them (`set l {}`, `lappend l $i`): those that only list instructions that typed code
+# does on a vector take (lindex, llength, lset, foreach over the list, the return), and that are assigned and appended to by nothing else.  A list that is passed to a command, joined,
+# sorted... stays a Tcl list: making it a vector would only turn it back into one.
+proc vecEligible {P} {
+    global PI
+    set bad {}
+    foreach pc $PI($P,reach) {
+        lassign $PI($P,ins,$pc) op a
+        lassign [usedef $op $a] uses defs
+        if {$op ni {loadScalar1 loadScalar4 storeScalar1 storeScalar4 lappendScalar1 lappendScalar4}} {
+            foreach v [concat $uses $defs] { dict set bad $v 1 }
+            continue
+        }
+        if {$op in {lappendScalar1 lappendScalar4}} {
+            # (the result of lappend is the list: it may only be dropped or returned)
+            set v [operand [lindex $a 0]]
+            if {[dict exists $bad $v]} continue
+            set users [slotUsers $P $pc [expr {$PI($P,depth,$pc) - 1}]]
+            if {$users eq ""} { dict set bad $v 1; continue }
+            foreach u $users { lassign $u uop pos upc; if {!($uop in {pop done} && $pos == 0)} { dict set bad $v 1; break } }
+            continue
+        }
+        if {$op in {loadScalar1 loadScalar4}} {
+            set v [operand [lindex $a 0]]
+            if {[dict exists $bad $v]} continue
+            set users [slotUsers $P $pc $PI($P,depth,$pc)]
+            if {$users eq ""} { dict set bad $v 1; continue }
+            foreach u $users {
+                lassign $u uop pos upc
+                set ok 0
+                switch -- $uop {
+                    listIndex { set ok [expr {$pos == 1}] }
+                    listIndexImm - listLength - lsetList - done { set ok [expr {$pos == 0}] }
+                    foreach_start {
+                        # (one list, one variable: the loop goes through a copy of the vector)
+                        lassign [lindex $PI($P,ins,$upc) 1] fn_ fnl_ fjo_ fvl_ fsp_
+                        set ok [expr {$pos == 0 && $fnl_ == 1 && [llength [lindex $fvl_ 0]] == 1}]
+                    }
+                }
+                if {!$ok} { dict set bad $v 1; break }
+            }
+        }
+    }
+    set r {}
+    for {set v $PI($P,nargs)} {$v < [llength $PI($P,vnames)]} {incr v} {
+        if {![dict exists $bad $v] && $v ni $PI($P,fvars) && $v ni $PI($P,rvars)} { lappend r $v }
+    }
+    return $r
 }
 
 set refusedProcs {}
@@ -986,7 +1090,7 @@ proc stepT {key pc in} {
     set top [expr {$d - 1}]
     # int-vector slots (A:<var> a view of a local's vector, N a fresh vector) are understood by a few instructions only
     if {$op in {expandStart expandStkTop invokeExpanded expandDrop}} { return $dead }
-    if {$op ni {pop listIndex listIndexImm listLength lsetList storeScalar1 storeScalar4 invokeStk1 invokeStk4 verifyDict dictFirst dictExists dictIncrImm dictGet done}} {
+    if {$op ni {pop listIndex listIndexImm listLength lsetList storeScalar1 storeScalar4 lappendScalar1 lappendScalar4 foreach_start foreach_step foreach_end invokeStk1 invokeStk4 verifyDict dictFirst dictExists dictIncrImm dictGet done}} {
         set np [lindex [effect $op $a] 0]
         for {set k [expr {$d - $np}]} {$k < $d} {incr k} { if {[kd [lindex $in $k]] in {A N M Q}} { return $dead } }
     }
@@ -1055,6 +1159,10 @@ proc stepT {key pc in} {
                 if {$ok eq ""} { return $dead }
                 lassign $ok pre call rel
                 return [R fall $in "\{ $pre if (TBC_UNLIKELY(!($call))) \{$rel goto D$pc; \}$rel \}"]
+            }
+            if {$k eq "L" && [lindex $PI($P,lits) [lt $e]] eq "" && $v in $PI($P,vecok) && [kap $key $v] in {A -} && "A:$v" ni [lrange $in 0 [expr {$top-1}]]} {
+                # `set l {}` of a list that is only built and read as a vector: an empty native vector (decision 36)
+                return [R fall [lreplace $in $top $top A:$v] "free(av$v.p); av$v.p = NULL; av$v.n = av$v.cap = 0;" stores [list [list $v A]]]
             }
             if {$k in {A N M Q}} {
                 set kv [kap $key $v]
@@ -1341,6 +1449,15 @@ proc stepT {key pc in} {
             set v [operand [lindex $a 0]]
             set e [lindex $in $top]
             if {[kd $e] in {A N M Q}} { return $dead }
+            if {$v in $PI($P,vecok) && [kap $key $v] in {A -}} {
+                if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v A]]] }
+                if {[kd $e] eq "I" && [evKind $P $e] eq "I" && "A:$v" ni [lrange $in 0 [expr {$top-1}]]} {
+                    # an integer appended to a native vector (the result of lappend is the list: a view of the vector)
+                    set val [expr {[lt $e] eq "" ? "si$top" : [c_int [lindex $PI($P,lits) [lt $e]]]}]
+                    return [R fall [lreplace $in $top $top A:$v] "if (TBC_UNLIKELY(!tbc_ivec_push(&av$v, $val))) goto D$pc;" stores [list [list $v A]]]
+                }
+                return [R dead {} "goto D$pc;" stores [list [list $v B]]]
+            }
             if {[kap $key $v] ni {B -}} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v B]]] }
             set st [lreplace $in $top $top B]
@@ -1446,7 +1563,7 @@ proc stepT {key pc in} {
         foreach_end {
             lassign $a n nl
             set rel ""
-            for {set k [expr {$d - 1}]} {$k >= $d - $nl - 2} {incr k -1} { if {[kd [lindex $in $k]] eq "B"} { append rel "Tcl_DecrRefCount(s$k); " } }
+            for {set k [expr {$d - 1}]} {$k >= $d - $nl - 2} {incr k -1} { if {[kd [lindex $in $k]] eq "B"} { append rel "Tcl_DecrRefCount(s$k); " } elseif {[kd [lindex $in $k]] eq "N"} { append rel "free(sv$k.p); sv$k.p = NULL; " } }
             return [R fall [lrange $in 0 [expr {$d - $nl - 3}]] $rel]
         }
         streq - strneq - strcmp { return [stepStrCmp $key $pc $in $d $op] }
@@ -1763,6 +1880,12 @@ proc stepForeachStart {key pc in d a} {
     set d0 [expr {$d - $nl}]
     set below [lrange $in 0 [expr {$d0 - 1}]]
     set lists [lrange $in $d0 end]
+    if {$nl == 1 && [kd [lindex $lists 0]] eq "A" && [llength [lindex $vl 0]] == 1} {
+        # a loop over a native vector goes through a copy of it, as the interpreter's goes through the list the loop began with (decision 36)
+        set av [lt [lindex $lists 0]]
+        set c "\{ tbc_ivec c_ = tbc_ivec_copy(&av$av); if (TBC_UNLIKELY(!c_.p)) goto D$pc; sv$d0 = c_; fit_$stepPc = 0; fmax_$stepPc = c_.n; s[expr {$d + 1}] = tbcEmpty; Tcl_IncrRefCount(tbcEmpty); \}"
+        return [R jump [list {*}$below N T:$stepPc B] $c tgt $stepPc]
+    }
     foreach e $lists { if {[kd $e] in {A N M Q T}} { return [R dead {} "goto D$pc;"] } }
     if {"U" in [lmap e $lists {kd $e}]} { return [R fall [list {*}$below {*}[lrepeat $nl U] U U] ""] }
     set st [list {*}$below {*}[lrepeat $nl B]]
@@ -1781,6 +1904,20 @@ proc stepForeachStep {key pc in d a} {
     lassign [keysplit $key] P sig
     lassign $a n nl jo vl stepPc
     set d0 [expr {$d - $nl - 2}]
+    if {$nl == 1 && [kd [lindex $in $d0]] eq "N" && [llength [lindex $vl 0]] == 1} {
+        # one step of a loop over the copy of a native vector: the variable gets the next integer
+        set var [lindex [lindex $vl 0] 0]
+        set kv [kap $key $var]
+        set x "sv$d0.p\[it_\]"
+        switch $kv {
+            F { set asg "\{ Tcl_Obj *v_ = tbc_newint($x); int ok_ = tbc_tset(loc_, $var, v_); Tcl_DecrRefCount(v_); if (TBC_UNLIKELY(!ok_)) goto D$pc; \}"; set st {} }
+            W { set asg "wt$var = 0; i$var = $x;"; set st [list [list $var I]] }
+            I - - { set asg "i$var = $x;[expr {$var in [flaggedOf $P] ? " g$var = 1;" : ""}]"; set st [list [list $var I]] }
+            default { set asg "\{ Tcl_Obj *v_ = tbc_newint($x); if (l$var) Tcl_DecrRefCount(l$var); l$var = v_; \}"; set st [list [list $var B]] }
+        }
+        set c "\{ if (fit_$stepPc < fmax_$stepPc) \{ long it_ = fit_$stepPc; $asg fit_$stepPc = it_ + 1; @TAKEN@ goto T[expr {$stepPc + $jo}]; \} \}"
+        return [R cond $in $c tgt [expr {$stepPc + $jo}] stores $st]
+    }
     foreach e [lrange $in $d0 [expr {$d0 + $nl - 1}]] { if {[kd $e] ne "B"} { return [R dead {} "goto D$pc;"] } }
     set stores {}
     set c "\{ if (fit_$stepPc < fmax_$stepPc) \{ long it_ = fit_$stepPc;"

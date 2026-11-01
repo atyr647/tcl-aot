@@ -1772,6 +1772,27 @@ proc da_hole {n} { for {set i 0} {$i < $n} {incr i} { set a([expr {$i * 2}]) $i 
 proc da_holeinc {n} { for {set i 0} {$i < $n} {incr i} { set a([expr {$i * 2}]) $i }; incr a(1) 5; incr a(0) 3; return [list $a(0) $a(1) [info exists a(3)]] }
 proc da_unordmix {n} { for {set i $n} {$i >= 0} {incr i -1} { if {$i % 3 == 0} { set a($i) [expr {$i * 0.5}] } elseif {$i % 3 == 1} { set a($i) $i } else { set a($i) "s$i" } }; set o {}; for {set i 0} {$i <= $n} {incr i} { lappend o $a($i) }; return $o }
 proc da_unorddbl {n} { for {set i $n} {$i >= 0} {incr i -1} { set a($i) [expr {$i * 0.25}] }; set s 0.0; for {set i 0} {$i <= $n} {incr i} { set s [expr {$s + $a($i)}] }; return $s }
+# lists of integers built with lappend and read with lindex, llength, lset and foreach are held as native vectors (decision 36); every other use of the list keeps it a Tcl list
+proc ls_sum {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 3 % 7}] }; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [lindex $l $i] }; return [list $s [llength $l]] }
+proc ls_for {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 7 % 11}] }; set s 0; foreach v $l { if {$v > 5} { incr s $v } }; return $s }
+proc ls_ret {n} { set l {}; for {set i -2} {$i < $n} {incr i} { lappend l $i }; return $l }
+proc ls_big {} { set l {}; lappend l 9223372036854775807; lappend l -9223372036854775808; lappend l 0; return $l }
+proc ls_break {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; set s 0; foreach v $l { if {$v == 5} break; if {$v % 2} continue; incr s $v }; return [list $s $v] }
+proc ls_mod {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; set c 0; foreach v $l { if {$c < 3} { lappend l [expr {$v + 100}] }; incr c }; return [list $c [llength $l] $l] }
+proc ls_nest {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; set s 0; foreach a $l { foreach b $l { incr s [expr {$a * $b}] } }; return $s }
+proc ls_empty {} { set l {}; set c 0; foreach v $l { incr c }; return [list $c [llength $l] [catch {set v} m] $m] }
+proc ls_after {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; foreach v $l { }; return $v }
+proc ls_idx {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * $i}] }; return [list [lindex $l end] [lindex $l 0] [lindex $l 100] [lindex $l -1] [lindex $l end-1] [llength $l]] }
+proc ls_lset {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; lset l 0 99; lset l end 77; return $l }
+proc ls_lseterr {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; lset l $n 5; return $l }
+proc ls_reset {n} { set l {}; set t 0; for {set i 0} {$i < $n} {incr i} { set l {}; for {set j 0} {$j <= $i} {incr j} { lappend l $j }; incr t [llength $l] }; return $t }
+proc ls_mixed {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; lappend l abc; lappend l 1.5; return $l }
+proc ls_pass {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; return [join $l ,] }
+proc ls_res {n} { set l {}; set x [lappend l 1]; for {set i 0} {$i < $n} {incr i} { lappend l $i }; return [list $x $l] }
+proc ls_hexlit {} { set l {}; lappend l 0x10; lappend l 007; lappend l 1e3; return $l }
+proc ls_two {n} { set a {}; set b {}; for {set i 0} {$i < $n} {incr i} { lappend a $i; lappend b [expr {$n - $i}] }; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [expr {[lindex $a $i] * [lindex $b $i]}] }; return $s }
+proc ls_copy {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; set m $l; lappend l 5; return [list [llength $l] [llength $m]] }
+proc ls_var {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; foreach v $l { set v [expr {$v * 2}]; incr s $v }; return [list [llength $l] $s] }
 # comparisons of objects that are not integers (text, lists, doubles, bignums, empty) stay in typed code and take the interpreter's rule: numbers as numbers, anything else as strings
 proc cm_lit {x} { if {$x == "plain"} { return 1 }; if {$x != "left"} { return 2 }; return 3 }
 proc cm_order {x} { list [expr {$x < "m"}] [expr {$x >= "abc"}] [expr {"b" > $x}] }

@@ -295,6 +295,9 @@ foreach n {0 1 2 5 9 30 200} { lappend calls [list da_ord_asc $n] [list da_ord_d
 foreach n {0 1 5 60 300} { foreach m {1 7 50 1000} { lappend calls [list da_ord_hist $n $m] } }
 foreach n {0 1 2 4 7} { foreach m {0 1 3 5} { lappend calls [list da_ord_two $n $m] [list da_ord_col $n $m] } }
 lappend calls {da_ord_sparse}
+# lists as native vectors
+foreach n {0 1 2 3 5 17 100 1000} { lappend calls [list ls_sum $n] [list ls_for $n] [list ls_ret $n] [list ls_break $n] [list ls_mod $n] [list ls_nest [expr {min($n, 30)}]] [list ls_after $n] [list ls_idx $n] [list ls_lset $n] [list ls_lseterr $n] [list ls_reset [expr {min($n, 40)}]] [list ls_mixed $n] [list ls_pass $n] [list ls_res $n] [list ls_two $n] [list ls_copy $n] [list ls_var $n] }
+lappend calls {ls_big} {ls_empty} {ls_hexlit}
 # comparisons of objects that are not integers
 set cmv {0 1 -1 2.5 1.0 1e3 0x10 010 " 5" abc plain left m {} {a b} {1 2} {{a b} c} 100000000000000000000 NaN Inf -0.0 1e400 true {a\ b} "\u00e9" "\u00e9a"}
 foreach x $cmv { lappend calls [list cm_lit $x] [list cm_order $x] [list cm_cnt [list 1 a 1.0 $x abc {} $x] $x] [list cm_neq [list 1 a 1.0 $x abc {} $x] $x] [list cm_min [list $x 3 abc 2.5 $x]] }

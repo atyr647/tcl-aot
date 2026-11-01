@@ -1124,16 +1124,38 @@ static int tbc_lappend(Tcl_Interp *interp, Tcl_Obj **pv, Tcl_Obj *elem) {
 
 /* Typed int vector: a list local that provably holds only integers and never leaves the proc is kept as a raw int64 array.  It is
  * turned into a real Tcl list (tbc_ivec_list) the moment typed code gives up (deoptimisation), so Tcl semantics are unchanged. */
-typedef struct { int64_t *p; int64_t n; } tbc_ivec;
+typedef struct { int64_t *p; int64_t n; int64_t cap; } tbc_ivec;
 #define TBC_IVEC_MAX (INT64_C(1) << 26)
 static tbc_ivec tbc_ivec_new(int64_t n, int64_t v) {
-    tbc_ivec a = {NULL, 0};
+    tbc_ivec a = {NULL, 0, 0};
     if (n < 0 || n > TBC_IVEC_MAX) return a;
     a.p = v == 0 ? (int64_t *) calloc((size_t) (n ? n : 1), sizeof(int64_t)) : (int64_t *) malloc((size_t) (n ? n : 1) * sizeof(int64_t));
     if (!a.p) return a;
-    a.n = n;
+    a.n = n; a.cap = n ? n : 1;
     if (v != 0) { int64_t i; for (i = 0; i < n; i++) a.p[i] = v; }
     return a;
+}
+/* append v; 0 (nothing changed) when the vector would be too long or memory runs out */
+static int tbc_ivec_push(tbc_ivec *a, int64_t v) {
+    if (a->n == a->cap) {
+        int64_t nc = a->cap ? a->cap * 2 : 16;
+        int64_t *np;
+        if (nc > TBC_IVEC_MAX) return 0;
+        np = (int64_t *) realloc(a->p, (size_t) nc * sizeof(int64_t));
+        if (!np) return 0;
+        a->p = np; a->cap = nc;
+    }
+    a->p[a->n++] = v;
+    return 1;
+}
+/* a copy of the vector (the one a foreach loop goes through, as the interpreter's goes through the list the loop began with); p is NULL if memory runs out */
+static tbc_ivec tbc_ivec_copy(const tbc_ivec *a) {
+    tbc_ivec c = {NULL, 0, 0};
+    c.p = (int64_t *) malloc((size_t) (a->n ? a->n : 1) * sizeof(int64_t));
+    if (!c.p) return c;
+    if (a->n) memcpy(c.p, a->p, (size_t) a->n * sizeof(int64_t));
+    c.n = a->n; c.cap = a->n ? a->n : 1;
+    return c;
 }
 /* A list object (one reference) with the vector's contents; take != 0 releases the vector. */
 static Tcl_Obj *tbc_ivec_list(tbc_ivec *a, int take) {
@@ -1142,7 +1164,7 @@ static Tcl_Obj *tbc_ivec_list(tbc_ivec *a, int take) {
     l = Tcl_NewListObj(0, NULL);
     for (i = 0; i < a->n; i++) Tcl_ListObjAppendElement(NULL, l, Tcl_NewWideIntObj(a->p[i]));
     Tcl_IncrRefCount(l);
-    if (take) { free(a->p); a->p = NULL; a->n = 0; }
+    if (take) { free(a->p); a->p = NULL; a->n = a->cap = 0; }
     return l;
 }
 /* Typed string -> int map: a dict local that holds integer values only and never leaves the proc.  Entries keep their insertion order, as
