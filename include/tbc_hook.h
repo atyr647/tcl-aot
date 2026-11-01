@@ -361,13 +361,17 @@ typedef struct {
  * base, base + 1, ...  Two-dimensional (dmode 2): row base, columns base2, base2 + 1, ..., the first row as long as it is (dw = 0 until the second row starts, then its length)
  * and every row after it the same: the elements of a matrix filled row by row.  The first element made out of that order, or with another key, turns the array into the table (the
  * elements in the order they were made, which is the order of the vector, so the order tbc_rflush writes them in is the same as without dense mode).  A map that was never used is
- * empty and becomes dense with its first element. */
+ * empty and becomes dense with its first element.
+ * Unordered (dmode 3, one-dimensional, base 0): integer keys made in any order, as long as they stay below four times the number of elements (and 4096): the vector has holes
+ * (TBC_RABS) and ord lists the keys in the order they were made, for tbc_rflush and the table.  "Any order" has a limit: a key above four times the number of elements, and above 4096,
+ * is the table's. */
 typedef struct { int64_t i; Tcl_Obj *o; } tbc_rslot;
-typedef struct { tbc_rent *e; int32_t *tab; size_t n, cap, tcap; tbc_rent ie[TBC_RSMALL]; int32_t itab[TBC_RSMALL * 2]; tbc_rslot *d; size_t dn, dcap, dw; int dmode; int64_t dbase, dbase2; } tbc_rmap;
+typedef struct { tbc_rent *e; int32_t *tab; size_t n, cap, tcap; tbc_rent ie[TBC_RSMALL]; int32_t itab[TBC_RSMALL * 2]; tbc_rslot *d; size_t dn, dcap, dw; int dmode; int64_t dbase, dbase2; int32_t *ord; size_t on, ocap; } tbc_rmap;
 #define TBC_RDBL ((Tcl_Obj *) 1)
+#define TBC_RABS ((Tcl_Obj *) 2)		/* a slot of an unordered vector (dmode 3) that holds no element */
 TBC_INLINE int64_t tbc_d2i(double d) { int64_t i; memcpy(&i, &d, sizeof i); return i; }
 TBC_INLINE double tbc_i2d(int64_t i) { double d; memcpy(&d, &i, sizeof d); return d; }
-TBC_INLINE void tbc_rdrel(tbc_rslot *sl) { if (sl->o && sl->o != TBC_RDBL) Tcl_DecrRefCount(sl->o); }
+TBC_INLINE void tbc_rdrel(tbc_rslot *sl) { if (sl->o && sl->o != TBC_RDBL && sl->o != TBC_RABS) Tcl_DecrRefCount(sl->o); }
 /* an object as an unboxed slot value: an integer in canonical form, a double with no string form of its own (as the interpreter's arithmetic makes them) */
 TBC_INLINE int tbc_rdenc(Tcl_Obj *val, int64_t *i, Tcl_Obj **o) {
     double dv;
@@ -384,7 +388,7 @@ TBC_INLINE const char *tbc_rkey(const tbc_rent *r) { return r->len < (int) sizeo
 static void tbc_rfree(tbc_rmap *m) {
     size_t i;
     for (i = 0; i < m->dn; i++) tbc_rdrel(&m->d[i]);
-    free(m->d);
+    free(m->d); free(m->ord);
     for (i = 0; i < m->n; i++) {
         if (m->e[i].len >= (int) sizeof m->e[i].k.s) free(m->e[i].k.p);
         Tcl_DecrRefCount(m->e[i].val);
@@ -478,7 +482,7 @@ TBC_INLINE int tbc_fmt_pair(char *buf, int64_t i, int64_t j) {
 }
 TBC_INLINE tbc_rslot *tbc_rdslot(const tbc_rmap *m, int64_t k) {
     uint64_t x = (uint64_t) k - (uint64_t) m->dbase;
-    return x < m->dn ? &m->d[x] : NULL;
+    return (x < m->dn && m->d[x].o != TBC_RABS) ? &m->d[x] : NULL;
 }
 TBC_INLINE tbc_rslot *tbc_rd2slot(const tbc_rmap *m, int64_t i, int64_t j) {
     uint64_t ii = (uint64_t) i - (uint64_t) m->dbase, jj = (uint64_t) j - (uint64_t) m->dbase2;
@@ -502,19 +506,26 @@ static int tbc_rd2c(tbc_rmap *m) {
     size_t i, dn = m->dn;
     tbc_rslot *d = m->d;
     if (!d) return 1;
-    if (!tbc_rreserve(m, dn)) return 0;
     TBC_HIT("X:array dense to table");
+    if (m->dmode == 3) dn = m->on;
+    if (!tbc_rreserve(m, dn)) return 0;
     for (i = 0; i < dn; i++) {
         char kb[48];
         int kl;
-        Tcl_Obj *v = d[i].o;
-        if (m->dmode == 1) kl = tbc_fmt_i64(kb, m->dbase + (int64_t) i);
-        else { size_t w = m->dw ? m->dw : dn; kl = tbc_fmt_pair(kb, m->dbase + (int64_t) (i / w), m->dbase2 + (int64_t) (i % w)); }
-        if (!v || v == TBC_RDBL) v = tbc_rdbox(d[i].i, v);
+        tbc_rslot *sl;
+        Tcl_Obj *v;
+        if (m->dmode == 3) { sl = &d[m->ord[i]]; kl = tbc_fmt_i64(kb, (int64_t) m->ord[i]); }
+        else {
+            sl = &d[i];
+            if (m->dmode == 1) kl = tbc_fmt_i64(kb, m->dbase + (int64_t) i);
+            else { size_t w = m->dw ? m->dw : dn; kl = tbc_fmt_pair(kb, m->dbase + (int64_t) (i / w), m->dbase2 + (int64_t) (i % w)); }
+        }
+        v = sl->o;
+        if (!v || v == TBC_RDBL) v = tbc_rdbox(sl->i, v);
         (void) tbc_radd(m, kb, kl, tbc_hash(kb, kl), v);
     }
-    free(d);
-    m->d = NULL; m->dn = m->dcap = m->dw = 0; m->dmode = 0; m->dbase = m->dbase2 = 0;
+    free(d); free(m->ord);
+    m->d = NULL; m->dn = m->dcap = m->dw = 0; m->dmode = 0; m->dbase = m->dbase2 = 0; m->ord = NULL; m->on = m->ocap = 0;
     return 1;
 }
 /* the next element of the vector; o is NULL (the integer i), TBC_RDBL (the double with the bits i) or a reference the vector then owns.  0 when memory runs out */
@@ -543,6 +554,51 @@ static int tbc_rdstart(tbc_rmap *m, int mode, int64_t k, int64_t k2, int64_t i, 
     if (!tbc_rdappend(m, i, o)) { m->dmode = 0; return 0; }
     return 1;
 }
+/* may the key k be made in a vector of one dimension, whatever the order it comes in? */
+#define TBC_RDSPAN(n) (4 * ((int64_t) (n) + 16) > 4096 ? 4 * ((int64_t) (n) + 16) : 4096)	/* the largest key made out of order: four times the elements, at least 4096 */
+TBC_INLINE int tbc_rdcreatable(const tbc_rmap *m, int64_t k) {
+    if (m->dmode == 1) return k == m->dbase + (int64_t) m->dn || (m->dbase == 0 && k >= 0 && k < TBC_RDSPAN(m->dn));
+    return k >= 0 && k < TBC_RDSPAN(m->on);
+}
+/* make a vector that was in order unordered: its keys 0 ... dn - 1 are the order they were made in */
+static int tbc_rd1to3(tbc_rmap *m) {
+    size_t i, n = m->dn, cap = n < 64 ? 64 : n * 2;
+    int32_t *ord;
+    if (m->dbase != 0 || n > (size_t) INT32_MAX / 4) return 0;
+    ord = (int32_t *) malloc(cap * sizeof *ord);
+    if (!ord) return 0;
+    for (i = 0; i < n; i++) ord[i] = (int32_t) i;
+    m->ord = ord; m->on = n; m->ocap = cap; m->dmode = 3;
+    TBC_HIT("X:array dense unordered");
+    return 1;
+}
+/* make the element k of a vector of one dimension (tbc_rdcreatable said it may be made): in order at its end, else in the unordered vector.  0 when memory runs out */
+static int tbc_rd13add(tbc_rmap *m, int64_t k, int64_t i, Tcl_Obj *o) {
+    if (m->dmode == 1) {
+        if (k == m->dbase + (int64_t) m->dn) return tbc_rdappend(m, i, o);
+        if (!tbc_rd1to3(m)) return 0;
+    }
+    if ((uint64_t) k >= m->dn) {
+        size_t nn = (size_t) k + 1, j;
+        if (nn > m->dcap) {
+            size_t nc = m->dcap * 2 < nn ? nn : m->dcap * 2;
+            tbc_rslot *nd = (tbc_rslot *) realloc(m->d, nc * sizeof *nd);
+            if (!nd) return 0;
+            m->d = nd; m->dcap = nc;
+        }
+        for (j = m->dn; j < nn; j++) { m->d[j].i = 0; m->d[j].o = TBC_RABS; }
+        m->dn = nn;
+    }
+    if (m->on == m->ocap) {
+        size_t nc = m->ocap * 2;
+        int32_t *no = (int32_t *) realloc(m->ord, nc * sizeof *no);
+        if (!no) return 0;
+        m->ord = no; m->ocap = nc;
+    }
+    m->d[k].i = i; m->d[k].o = o;
+    m->ord[m->on++] = (int32_t) k;
+    return 1;
+}
 /* slot := the object val (a reference is taken; an integer in canonical form, or a double with no string form, is held unboxed) */
 static void tbc_rdput(tbc_rslot *sl, Tcl_Obj *val) {
     int64_t i;
@@ -560,9 +616,9 @@ TBC_INLINE Tcl_Obj *tbc_rdobj(tbc_rslot *sl) {
 static tbc_rslot *tbc_rdfind(const tbc_rmap *m, const char *s, int len, int *next) {
     int64_t i, j;
     *next = 0;
-    if (m->dmode == 1) {
+    if (m->dmode != 2) {
         if (!tbc_rkeyint(s, len, &i)) return NULL;
-        { tbc_rslot *sl = tbc_rdslot(m, i); if (!sl) *next = i == m->dbase + (int64_t) m->dn; return sl; }
+        { tbc_rslot *sl = tbc_rdslot(m, i); if (!sl) *next = tbc_rdcreatable(m, i); return sl; }
     }
     if (!tbc_rkeypair(s, len, &i, &j)) return NULL;
     { tbc_rslot *sl = tbc_rd2slot(m, i, j); if (!sl) *next = tbc_rd2next(m, i, j); return sl; }
@@ -576,6 +632,13 @@ TBC_INLINE int tbc_rdbegin(const char *s, int len, int *mode, int64_t *k, int64_
 /* the first coordinate of a key in a two-dimensional vector that tbc_rdfind said is next (for tbc_rd2append) */
 TBC_INLINE int64_t tbc_rdrow(const char *s, int len) { int64_t i = 0, j = 0; (void) tbc_rkeypair(s, len, &i, &j); return i; }
 
+/* add the element the key s names, which tbc_rdfind said may be made in the vector */
+static int tbc_rdaddt(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o) {
+    int64_t k = 0;
+    if (m->dmode == 2) return tbc_rd2append(m, tbc_rdrow(s, len), i, o);
+    (void) tbc_rkeyint(s, len, &k);
+    return tbc_rd13add(m, k, i, o);
+}
 /* element := the unboxed value (i, o): an integer (o NULL) or a double (o TBC_RDBL, bits in i).  0 when memory runs out */
 static int tbc_rsetv(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o) {
     uint64_t h;
@@ -586,7 +649,7 @@ static int tbc_rsetv(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o)
             int nx;
             tbc_rslot *sl = tbc_rdfind(m, s, len, &nx);
             if (sl) { tbc_rdrel(sl); sl->i = i; sl->o = o; return 1; }
-            if (nx) return m->dmode == 1 ? tbc_rdappend(m, i, o) : tbc_rd2append(m, tbc_rdrow(s, len), i, o);
+            if (nx) return tbc_rdaddt(m, s, len, i, o);
             if (!tbc_rd2c(m)) return 0;
         } else {
             int mode;
@@ -626,7 +689,7 @@ static int tbc_rset(tbc_rmap *m, const char *s, int len, Tcl_Obj *val) {
             if (nx) {
                 int ok;
                 Tcl_IncrRefCount(val);
-                ok = m->dmode == 1 ? tbc_rdappend(m, 0, val) : tbc_rd2append(m, tbc_rdrow(s, len), 0, val);
+                ok = tbc_rdaddt(m, s, len, 0, val);
                 if (!ok) Tcl_DecrRefCount(val);
                 return ok;
             }
@@ -701,7 +764,7 @@ static int tbc_rinc(tbc_rmap *m, const char *s, int len, int64_t imm, int64_t *o
                 return 1;
             }
             if (nx) {
-                if (!(m->dmode == 1 ? tbc_rdappend(m, imm, NULL) : tbc_rd2append(m, tbc_rdrow(s, len), imm, NULL))) return 0;
+                if (!tbc_rdaddt(m, s, len, imm, NULL)) return 0;
                 *out = imm;
                 return 1;
             }
@@ -734,9 +797,10 @@ static int tbc_rinc(tbc_rmap *m, const char *s, int len, int64_t imm, int64_t *o
 /* The same by an integer key (one-dimensional: the key's text is its canonical decimal form) or by two (the key "i,j"): the elements of a map in dense mode are reached without the text. */
 static int tbc_rsetv_k_slow(tbc_rmap *m, int64_t key, int64_t i, Tcl_Obj *o) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rsetv(m, kb, kl, i, o); }
 TBC_INLINE int tbc_rsetv_k(tbc_rmap *m, int64_t key, int64_t i, Tcl_Obj *o) {
-    tbc_rslot *sl = m->dmode == 1 ? tbc_rdslot(m, key) : NULL;
+    tbc_rslot *sl = (m->dmode & 1) ? tbc_rdslot(m, key) : NULL;
     if (sl) { if (TBC_UNLIKELY(sl->o != NULL)) tbc_rdrel(sl); sl->i = i; sl->o = o; return 1; }
     if (m->dmode == 1 && key == m->dbase + (int64_t) m->dn && tbc_rdappend(m, i, o)) return 1;
+    if ((m->dmode & 1) && tbc_rdcreatable(m, key) && tbc_rd13add(m, key, i, o)) return 1;
     return tbc_rsetv_k_slow(m, key, i, o);
 }
 TBC_INLINE int tbc_rseti_k(tbc_rmap *m, int64_t key, int64_t w) { return tbc_rsetv_k(m, key, w, NULL); }
@@ -744,24 +808,24 @@ TBC_INLINE int tbc_rsetd_k(tbc_rmap *m, int64_t key, double d) { return tbc_rset
 TBC_INLINE int tbc_rsetn_k(tbc_rmap *m, int64_t key, int tag, int64_t iv, double dv) { return tag ? tbc_rsetd_k(m, key, dv) : tbc_rseti_k(m, key, iv); }
 static int tbc_rset_k_slow(tbc_rmap *m, int64_t key, Tcl_Obj *val) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rset(m, kb, kl, val); }
 TBC_INLINE int tbc_rset_k(tbc_rmap *m, int64_t key, Tcl_Obj *val) {
-    tbc_rslot *sl = m->dmode == 1 ? tbc_rdslot(m, key) : NULL;
+    tbc_rslot *sl = (m->dmode & 1) ? tbc_rdslot(m, key) : NULL;
     int64_t i; Tcl_Obj *o;
     if (sl) { tbc_rdput(sl, val); return 1; }
-    if (m->dmode == 1 && key == m->dbase + (int64_t) m->dn && tbc_rdenc(val, &i, &o) && tbc_rdappend(m, i, o)) return 1;
+    if ((m->dmode & 1) && tbc_rdenc(val, &i, &o) && ((m->dmode == 1 && key == m->dbase + (int64_t) m->dn && tbc_rdappend(m, i, o)) || (tbc_rdcreatable(m, key) && tbc_rd13add(m, key, i, o)))) return 1;
     return tbc_rset_k_slow(m, key, val);
 }
 static Tcl_Obj *tbc_rget_k_slow(const tbc_rmap *m, int64_t key) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rget(m, kb, kl); }
 TBC_INLINE Tcl_Obj *tbc_rget_k(const tbc_rmap *m, int64_t key) {
-    if (m->dmode == 1) { tbc_rslot *sl = tbc_rdslot(m, key); return sl ? tbc_rdobj(sl) : NULL; }
+    if (m->dmode & 1) { tbc_rslot *sl = tbc_rdslot(m, key); return sl ? tbc_rdobj(sl) : NULL; }
     return tbc_rget_k_slow(m, key);
 }
 static int tbc_rgetn_k_slow(const tbc_rmap *m, int64_t key, int *tag, int64_t *iv, double *dv) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rgetn(m, kb, kl, tag, iv, dv); }
 TBC_INLINE int tbc_rgetn_k(const tbc_rmap *m, int64_t key, int *tag, int64_t *iv, double *dv) {
-    if (m->dmode == 1) { tbc_rslot *sl = tbc_rdslot(m, key); return sl ? tbc_rslotn(sl, tag, iv, dv) : 0; }
+    if (m->dmode & 1) { tbc_rslot *sl = tbc_rdslot(m, key); return sl ? tbc_rslotn(sl, tag, iv, dv) : 0; }
     return tbc_rgetn_k_slow(m, key, tag, iv, dv);
 }
 TBC_INLINE int tbc_rgetw_k(const tbc_rmap *m, int64_t key, int64_t *w) {
-    if (m->dmode == 1) {
+    if (m->dmode & 1) {
         tbc_rslot *sl = tbc_rdslot(m, key);
         if (!sl) return 0;
         if (!sl->o) { *w = sl->i; return 1; }
@@ -769,7 +833,7 @@ TBC_INLINE int tbc_rgetw_k(const tbc_rmap *m, int64_t key, int64_t *w) {
     { int tag; double dv; return tbc_rgetn_k(m, key, &tag, w, &dv) && !tag; }
 }
 TBC_INLINE int tbc_rgetd_k(const tbc_rmap *m, int64_t key, double *d) {
-    if (m->dmode == 1) {
+    if (m->dmode & 1) {
         tbc_rslot *sl = tbc_rdslot(m, key);
         if (!sl) return 0;
         if (sl->o == TBC_RDBL) { *d = tbc_i2d(sl->i); return 1; }
@@ -778,12 +842,12 @@ TBC_INLINE int tbc_rgetd_k(const tbc_rmap *m, int64_t key, double *d) {
 }
 static int tbc_rhas_k_slow(const tbc_rmap *m, int64_t key) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rhas(m, kb, kl); }
 TBC_INLINE int tbc_rhas_k(const tbc_rmap *m, int64_t key) {
-    if (m->dmode == 1) return tbc_rdslot(m, key) != NULL;
+    if (m->dmode & 1) return tbc_rdslot(m, key) != NULL;
     return tbc_rhas_k_slow(m, key);
 }
 static int tbc_rinc_k_slow(tbc_rmap *m, int64_t key, int64_t imm, int64_t *out) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rinc(m, kb, kl, imm, out); }
 TBC_INLINE int tbc_rinc_k(tbc_rmap *m, int64_t key, int64_t imm, int64_t *out) {
-    tbc_rslot *sl = m->dmode == 1 ? tbc_rdslot(m, key) : NULL;
+    tbc_rslot *sl = (m->dmode & 1) ? tbc_rdslot(m, key) : NULL;
     int64_t sum;
     if (sl && !sl->o) {
         if (__builtin_add_overflow(sl->i, imm, &sum)) return 0;
@@ -853,17 +917,23 @@ TBC_INLINE int tbc_rinc_k2(tbc_rmap *m, int64_t i, int64_t j, int64_t imm, int64
 }
 /* write the elements into the array that is compiled local idx, in the order they were made, and empty the table */
 static void tbc_rflush(Tcl_Interp *interp, Var *loc, int idx, tbc_rmap *m) {
-    size_t i;
-    for (i = 0; i < m->dn; i++) {
+    size_t i, cnt = m->dmode == 3 ? m->on : m->dn;
+    for (i = 0; i < cnt; i++) {
         char kb[48];
         int kl;
-        Tcl_Obj *k, *v = m->d[i].o;
+        tbc_rslot *sl;
+        Tcl_Obj *k, *v;
         int own = 0;
-        if (m->dmode == 1) kl = tbc_fmt_i64(kb, m->dbase + (int64_t) i);
-        else { size_t w = m->dw ? m->dw : m->dn; kl = tbc_fmt_pair(kb, m->dbase + (int64_t) (i / w), m->dbase2 + (int64_t) (i % w)); }
+        if (m->dmode == 3) { sl = &m->d[m->ord[i]]; kl = tbc_fmt_i64(kb, (int64_t) m->ord[i]); }
+        else {
+            sl = &m->d[i];
+            if (m->dmode == 1) kl = tbc_fmt_i64(kb, m->dbase + (int64_t) i);
+            else { size_t w = m->dw ? m->dw : m->dn; kl = tbc_fmt_pair(kb, m->dbase + (int64_t) (i / w), m->dbase2 + (int64_t) (i % w)); }
+        }
+        v = sl->o;
         k = Tcl_NewStringObj(kb, kl);
         Tcl_IncrRefCount(k);
-        if (!v || v == TBC_RDBL) { v = tbc_rdbox(m->d[i].i, v); own = 1; }
+        if (!v || v == TBC_RDBL) { v = tbc_rdbox(sl->i, v); own = 1; }
         (void) tbc_vstore(interp, loc, idx, NULL, k, v, TCL_LEAVE_ERR_MSG);
         if (own) Tcl_DecrRefCount(v);
         Tcl_DecrRefCount(k);

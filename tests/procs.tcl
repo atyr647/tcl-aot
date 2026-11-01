@@ -1757,6 +1757,21 @@ proc da_kif {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {inc
 proc da_kloop {n} { set a(0,0) 0; for {set i 0} {$i < $n} {incr i} { set a($i,0) [expr {$i * 2}]; while {[info exists a($i,[expr {$i % 3}])] && $i > 100} { break } }; return $a([expr {$n - 1}],0) }
 proc da_kcall {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 2} {incr j} { set a($i,$j) [da_asc 5 $j] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 2} {incr j} { incr s $a($i,$j) } }; return $s }
 proc da_kerr {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 2} {incr j} { set a($i,$j) [expr {$i / ($j - 1)}] } }; return $a(0,0) }
+# unordered dense arrays (integer keys in any order) and the order a hand-over writes the elements into the frame in: `array names` shows the interpreter's order
+proc da_ord_asc {n} { for {set i 0} {$i < $n} {incr i} { set a($i) $i }; return [array names a] }
+proc da_ord_desc {n} { for {set i $n} {$i >= 0} {incr i -1} { set a($i) $i }; return [array names a] }
+proc da_ord_hist {n m} { for {set i 0} {$i < $n} {incr i} { incr h([expr {($i * 7) % $m}]) }; return [array names h] }
+proc da_ord_perm {n} { set x 12345; for {set i 0} {$i < $n} {incr i} { set x [expr {($x * 1103515245 + 12345) % 2147483648}]; set a([expr {$x % ($n * 2)}]) $i }; return [array names a] }
+proc da_ord_sparse {} { set a(0) 1; set a(1) 2; set a(1000000) 3; set a(2) 4; set a(70) 5; set a(4095) 6; set a(4096) 7; return [array names a] }
+proc da_ord_late {n} { for {set i 0} {$i < $n} {incr i} { set a($i) $i }; set a(x) 1; set a(0) 5; set a($n) 6; return [array names a] }
+proc da_ord_two {n m} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $m} {incr j} { set a($i,$j) [expr {$i * $j}] } }; return [array names a] }
+proc da_ord_col {n m} { for {set j 0} {$j < $m} {incr j} { for {set i 0} {$i < $n} {incr i} { set a($i,$j) [expr {$i * $j}] } }; return [array names a] }
+proc da_ord_get {n} { for {set i $n} {$i > 0} {incr i -2} { set a($i) [expr {$i * 2}] }; return [array get a] }
+proc da_unord {n} { set x 77; for {set i 0} {$i < $n} {incr i} { set x [expr {($x * 31 + 7) % 101}]; set a($x) $i }; set s 0; for {set k 0} {$k < 101} {incr k} { if {[info exists a($k)]} { incr s $a($k) } }; return $s }
+proc da_hole {n} { for {set i 0} {$i < $n} {incr i} { set a([expr {$i * 2}]) $i }; return [list [info exists a(0)] [info exists a(1)] [info exists a([expr {$n * 2 - 2}])] [catch {set a(1)} m] $m] }
+proc da_holeinc {n} { for {set i 0} {$i < $n} {incr i} { set a([expr {$i * 2}]) $i }; incr a(1) 5; incr a(0) 3; return [list $a(0) $a(1) [info exists a(3)]] }
+proc da_unordmix {n} { for {set i $n} {$i >= 0} {incr i -1} { if {$i % 3 == 0} { set a($i) [expr {$i * 0.5}] } elseif {$i % 3 == 1} { set a($i) $i } else { set a($i) "s$i" } }; set o {}; for {set i 0} {$i <= $n} {incr i} { lappend o $a($i) }; return $o }
+proc da_unorddbl {n} { for {set i $n} {$i >= 0} {incr i -1} { set a($i) [expr {$i * 0.25}] }; set s 0.0; for {set i 0} {$i <= $n} {incr i} { set s [expr {$s + $a($i)}] }; return $s }
 # comparisons of objects that are not integers (text, lists, doubles, bignums, empty) stay in typed code and take the interpreter's rule: numbers as numbers, anything else as strings
 proc cm_lit {x} { if {$x == "plain"} { return 1 }; if {$x != "left"} { return 2 }; return 3 }
 proc cm_order {x} { list [expr {$x < "m"}] [expr {$x >= "abc"}] [expr {"b" > $x}] }
