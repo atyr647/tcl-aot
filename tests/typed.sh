@@ -110,3 +110,14 @@ for f in tbc_rseti_k tbc_rgetw_k tbc_rseti_k2 tbc_rgetw_k2; do
   grep -q "$f(" "$tmp/d.c" || { echo "typed: FAILED, the generated code of the array procs does not use $f"; exit 1; }
 done
 echo "typed: arrays by integer keys and by \$i,\$j are reached without key text, loads give unboxed integers: ok"
+
+# an array that only doubles are stored in is held as doubles (tbc_rsetd*, tbc_rgetd*), one with integers and doubles in a proc that uses tagged numbers as numbers (loaded with tbc_rgetn*)
+cat > "$tmp/dd.tcl" <<'TCL'
+proc tdd_vec {n} { for {set i 0} {$i < $n} {incr i} { set x($i) [expr {$i * 0.5}] }; set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $x($i)}] }; return $s }
+proc tdd_mix {n} { for {set i 0} {$i < $n} {incr i} { if {$i % 2} { set a($i) [expr {$i * 1.5}] } else { set a($i) $i } }; set s 0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $a($i)}] }; return $s }
+TCL
+"$TCLSH" src/translate.tcl "$tmp/dd.tcl" "$tmp/dd.c" Dbltest >"$tmp/dd.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/dd.log"; exit 1; }
+for f in tbc_rsetd_k tbc_rgetd_k tbc_rgetn_k; do
+  grep -q "$f(" "$tmp/dd.c" || { echo "typed: FAILED, the generated code of the array procs does not use $f"; exit 1; }
+done
+echo "typed: arrays of doubles and of tagged numbers are held unboxed: ok"

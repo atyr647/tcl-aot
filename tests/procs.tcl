@@ -1730,6 +1730,33 @@ proc da_lcs {x y} {
         if {[string index $x [expr {$i - 1}]] eq [string index $y [expr {$j - 1}]]} { set d($i,$j) [expr {$d([expr {$i - 1}],[expr {$j - 1}]) + 1}] } else { set u $d([expr {$i - 1}],$j); set l $d($i,[expr {$j - 1}]); set d($i,$j) [expr {$u > $l ? $u : $l}] } } }
     return $d($n,$m)
 }
+# dense arrays of doubles and of numbers of either kind (element kinds D and W): the unboxed values come back as the numbers they were, with the text the interpreter gives them
+proc da_dbl {n} { for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i * 0.25}] }; set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $a($i)}] }; return [list $s $a(0) [expr {$n > 1 ? $a(1) : 0}] $a([expr {$n - 1}])] }
+proc da_dmix {n} { for {set i 0} {$i < $n} {incr i} { if {$i % 2} { set a($i) [expr {$i * 1.5}] } else { set a($i) $i } }; set s 0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $a($i)}] }; return [list $s $a(0) [expr {$n > 1 ? $a(1) : 0}] [expr {$n > 2 ? $a(2) : 0}]] }
+proc da_dinf {} { set a(0) [expr {1e308 * 10}]; set a(1) [expr {-1e308 * 10}]; set a(2) [expr {-0.0}]; set a(3) [expr {0.1 + 0.2}]; set a(4) [expr {1e22 * 1.0}]; set a(5) [expr {1.0 / 3.0}]; return [list $a(0) $a(1) $a(2) $a(3) $a(4) $a(5)] }
+proc da_dlit {} { set a(0) 0.5; set a(1) 1e3; set a(2) 0.50; set a(3) 2.0; return [list $a(0) $a(1) $a(2) $a(3)] }
+proc da_dover {} { set a(0) 1; set a(0) [expr {2.5 + 0.0}]; set a(1) [expr {3 * 1.0}]; set a(1) 4; return [list $a(0) $a(1) [expr {$a(0) + $a(1)}]] }
+proc da_dstr {} { set a(0) [expr {1.5 + 0.0}]; set a(1) abc; set a(2) [expr {2 * 0.5}]; return [list $a(0) $a(1) $a(2)] }
+proc da_dincr {} { set a(0) [expr {1.5 + 0.0}]; return [list $a(0) [catch {incr a(0)} m] $m] }
+proc da_dtwo {n m} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $m} {incr j} { set a($i,$j) [expr {$i / 2.0 + $j}] } }; set s 0.0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $m} {incr j} { set s [expr {$s + $a($i,$j) * 2}] } }; return $s }
+proc da_dmul {n} {
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set a($i,$j) [expr {($i + $j) * 0.5}]; set b($i,$j) [expr {($i - $j) / 4.0}] } }
+    set t 0.0
+    for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set s 0.0; for {set k 0} {$k < $n} {incr k} { set s [expr {$s + $a($i,$k) * $b($k,$j)}] }; set t [expr {$t + $s}] } }
+    return $t
+}
+proc da_dnbody {n} {
+    for {set i 0} {$i < 4} {incr i} { set x($i) [expr {$i * 1.0}]; set v($i) [expr {0.5 - $i * 0.25}] }
+    for {set s 0} {$s < $n} {incr s} { for {set i 0} {$i < 4} {incr i} { set x($i) [expr {$x($i) + 0.01 * $v($i)}]; set v($i) [expr {$v($i) - 0.02 * $x($i)}] } }
+    return [list $x(0) $x(1) $x(2) $x(3) $v(0)]
+}
+# a key `$i,$j` kept as two integers while the value of the store is computed with branches and calls between the key and the store
+proc da_kbranch {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set a($i,$j) [expr {$i > $j ? [string length x$i] : $j}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { incr s $a($i,$j) } }; return $s }
+proc da_kboth {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {incr j} { incr c($i,$j) [expr {($i + $j) % 2 ? 1 : 2}] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {incr j} { incr s $c($i,$j) } }; return $s }
+proc da_kif {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 3} {incr j} { if {$i == 0 || [info exists a([expr {$i - 1}],$j)]} { set a($i,$j) [expr {$i + $j}] } } }; return [list [info exists a(0,0)] [info exists a(1,2)] [info exists a($n,0)]] }
+proc da_kloop {n} { set a(0,0) 0; for {set i 0} {$i < $n} {incr i} { set a($i,0) [expr {$i * 2}]; while {[info exists a($i,[expr {$i % 3}])] && $i > 100} { break } }; return $a([expr {$n - 1}],0) }
+proc da_kcall {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 2} {incr j} { set a($i,$j) [da_asc 5 $j] } }; set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 2} {incr j} { incr s $a($i,$j) } }; return $s }
+proc da_kerr {n} { for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < 2} {incr j} { set a($i,$j) [expr {$i / ($j - 1)}] } }; return $a(0,0) }
 # comparisons of objects that are not integers (text, lists, doubles, bignums, empty) stay in typed code and take the interpreter's rule: numbers as numbers, anything else as strings
 proc cm_lit {x} { if {$x == "plain"} { return 1 }; if {$x != "left"} { return 2 }; return 3 }
 proc cm_order {x} { list [expr {$x < "m"}] [expr {$x >= "abc"}] [expr {"b" > $x}] }

@@ -285,6 +285,12 @@ foreach n {0 1 3 70} { foreach k {0 1 2 x 01 -1 69 70 {}} { lappend calls [list 
 foreach n {0 1 2 4 9 70} { foreach m {0 1 2 3 8 70} { lappend calls [list da_two $n $m] [list da_two1 $n $m] [list da_col $n $m] } }
 foreach n {0 1 2 3 6 40} { lappend calls [list da_ragged $n] [list da_twogap $n] [list da_twoincr $n] [list da_twostr $n] [list da_matmul $n] }
 foreach {x y} {abcbdab bdcaba {} abc abc {} aaaa aa xyz xyz} { lappend calls [list da_lcs $x $y] }
+foreach n {0 1 2 3 7 100 1000} { lappend calls [list da_dbl $n] [list da_dmix $n] }
+lappend calls {da_dinf} {da_dlit} {da_dover} {da_dstr} {da_dincr}
+foreach n {0 1 2 5 9} { foreach m {0 1 3 8} { lappend calls [list da_dtwo $n $m] } }
+foreach n {0 1 2 5 12 40} { lappend calls [list da_dmul $n] }
+foreach n {0 1 5 300} { lappend calls [list da_dnbody $n] }
+foreach n {0 1 2 3 8 30} { lappend calls [list da_kbranch $n] [list da_kboth $n] [list da_kif $n] [list da_kloop $n] [list da_kcall $n] [list da_kerr $n] }
 # comparisons of objects that are not integers
 set cmv {0 1 -1 2.5 1.0 1e3 0x10 010 " 5" abc plain left m {} {a b} {1 2} {{a b} c} 100000000000000000000 NaN Inf -0.0 1e400 true {a\ b} "\u00e9" "\u00e9a"}
 foreach x $cmv { lappend calls [list cm_lit $x] [list cm_order $x] [list cm_cnt [list 1 a 1.0 $x abc {} $x] $x] [list cm_neq [list 1 a 1.0 $x abc {} $x] $x] [list cm_min [list $x 3 abc 2.5 $x]] }

@@ -1194,13 +1194,13 @@ proc stepT {key pc in} {
             # a key that a native array operation (kind R) is about to use is built in a buffer of the slot, as text, without an object (kind K)
             set kc [keyConsumer $P $pc $q]
             # `$i,$j` of two integers: the key is held as the two integers (kind K:2); the text is only made if something needs it (see keyArgs, boxe)
-            if {$kc ne "" && [kap $key [lindex $kc 1]] eq "R" && $n == 3} {
+            if {$kc ne "" && [allR $key [lindex $kc 1]] && $n == 3} {
                 set e1 [lindex $in $q]; set e2 [lindex $in [expr {$q+1}]]; set e3 [lindex $in [expr {$q+2}]]
                 if {[kd $e2] eq "L" && [lindex $PI($P,lits) [lt $e2]] eq "," && [keyInt $P $q $e1] ne "" && [keyInt $P [expr {$q+2}] $e3] ne ""} {
                     return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] K:2] "ka$q = [keyInt $P $q $e1]; kj$q = [keyInt $P [expr {$q+2}] $e3];"]
                 }
             }
-            if {$kc ne "" && [kap $key [lindex $kc 1]] eq "R"} {
+            if {$kc ne "" && [allR $key [lindex $kc 1]]} {
                 set kcode ""; set ok 1; set maxl 0
                 for {set k $q} {$k < $d && $ok} {incr k} {
                     set e [lindex $in $k]
@@ -1473,26 +1473,15 @@ proc stepT {key pc in} {
                 if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
                 set ek [ekap $key $v]
                 if {$ek eq "-"} { return [R fall [lreplace $in $top $top U] ""] }
-                set k2 [keyInt2 $P $top $e]
-                if {$k2 ne ""} {
-                    lassign $k2 ka kj
-                    if {$ek eq "I"} { return [R fall [lreplace $in $top $top I] "\{ int64_t w_; if (TBC_UNLIKELY(!tbc_rgetw_k2(&rv$v, $ka, $kj, &w_))) goto D$pc; si$top = w_; \}"] }
-                    return [R fall [lreplace $in $top $top B] "\{ Tcl_Obj *o_ = tbc_rget_k2(&rv$v, $ka, $kj); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_); s$top = o_; \}"]
+                set rk [rkey $P $top $e]
+                if {$rk eq ""} { return $dead }
+                lassign $rk suf kargs kpre krel
+                switch $ek {
+                    I { return [R fall [lreplace $in $top $top I] "\{ $kpre int64_t w_; if (TBC_UNLIKELY(!tbc_rgetw${suf}(&rv$v, $kargs, &w_))) goto D$pc;$krel si$top = w_; \}"] }
+                    D { return [R fall [lreplace $in $top $top D] "\{ $kpre double x_; if (TBC_UNLIKELY(!tbc_rgetd${suf}(&rv$v, $kargs, &x_))) goto D$pc;$krel sd$top = x_; \}"] }
+                    W { return [R fall [lreplace $in $top $top W] "\{ $kpre int tg_; int64_t iv_; double dv_; if (TBC_UNLIKELY(!tbc_rgetn${suf}(&rv$v, $kargs, &tg_, &iv_, &dv_))) goto D$pc;$krel sw$top = tg_; si$top = iv_; sd$top = dv_; \}"] }
                 }
-                set ki [keyInt $P $top $e]
-                if {$ek eq "I"} {
-                    # (every element stored is an integer: the load gives an unboxed one; a missing element, or one that is not, is for the boxed code)
-                    if {$ki ne ""} { return [R fall [lreplace $in $top $top I] "\{ int64_t w_; if (TBC_UNLIKELY(!tbc_rgetw_k(&rv$v, $ki, &w_))) goto D$pc; si$top = w_; \}"] }
-                    set kb [keyArgs $P $top $e]
-                    if {$kb eq ""} { return $dead }
-                    lassign $kb kpre kptr klen krel
-                    return [R fall [lreplace $in $top $top I] "\{ $kpre int64_t w_; if (TBC_UNLIKELY(!tbc_rgetw(&rv$v, $kptr, $klen, &w_))) goto D$pc;$krel si$top = w_; \}"]
-                }
-                if {$ki ne ""} { return [R fall [lreplace $in $top $top B] "\{ Tcl_Obj *o_ = tbc_rget_k(&rv$v, $ki); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_); s$top = o_; \}"] }
-                set kb [keyArgs $P $top $e]
-                if {$kb eq ""} { return $dead }
-                lassign $kb kpre kptr klen krel
-                return [R fall [lreplace $in $top $top B] "\{ $kpre Tcl_Obj *o_ = tbc_rget(&rv$v, $kptr, $klen); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_);$krel s$top = o_; \}"]
+                return [R fall [lreplace $in $top $top B] "\{ $kpre Tcl_Obj *o_ = tbc_rget${suf}(&rv$v, $kargs); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_);$krel s$top = o_; \}"]
             }
             if {[kap $key $v] ne "F"} { return $dead }
             set e [lindex $in $top]
@@ -1509,32 +1498,14 @@ proc stepT {key pc in} {
                 set ek [lindex $in $pk]; set ev [lindex $in $pv]
                 set base [lrange $in 0 [expr {$pk-1}]]
                 if {"U" in [list [kd $ek] [kd $ev]]} { return [R fall [list {*}$base U] ""] }
-                set k2 [keyInt2 $P $pk $ek]
-                if {$k2 ne ""} {
-                    lassign $k2 ka kj
-                    set kpre ""; set krel ""; set ki ""
-                    set ok [fvalue $P $pv $ev "tbc_rset_k2(&rv$v, $ka, $kj, @V@)" "tbc_rseti_k2(&rv$v, $ka, $kj, @I@)"]
-                } else {
-                    set kb [keyArgs $P $pk $ek]
-                    if {$kb eq ""} { return $dead }
-                    lassign $kb kpre kptr klen krel
-                    set ki [keyInt $P $pk $ek]
-                    if {$ki ne ""} {
-                        set ok [fvalue $P $pv $ev "tbc_rset_k(&rv$v, $ki, @V@)" "tbc_rseti_k(&rv$v, $ki, @I@)"]
-                        set kpre ""
-                    } else {
-                        set ok [fvalue $P $pv $ev "tbc_rset(&rv$v, $kptr, $klen, @V@)" "tbc_rseti(&rv$v, $kptr, $klen, @I@)"]
-                    }
-                }
-                # (an integer literal in canonical form is stored as the integer, not as the literal's object, which would be parsed again at every store)
-                if {[kd $ev] eq "I" && [lt $ev] ne "" && [evKind $P $ev] eq "I"} {
-                    set lit [lindex $PI($P,lits) [lt $ev]]
-                    if {$k2 ne ""} { set ok [list "" "tbc_rseti_k2(&rv$v, $ka, $kj, [c_int $lit])" ""] } elseif {$ki ne ""} { set ok [list "" "tbc_rseti_k(&rv$v, $ki, [c_int $lit])" ""] } else { set ok [list "" "tbc_rseti(&rv$v, $kptr, $klen, [c_int $lit])" ""] }
-                }
+                set rk [rkey $P $pk $ek]
+                if {$rk eq ""} { return $dead }
+                lassign $rk suf kargs kpre krel
+                set ok [rvalue $P $pv $ev $v $suf $kargs]
                 if {$ok eq ""} { return $dead }
                 lassign $ok vpre call vrel
                 switch [kd $ev] {
-                    I { set mv "si$pk = si$pv;" } D { set mv "sd$pk = sd$pv;" } B { set mv "s$pk = s$pv;" } default { set mv "" }
+                    I { set mv "si$pk = si$pv;" } D { set mv "sd$pk = sd$pv;" } B { set mv "s$pk = s$pv;" } W { set mv "sw$pk = sw$pv; si$pk = si$pv; sd$pk = sd$pv;" } default { set mv "" }
                 }
                 return [R fall [list {*}$base $ev] "\{ $kpre $vpre if (TBC_UNLIKELY(!($call))) \{$vrel goto D$pc; \}$vrel$krel $mv \}" estores [list [list $v [evKind $P $ev]]]]
             }
@@ -1942,23 +1913,41 @@ proc fvalue {P p e tmplObj tmplInt} {
 
 # The instruction that uses the key that the strcat at pc leaves in slot q: {pc variable} when it is an array element operation of typed code (load, store,
 # increment, exists) that comes after only simple instructions that leave slot q alone, else "".
+# Where the key built by the strcat at pc (left in slot q) goes: every path from there must end at an array operation that takes it as its key, and nothing on the way may
+# touch the slot (the value of a store can be computed with branches and calls: a conditional expression between the key and the store).  The result is {pc variables}: the first
+# such operation and the arrays of all of them; "" when some path does anything else with the slot, or the paths are too many.
 proc keyConsumer {P pc q} {
     global PI
-    set cur $PI($P,next,$pc)
-    for {set steps 0} {$steps < 60} {incr steps} {
+    set found {}; set first ""
+    set seen {}
+    set todo [list $PI($P,next,$pc)]
+    set steps 0
+    while {[llength $todo]} {
+        set cur [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {[dict exists $seen $cur]} continue
+        dict set seen $cur 1
+        if {[incr steps] > 600} { return "" }
         if {![info exists PI($P,depth,$cur)]} { return "" }
         lassign $PI($P,ins,$cur) op a
         set d $PI($P,depth,$cur)
-        if {$op in {loadArray1 loadArray4 existArray incrArray1Imm}} { if {$d - 1 == $q} { return [list $cur [operand [lindex $a 0]]] } }
-        if {$op in {storeArray1 storeArray4 incrArray1}} { if {$d - 2 == $q} { return [list $cur [operand [lindex $a 0]]] } }
-        if {$op ni {push1 push4 loadScalar1 loadScalar4 storeScalar1 storeScalar4 startCommand add sub mult div mod lt le gt ge eq neq bitand bitor bitxor lshift rshift
-                incrScalar1Imm incrScalar1 loadArray1 loadArray4 storeArray1 storeArray4 incrArray1 incrArray1Imm existArray strcat pop}} { return "" }
+        # (below the slot: an exception has unwound it)
+        if {$d <= $q} continue
+        if {$op in {loadArray1 loadArray4 existArray incrArray1Imm} && $d - 1 == $q} { lappend found [operand [lindex $a 0]]; if {$first eq ""} { set first $cur }; continue }
+        if {$op in {storeArray1 storeArray4 incrArray1} && $d - 2 == $q} { lappend found [operand [lindex $a 0]]; if {$first eq ""} { set first $cur }; continue }
+        # (instructions that read or move slots by their position, or that open an argument expansion, are only passed when they stay above the slot)
+        switch -- $op {
+            expandStart - expandStkTop - invokeExpanded - expandDrop - invokeReplace - evalStk - exprStk - tailcall - yield - yieldToInvoke { return "" }
+            over { if {$d - 1 - [operand [lindex $a 0]] <= $q} { return "" } }
+            reverse { if {$d - [lindex $a 0] <= $q} { return "" } }
+        }
         lassign [effect $op $a $d {}] pops pushes kind
-        if {$kind ne "fall" || $d - $pops < $q + 1} { return "" }
-        set cur $PI($P,next,$cur)
+        if {$kind ni {fall jump cond} || $d - $pops < $q + 1} { return "" }
+        foreach sc $PI($P,succ,$cur) { lappend todo $sc }
     }
-    return ""
+    if {$found eq ""} { return "" }
+    return [list $first [lsort -unique $found]]
 }
+proc allR {key vars} { foreach v $vars { if {[kap $key $v] ne "R"} { return 0 } }; return 1 }
 
 # a dict key held in slot p (described by e) as bytes: {setup pointer length release key-object}, or "" if the kind is not handled
 # The key of a native array element as an integer, when it is one whose text is its canonical decimal form (a computed integer, or an integer literal written so): the elements
@@ -1976,14 +1965,58 @@ proc keyInt2 {P p e} {
     if {[kd $e] eq "K" && [lt $e] eq "2"} { return [list ka$p kj$p] }
     return ""
 }
-# the kind an element value gives its array: I for an integer in canonical form (a computed one, or a literal written so), else B
+# the kind an element value gives its array: I for an integer in canonical form (a computed one, or a literal written so), D for a double, W for a tagged number, else B
 proc evKind {P e} {
     global PI
-    if {[kd $e] ne "I"} { return B }
-    if {[lt $e] eq ""} { return I }
-    set lit [lindex $PI($P,lits) [lt $e]]
-    if {[regexp {^-?(0|[1-9][0-9]*)$} $lit] && $lit ne "-0" && $lit >= -9223372036854775808 && $lit <= 9223372036854775807} { return I }
+    switch [kd $e] {
+        D { return D }
+        W { return W }
+        I {
+            if {[lt $e] eq ""} { return I }
+            set lit [lindex $PI($P,lits) [lt $e]]
+            if {[regexp {^-?(0|[1-9][0-9]*)$} $lit] && $lit ne "-0" && $lit >= -9223372036854775808 && $lit <= 9223372036854775807} { return I }
+        }
+    }
     return B
+}
+# the join of the kinds of the elements stored in an array: the same kind, else tagged numbers when the proc uses them and both are numbers, else objects
+proc jek {a b} {
+    if {$a eq $b} { return $a }
+    if {$a in {- U}} { return $b }
+    if {$b in {- U}} { return $a }
+    if {$::curWpol && $a in {I D W} && $b in {I D W}} { return W }
+    return B
+}
+# the key of an element of a native array in the forms the runtime takes: {suffix key-arguments setup release}; the functions tbc_r<op><suffix> take them after the map
+proc rkey {P p e} {
+    set k2 [keyInt2 $P $p $e]
+    if {$k2 ne ""} { return [list _k2 [join $k2 ", "] "" ""] }
+    set ki [keyInt $P $p $e]
+    if {$ki ne ""} { return [list _k $ki "" ""] }
+    set kb [keyArgs $P $p $e]
+    if {$kb eq ""} { return "" }
+    lassign $kb pre ptr len rel
+    return [list "" "$ptr, $len" $pre $rel]
+}
+# the call that stores the value in slot p (described by e) into the native array v: {setup call release}, or "" if the kind is not handled
+proc rvalue {P p e v suf kargs} {
+    global PI
+    switch [kd $e] {
+        I {
+            if {[lt $e] eq ""} { return [list "" "tbc_rseti${suf}(&rv$v, $kargs, si$p)" ""] }
+            # (an integer literal in canonical form is stored as the integer, not as the literal's object, which would be parsed again at every store)
+            if {[evKind $P $e] eq "I"} { return [list "" "tbc_rseti${suf}(&rv$v, $kargs, [c_int [lindex $PI($P,lits) [lt $e]]])" ""] }
+            return [list "" "tbc_rset${suf}(&rv$v, $kargs, L_[cident $P]_[lt $e])" ""]
+        }
+        D {
+            if {[lt $e] eq ""} { return [list "" "tbc_rsetd${suf}(&rv$v, $kargs, sd$p)" ""] }
+            return [list "" "tbc_rsetd${suf}(&rv$v, $kargs, [litdbl $P [lt $e]])" ""]
+        }
+        W { return [list "" "tbc_rsetn${suf}(&rv$v, $kargs, sw$p, si$p, sd$p)" ""] }
+        L { return [list "" "tbc_rset${suf}(&rv$v, $kargs, L_[cident $P]_[lt $e])" ""] }
+        B { return [list "" "tbc_rset${suf}(&rv$v, $kargs, s$p)" ""] }
+    }
+    return ""
 }
 proc keyArgs {P p e} {
     global PI
@@ -2757,7 +2790,7 @@ proc analyze {key} {
         if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M}} { dict set nk $v B } } }
         set ekap $VK($key,ekap)
         set nek $ekap
-        foreach s $estores { lassign $s v k; dict set nek $v [jk [dict get $nek $v] $k] }
+        foreach s $estores { lassign $s v k; dict set nek $v [jek [dict get $nek $v] $k] }
         if {$nk eq $kap && $nek eq $ekap} {
             set pending 0
             dict for {v k} $nk { if {$k eq "-"} { dict set nk $v B; set pending 1 } elseif {$k eq "S"} { dict set nk $v B; set pending 1 } }
