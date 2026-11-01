@@ -694,3 +694,32 @@ of a sieve and a matrix uses `tbc_rseti_k`, `tbc_rgetw_k`, `tbc_rseti_k2`, `tbc_
 Full-suite result: the whole of `tests/run.sh` from a snapshot of `cc95679`, exit 0 (16980 calls in the differential test in four modes, forced hand-over at three rates and two seeds, guard, typed, osr, hot, cmdmap, names,
 nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The quick suite also ran with `TBC_FORCE_WPOLICY=1`: 0 mismatches.
 
+## 35. Native arrays of doubles, in any order, with computed pair keys; the table against C after them
+
+Decision 34 left four things on arrays; this decision does them (`bench/vs-c.sh`, compiled / C, wall time, best of three, results compared; the table of decision 34 in brackets):
+integer loop 1.3x (1.3), Collatz 1.5x (1.7), `fib(30)` 5.1x (5.4), sieve 10.3x (10.9), matrix product **8.2x (12.9)**, histogram **2.9x (23)**, dot product of doubles **4.1x (24)**, longest common subsequence **31.8x (129)**.
+
+* **Doubles and tagged numbers in a vector.**  A slot is an integer unboxed, a double unboxed (its bits, tag `TBC_RDBL`), or an object.  The element kind of an array is now I, D, W or B: D when only doubles are stored, W (a tagged number,
+  decision 29) when integers and doubles are stored in a proc that uses tagged numbers, B otherwise.  A load from an array of kind D or W pushes an unboxed double or tagged number; a store of one stores it unboxed.  A double that
+  an object holds is unboxed only if it has no string form of its own (as the interpreter's arithmetic makes them), an integer only in canonical form, so what comes back is the text it went in with.  Dot product of 1M doubles: 171 ms to 33 ms.
+* **Pair keys with branches in the value.**  `set d($i,$j) [expr {$u > $l ? $u : $l}]` computes its value with jumps between the key and the store; the scan that finds where a key goes (`keyConsumer`) followed only straight-line code, so
+  that key was built as an object.  It now follows every path from the key and requires that each ends at an array operation on a native array and none touches the slot (calls are passed, an argument expansion, `over`
+  of the slot, `eval` are not).  The LCS recurrence of 600x600: 28 ms to 6 ms.
+* **Integer keys in any order.**  A vector whose keys stop coming in order (a histogram, a descending fill, a random fill) is turned not into the table but into an unordered vector with holes and a list of the order the keys were made in
+  (dmode 3, base 0), as long as the keys stay below four times the number of elements and at least 4096 (a key above that is the table's).  The elements are written into the frame in the order they were made, so `array names`
+  and `array get` after a hand-over give what the interpreter's arrays give.  That order is observable: a proc that fills an array and then calls `array names` hands over at that call (listed by `TBC_REPORT`: 75 of the 6750 tcllib procs
+  call it), and the array is still a native one up to there.  Histogram of 3M increments: 74 ms to 7.6 ms.
+* **Fewer operations per element.**  The width of a row of a matrix is kept precomputed, the unboxed cases of the reads are the likely ones: the product kernel runs 56 instructions per inner iteration, not 72 (C: about 6).
+* **What is left** (compiled / C): sieve 10.3x (16 bytes a slot where C uses 1: a narrower vector that widens on demand), matrix product 8.2x (the loop's own overhead, two lookups of about 14 instructions each, the check for
+  asynchronous events at each loop head: caching the vector's fields in the loop would let the C compiler keep them in registers), LCS 31.8x (`string index` of two strings and a comparison in every cell), `fib` 5.1x (the call).
+
+Tests: `da_dbl`, `da_dmix`, `da_dinf` (Inf, -Inf, -0.0, 0.1 + 0.2, 1e22, 1/3: the text of unboxed doubles), `da_dlit`, `da_dover` (an integer overwritten by a double and back), `da_dstr`, `da_dincr` (the error of `incr` of a double),
+`da_dtwo`, `da_dmul`, `da_dnbody`; `da_kbranch`, `da_kboth`, `da_kif`, `da_kloop`, `da_kcall`, `da_kerr` (keys with branches, calls and errors in the value); `da_ord_asc/desc/hist/perm/sparse/late/two/col/get` (the order of `array names` and
+`array get` after each kind of fill: compared with the interpreter's), `da_unord`, `da_hole`, `da_holeinc`, `da_unordmix`, `da_unorddbl` (holes: absent elements, `info exists`, `incr` of a hole, mixed values): 519 more calls in the
+differential test, with the forced hand-over and forced tagged-number runs; `tests/hot.sh` counts the vector modes (ascending stays dense, descending and out of order make the unordered vector and not the table, a key above the limit makes the
+table); `tests/typed.sh` checks the generated code of a double array and of a mixed array.
+
+Full-suite result: the whole of `tests/run.sh` from a snapshot of `512df78` (it covers the work-in-progress commits of this decision), exit 0 (17196 calls in the differential test in four modes, forced hand-over at three rates and two seeds,
+guard, typed, osr, hot, cmdmap, names, nest cap, capture, pristine Tcl, typed fuzz seeds 1-3, boxed fuzz seeds 1-2, valgrind): 0 mismatches.  The quick suite also ran with `TBC_FORCE_WPOLICY=1` after each change: 0 mismatches.  The 21
+workloads of decisions 19 and 28 are unchanged: see the next paragraph when that run has finished.
+
