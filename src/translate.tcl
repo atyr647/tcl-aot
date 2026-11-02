@@ -694,6 +694,13 @@ proc prepare {P} {
         if {[string is double -strict $txt] && [c_dbl $txt] eq $dv} { lappend litd "" } else { lappend litd $dv }
     }
     set PI($P,litd) $litd
+    # a literal the compiler made a list or a dict of (a constant `[list lappend l1]`) is one in the module too: Tcl_ConcatObj of list objects is a list that `eval`
+    # runs as a command, where a string has to be parsed (`eval [list lappend l1] $l2`: 1.3 us interpreted, 78 us with the literal made as a string)
+    set litt {}
+    foreach l $PI($P,lits) {
+        if {[regexp {^value is an? (list|dict) } [tcl::unsupported::representation $l] -> ty]} { lappend litt $ty } else { lappend litt "" }
+    }
+    set PI($P,litt) $litt
     set PI($P,pcs) $pcs; set PI($P,reach) $reach; set PI($P,maxd) $maxd; set PI($P,targets) [lsort -unique $targets]
     set PI($P,iters) $iters; set PI($P,mustBox) [lsort -unique $mustBox]
     set lh {}
@@ -4344,7 +4351,8 @@ foreach P $translatable {
     set i 0
     foreach l $PI($P,lits) {
         set e [lindex $PI($P,litd) $i]
-        if {$e ne ""} { append out "    L_[cident $P]_$i = tbc_lit_d($e);\n" } else { append out "    L_[cident $P]_$i = tbc_lit([cstring $l], [cbytes $l]);\n" }
+        set ty [lindex $PI($P,litt) $i]
+        if {$e ne ""} { append out "    L_[cident $P]_$i = tbc_lit_d($e);\n" } elseif {$ty eq "list"} { append out "    L_[cident $P]_$i = tbc_lit_l([cstring $l], [cbytes $l]);\n" } elseif {$ty eq "dict"} { append out "    L_[cident $P]_$i = tbc_lit_dict([cstring $l], [cbytes $l]);\n" } else { append out "    L_[cident $P]_$i = tbc_lit([cstring $l], [cbytes $l]);\n" }
         incr i
     }
     append out "    tbc_register(interp, &tbc_e_[cident $P], [incr regId]);\n"

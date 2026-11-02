@@ -1855,3 +1855,14 @@ proc rn_dbl {seed} { expr {srand($seed)}; set a [expr {rand()}]; set b [expr {ra
 proc rn_sum {seed n m} { expr {srand($seed)}; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [expr {int(rand() * $m)}] }; return $s }
 proc rn_args {} { return [expr {rand(1)}] }
 proc rn_badseed {s} { return [expr {srand($s)}] }
+
+# literals the compiler made lists of: concatenated with lists they stay lists (eval runs them as a command), whatever their text
+proc ll_eval {l2} { set l1 {}; eval [list lappend l1] $l2; return $l1 }
+proc ll_evalq {l2} { set l1 {}; eval [list lappend l1 "a b" {c d}] $l2; return $l1 }
+proc ll_cat {x} { return [concat [list a {b c}] $x] }
+proc ll_cat2 {x} { set l [list p q]; return [list [concat $l $x] [llength [concat $l $x]] [string length [concat $l $x]]] }
+proc ll_eval2 {args} { eval [list list a b] $args }
+proc ll_eval3 {} { eval [list set v 42]; return $v }
+proc ll_commentlist {x} { return [concat [list \#a b] $x] }
+proc ll_evalbad {x} { eval [list nosuchcmd a] $x }
+proc ll_listlit {} { set l {a  b}; return [list [llength $l] $l [lindex $l 1] [concat $l c]] }

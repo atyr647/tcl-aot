@@ -67,6 +67,29 @@ static void tbc_rt_init(void) {
 /* A literal from the bytecode's literal table: a string object that keeps its string form; numbers get their numeric form too,
  * as they would the first time the interpreter used them, so the fast paths see them. */
 static Tcl_Obj *tbc_lit_d(double d) { Tcl_Obj *o = Tcl_NewDoubleObj(d); Tcl_IncrRefCount(o); return o; }
+/* a literal that the compiler made a list (or a dict) of: the object has that type, with its text kept, as the interpreter's literal has */
+static Tcl_Obj *tbc_lit_l(const char *s, int len) {
+    Tcl_Obj *o = Tcl_NewStringObj(s, len), *l;
+    Tcl_Obj **el;
+    int n, gl;
+    const char *gs;
+    Tcl_IncrRefCount(o);
+    if (Tcl_ListObjGetElements(NULL, o, &n, &el) != TCL_OK) return o;
+    /* built from its elements the list is canonical (Tcl_ConcatObj of canonical lists is a list that `eval` runs without parsing); kept only when its own text is the literal's */
+    l = Tcl_NewListObj(n, el);
+    Tcl_IncrRefCount(l);
+    gs = Tcl_GetStringFromObj(l, &gl);
+    if (gl == len && memcmp(gs, s, (size_t) len) == 0) { Tcl_DecrRefCount(o); return l; }
+    Tcl_DecrRefCount(l);
+    return o;
+}
+static Tcl_Obj *tbc_lit_dict(const char *s, int len) {
+    Tcl_Obj *o = Tcl_NewStringObj(s, len);
+    int n;
+    Tcl_IncrRefCount(o);
+    (void) Tcl_DictObjSize(NULL, o, &n);
+    return o;
+}
 static Tcl_Obj *tbc_lit(const char *s, int len) {
     Tcl_Obj *o = Tcl_NewStringObj(s, len);
     Tcl_WideInt w;

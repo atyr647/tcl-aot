@@ -265,6 +265,9 @@ foreach {cmd call} {string {pe_mapn 3} ::tcl::string::map {pe_mapn 3} dict {pe_d
 lappend calls {pe_mapn 3} {pe_dsizen 3} {pe_firstn 3}
 # the first call of a proc attached lazily leaves the arguments as they were (no string form made for a byte array)
 lappend calls {tzb_lazy}
+# list literals made by the compiler
+foreach x [list {} a {a b c} {1 2 3 4 5 6 7 8 9 10} "x\ty" {\{} {a {b c} d} " lead" "trail "] { lappend calls [list ll_eval $x] [list ll_evalq $x] [list ll_cat $x] [list ll_cat2 $x] [list ll_eval2 $x] [list ll_commentlist $x] [list ll_evalbad $x] }
+lappend calls {ll_eval3} {ll_listlit} {ll_eval2} {ll_eval2 1 2 3}
 # rand and srand
 foreach seed {0 1 7 42 -5 2147483647 1.5 abc} { lappend calls [list rn_seq $seed 6] [list rn_dbl $seed] [list rn_sum $seed 50 97] [list rn_badseed $seed] }
 lappend calls {rn_args} {rn_seq 3 0}
