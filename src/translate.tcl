@@ -2864,8 +2864,9 @@ proc varWriteCall {key P pc in d n q nm0} {
     foreach vi $vis { append guard "if (TBC_UNLIKELY(!TclIsVarDirectUnsettable(&loc_\[$vi\]))) goto D$pc; " }
     set flush ""; set reload ""
     foreach vi [lsort -integer -unique $vis] {
-        append flush " if (l$vi) tbc_flushr(interp, loc_, $vi, l$vi);"
-        append reload " \{ Tcl_Obj *o_ = loc_\[$vi\].value.objPtr; if (o_) Tcl_IncrRefCount(o_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = o_; \}"
+        # (the local is the frame's own object after a reload: if it has not been assigned since, the frame has it already, and a command that leaves the variable alone is found to have done so)
+        append flush " if (l$vi && l$vi != loc_\[$vi\].value.objPtr) tbc_flushr(interp, loc_, $vi, l$vi);"
+        append reload " \{ Tcl_Obj *o_ = loc_\[$vi\].value.objPtr; if (o_ != l$vi) \{ if (o_) Tcl_IncrRefCount(o_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = o_; \} \}"
     }
     set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc);$flush r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp);$reload \}"
     set stores {}
