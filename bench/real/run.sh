@@ -11,12 +11,18 @@ tmp=${KEEP:-$(mktemp -d)}; [ -z "$KEEP" ] && trap "rm -rf $tmp" EXIT; mkdir -p $
 cat > "$tmp/main.c" <<'C'
 #include <tcl.h>
 extern int MODINIT(Tcl_Interp *);
-static int AppInit(Tcl_Interp *interp) { if (Tcl_Init(interp) != TCL_OK) return TCL_ERROR; Tcl_StaticPackage(NULL, "Realbench", MODINIT, NULL); return MODINIT(interp); }
+static int AppInit(Tcl_Interp *interp) { if (Tcl_Init(interp) != TCL_OK) return TCL_ERROR; Tcl_StaticPackage(NULL, "Realbench", MODINIT, NULL);
+#ifdef AUTOINIT
+    return MODINIT(interp);
+#else
+    return TCL_OK;
+#endif
+}
 int main(int argc, char **argv) { Tcl_Main(argc, argv, AppInit); return 0; }
 C
 printf 'proc tbc_none {} {}\n' > "$tmp/none.tcl"
 "$TCLSH" src/translate.tcl "$tmp/none.tcl" "$tmp/none.c" Realbench >/dev/null 2>&1
-"$CC" -O1 -w -DMODINIT=Realbench_Init $TBC_INC "$tmp/main.c" "$tmp/none.c" $TBC_LIBS -o "$tmp/shell0" || exit 1
+"$CC" -O1 -w -DAUTOINIT -DMODINIT=Realbench_Init $TBC_INC "$tmp/main.c" "$tmp/none.c" $TBC_LIBS -o "$tmp/shell0" || exit 1
 cat > "$tmp/cap.tcl" <<'C'
 tbc::capture on
 set argv [list $env(BF)]
