@@ -92,6 +92,24 @@ set tbcPureArity {scan 3 gets 2}
 set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan scan gets}
 # one of Tcl's own math functions that is a command written in C (max and min are procs of the Tcl library): it never uses the caller's variables
 proc isMathBuiltin {b} { expr {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f] && $f ni {max min}} }
+# The words of `regexp` and `regsub` that name result variables.  `words` are the arguments after the command name: the text of a literal one, or {} for another.  The options are read
+# as the command reads them; a word that is not literal where an option may be makes the answer "no" (-1), except that a non-literal word can only have the command read fewer variables
+# than assumed here (an option it holds would shift the rest), never other ones.  Returns the indexes into `words` of the variable names, or -1.
+proc varWriteArgs {cmd words} {
+    set n [llength $words]
+    set i 0
+    while {$i < $n} {
+        set w [lindex $words $i]
+        if {$w eq "" || [string index $w 0] ne "-"} break
+        if {$w eq "--"} { incr i; break }
+        if {$w eq "-start"} { incr i 2 } else { incr i }
+    }
+    switch -- $cmd {
+        regexp { if {$n - $i < 2} { return -1 }; set r {}; for {set k [expr {$i + 2}]} {$k < $n} {incr k} { lappend r $k }; return $r }
+        regsub { if {$n - $i == 4} { return [list [expr {$i + 3}]] }; if {$n - $i == 3} { return {} }; return -1 }
+    }
+    return -1
+}
 
 # where a command word may resolve to, for a proc in namespace ns
 proc candidates {ns nm} {
@@ -512,7 +530,7 @@ proc prepare {P} {
                     set wf [lindex $st [expr {$q+2}]]; set wv [lindex $st [expr {$q+3}]]
                     if {$wf ne "-" && $wv ne "-"} {
                         set vi [lsearch -exact $vnames [lindex [dict get $bc literals] $wv]]
-                        if {$vi >= 0 && [regexp $::tbcScanFmt [lindex [dict get $bc literals] $wf]]} { set scanVar($pc) $vi }
+                        if {$vi >= 0 && [regexp $::tbcScanFmt [lindex [dict get $bc literals] $wf]]} { lappend scanVar($pc) $vi }
                     }
                 }
                 # `scan string %c var` (typed code does it inline when var is a local): the same
@@ -520,7 +538,22 @@ proc prepare {P} {
                     set wf [lindex $st [expr {$q+2}]]; set wv [lindex $st [expr {$q+3}]]
                     if {$wf ne "-" && $wv ne "-" && [lindex [dict get $bc literals] $wf] eq "%c"} {
                         set vi [lsearch -exact $vnames [lindex [dict get $bc literals] $wv]]
-                        if {$vi >= 0} { set scanVar($pc) $vi }
+                        if {$vi >= 0} { lappend scanVar($pc) $vi }
+                    }
+                }
+                # `regexp pat str var...` and `regsub pat str sub var`: typed code calls them with the variables stored to the frame and read from it again
+                if {[regexp {^(?:::)?(regexp|regsub)$} $nm -> rcmd]} {
+                    set ws {}
+                    for {set k [expr {$q+1}]} {$k < [llength $st]} {incr k} {
+                        set e [lindex $st $k]
+                        lappend ws [expr {$e eq "-" ? "" : [lindex [dict get $bc literals] $e]}]
+                    }
+                    set vw [varWriteArgs $rcmd $ws]
+                    if {$vw ne "-1"} {
+                        foreach k $vw {
+                            set vi [lsearch -exact $vnames [lindex $ws $k]]
+                            if {$vi >= 0} { lappend scanVar($pc) $vi }
+                        }
                     }
                 }
                 # `gets chan var` (typed code does it inline when var is a local): the instruction writes that local by name
@@ -528,7 +561,7 @@ proc prepare {P} {
                     set wv [lindex $st [expr {$q+2}]]
                     if {$wv ne "-"} {
                         set vi [lsearch -exact $vnames [lindex [dict get $bc literals] $wv]]
-                        if {$vi >= 0} { set scanVar($pc) $vi }
+                        if {$vi >= 0} { lappend scanVar($pc) $vi }
                     }
                 }
                 set callee [resolveProc $ns $nm]
@@ -590,7 +623,7 @@ proc prepare {P} {
     # liveness of locals (backward) and definite assignment (forward)
     array set use {}; array set def {}
     foreach pc $reach { lassign $ins($pc) op a; lassign [usedef $op $a] use($pc) def($pc) }
-    foreach pc [array names scanVar] { if {[info exists use($pc)]} { lappend use($pc) $scanVar($pc); lappend def($pc) $scanVar($pc) } }
+    foreach pc [array names scanVar] { if {[info exists use($pc)]} { foreach sv $scanVar($pc) { lappend use($pc) $sv; lappend def($pc) $sv } } }
     array set liveIn {}
     # (two rounds: a foreach step reads its variables, because they keep their values when the loop ends, and that makes them live from the start of the proc, so unset
     # there, so boxed; the second round keeps that read only for the variables that are live where the loop ends, the ones something after the loop reads)
@@ -680,7 +713,7 @@ proc prepare {P} {
         lassign $ins($pc) op a
         if {$op in $::tbcRops} continue
         foreach v [concat {*}[usedef $op $a]] { set rv [lsearch -all -inline -not -exact $rv $v] }
-        if {[info exists scanVar($pc)]} { set rv [lsearch -all -inline -not -exact $rv $scanVar($pc)] }
+        if {[info exists scanVar($pc)]} { foreach sv $scanVar($pc) { set rv [lsearch -all -inline -not -exact $rv $sv] } }
     }
     if {$hasYield} { set rv {} }
     set PI($P,rvars) $rv
@@ -2757,6 +2790,10 @@ proc stepInvoke {key pc in d n} {
         set r [getsVar $key $P $pc $in $d $n $q]
         if {$r ne ""} { return $r }
     }
+    if {[regexp {^(?:::)?(regexp|regsub)$} $nm0]} {
+        set r [varWriteCall $key $P $pc $in $d $n $q $nm0]
+        if {$r ne ""} { return $r }
+    }
     set sub [expr {[llength $args] ? [expr {[kd [lindex $args 0]] eq "L" ? [lindex $PI($P,lits) [lt [lindex $args 0]]] : "-"}] : "-"}]
     if {![pureBuiltin $nm0 $sub] && !([dict exists $::tbcPureArity [string trimleft $nm0 :]] && [dict get $::tbcPureArity [string trimleft $nm0 :]] == $n)} { return $dead }
     foreach e $args { if {[kd $e] in {A N M Q}} { return $dead } }
@@ -2793,6 +2830,48 @@ proc stepInvoke {key pc in d n} {
 
 # `binary scan $data <t>[u]* var` with var a local held as an object: the list is built in C (tbc_bscan) and stored like a `set`; the result of the command is 1.
 # "" when the call is not of that form (the boxed code then runs the command).
+# `regexp pat str var...` and `regsub pat str sub var` with the variables locals held as objects: the variables are stored into the frame, the command is called as it is, and the locals are
+# read from the frame again: typed code goes on, where it handed over at every such call.  "" when the call is not of that form (then boxed code makes it).
+proc varWriteCall {key P pc in d n q nm0} {
+    global PI
+    set cmd [string trimleft $nm0 :]
+    if {$cmd ni {regexp regsub}} { return "" }
+    set below [lrange $in 0 [expr {$q-1}]]
+    set args [lrange $in [expr {$q+1}] end]
+    foreach e $args { if {[kd $e] in {A N M Q T K R F W S}} { return "" } }
+    set words [lmap e $args {expr {[kd $e] eq "L" ? [lindex $PI($P,lits) [lt $e]] : ""}}]
+    # (an empty literal is no option and no name)
+    set vw [varWriteArgs $cmd $words]
+    if {$vw eq "-1"} { return "" }
+    set vis {}
+    foreach k $vw {
+        set e [lindex $args $k]
+        if {[kd $e] ne "L"} { return "" }
+        set vi [lsearch -exact $PI($P,vnames) [lindex $PI($P,lits) [lt $e]]]
+        # (a name that is no compiled local - `->` in `regexp $re $s -> a b` - is a variable the frame creates for the command, which typed code never holds)
+        if {$vi < 0} continue
+        if {[kap $key $vi] ni {B -}} { return "" }
+        lappend vis $vi
+    }
+    foreach e [lrange $in $q end] { if {"U" eq [kd $e]} { return [R fall [list {*}$below U] ""] } }
+    set pre ""; set slots {}; set rel ""
+    for {set k $q} {$k < $d} {incr k} {
+        append pre [boxc $P $k [lindex $in $k]] " "
+        lappend slots s$k; append rel " Tcl_DecrRefCount(s$k);"
+    }
+    set st [list {*}$below {*}[lrepeat $n B]]
+    set guard "if (TBC_UNLIKELY(!inframe)) goto D$pc; "
+    foreach vi $vis { append guard "if (TBC_UNLIKELY(!TclIsVarDirectUnsettable(&loc_\[$vi\]))) goto D$pc; " }
+    set flush ""; set reload ""
+    foreach vi [lsort -integer -unique $vis] {
+        append flush " if (l$vi) tbc_flushr(interp, loc_, $vi, l$vi);"
+        append reload " \{ Tcl_Obj *o_ = loc_\[$vi\].value.objPtr; if (o_) Tcl_IncrRefCount(o_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = o_; \}"
+    }
+    set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc);$flush r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp);$reload \}"
+    set stores {}
+    foreach vi [lsort -integer -unique $vis] { lappend stores [list $vi B] }
+    return [R fall [list {*}$below B] $c stores $stores]
+}
 # `gets chan var` with var a local held as an object: the line is stored like a `set`, and the result is its length (-1 at the end of the input).  "" when the call is not of that form.
 proc getsVar {key P pc in d n q} {
     global PI

@@ -1889,3 +1889,20 @@ proc io_pos {data} { set f [io_write $data]; set fh [open $f r]; fconfigure $fh 
 proc io_bad {which} { switch $which { 0 { gets nosuchchan line } 1 { return [gets nosuchchan] } 2 { set f [io_write x]; set fh [open $f w]; catch {gets $fh line} m; close $fh; file delete $f; return $m } 3 { set f [io_write x]; set fh [open $f r]; close $fh; file delete $f; gets $fh line } 4 { return [eof nosuchchan] } 5 { return [tell nosuchchan] } } }
 proc io_unset {data} { set f [io_write $data]; set fh [open $f r]; set n [gets $fh line]; set m [gets $fh line]; set k [gets $fh line]; close $fh; file delete $f; return [list $n $m $k [info exists line] $line] }
 proc io_loop {n} { set f [io_write [string repeat "line of text\n" $n]]; set fh [open $f r]; set t 0; while {[gets $fh line] >= 0} { incr t [string length $line] }; close $fh; file delete $f; return $t }
+
+# regexp and regsub with result variables, called from typed code with the locals stored to the frame and read from it
+proc rv_basic {s} { set k old; set v old; set r [regexp {^(\w+)=(.*)$} $s -> k v]; return [list $r $k $v] }
+proc rv_nomatch {s} { set a keep; set b keep2; set r [regexp {x(\d+)y(\d+)} $s m a b]; return [list $r $m $a $b [info exists m]] }
+proc rv_loop {s} { set n 0; for {set i 0} {$i < 5} {incr i} { if {[regexp {b(\d)} $s m d]} { incr n $d }; if {[regexp -nocase {A(\d)?} $s m2 e]} { incr n [string length $e] } }; return $n }
+proc rv_opts {s} { set r {}; lappend r [regexp -all {\d} $s] [regexp -inline {(\d)(\w)} $s] [regexp -indices {(\d)} $s m1 m2] [regexp -start 2 {\d} $s] $m1 $m2; lappend r [regexp -- {-} $s] [regexp -nocase -- {A} $s q]; return $r }
+proc rv_arg {s v} { set r [regexp {(\d+)} $s -> v]; return [list $r $v] }
+proc rv_subst {s} { set r [regsub -all {\d} $s # out]; return [list $r $out] }
+proc rv_subst1 {s} { set out unchanged; set r [regsub {zzz} $s Y out]; return [list $r $out] }
+proc rv_subst2 {s} { return [list [regsub {a+} $s <&> ] [regsub -all -nocase {B} $s _]] }
+proc rv_traced {s} { set ::rv_log {}; set k init; trace add variable k write {lappend ::rv_log}; set r [regexp {(\w)(\w)} $s k k2]; trace remove variable k write {lappend ::rv_log}; return [list $r $k $k2 $::rv_log] }
+proc rv_linked {s} { catch {unset ::rv_glob}; upvar #0 rv_glob g; set r [regexp {(\d+)} $s g g2]; return [list $r $g $g2 $::rv_glob] }
+proc rv_elem {s} { set r [regexp {(\w)(\w)} $s arr(all) arr(x) arr(y)]; return [list $r [lsort [array names arr]] $arr(x)] }
+proc rv_bad {p} { return [regexp $p abc x] }
+proc rv_wrong {} { return [regexp {a}] }
+proc rv_dyn {p s} { set k none; set r [regexp $p $s k]; return [list $r $k] }
+proc rv_use {s} { set t 0; foreach w [split $s ,] { if {[regexp {^(\d+)$} $w -> d]} { incr t $d } }; return $t }

@@ -265,6 +265,10 @@ foreach {cmd call} {string {pe_mapn 3} ::tcl::string::map {pe_mapn 3} dict {pe_d
 lappend calls {pe_mapn 3} {pe_dsizen 3} {pe_firstn 3}
 # the first call of a proc attached lazily leaves the arguments as they were (no string form made for a byte array)
 lappend calls {tzb_lazy}
+# regexp and regsub with result variables
+foreach x {{} abc k=v key=val=ue "=" x12y34 xy b1b2 a1B3 {a-b 12 c9} 123 "line\nx=1" AAA} { lappend calls [list rv_basic $x] [list rv_nomatch $x] [list rv_loop $x] [list rv_opts $x] [list rv_arg $x pre] [list rv_subst $x] [list rv_subst1 $x] [list rv_subst2 $x] [list rv_traced $x] [list rv_linked $x] [list rv_elem $x] [list rv_use $x] [list rv_use $x,5,7] }
+foreach p {{(} {*} {a} {(b)} {^$} {[a-} {a{2,1}}} { lappend calls [list rv_bad $p] [list rv_dyn $p abcb] [list rv_dyn $p {}] }
+lappend calls {rv_wrong} {rv_dyn -nocase ABC} {rv_dyn -- --}
 # channel commands
 foreach d [list {} "a" "a\n" "a\nb" "a\nb\n" "\n\n" "x\r\ny\r\n" [string repeat z 5000] "[string repeat q 3000]\nshort\n" "caf\u00e9\n"] { lappend calls [list io_lines $d] [list io_gets1 $d] [list io_pos $d] [list io_unset $d] }
 foreach w {0 1 2 3 4 5} { lappend calls [list io_bad $w] }
