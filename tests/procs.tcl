@@ -1848,3 +1848,10 @@ proc sc_one {s} { set x old; set r [scan $s %c x]; return [list $r $x] }
 proc sc_unset {s} { set r [scan $s %c x]; return [list $r [info exists x] [expr {[info exists x] ? $x : {}}]] }
 proc sc_sum {s} { set t 0; foreach c [split $s ""] { scan $c %c v; incr t $v }; return $t }
 proc sc_loop {s} { set r {}; for {set i 0} {$i < [string length $s]} {incr i} { scan [string index $s $i] %c x; lappend r $x }; return $r }
+
+# rand() and srand(): called through their pinned commands, rand() taken as a double; a seeded sequence is the same in both modes
+proc rn_seq {seed n} { expr {srand($seed)}; set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {int(rand() * 1000)}] }; return $l }
+proc rn_dbl {seed} { expr {srand($seed)}; set a [expr {rand()}]; set b [expr {rand() * 2.5 + 1}]; return [list $a $b [expr {$a < $b}]] }
+proc rn_sum {seed n m} { expr {srand($seed)}; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [expr {int(rand() * $m)}] }; return $s }
+proc rn_args {} { return [expr {rand(1)}] }
+proc rn_badseed {s} { return [expr {srand($s)}] }

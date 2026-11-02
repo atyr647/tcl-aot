@@ -528,7 +528,7 @@ proc prepare {P} {
                     set bn [string trimleft $nm :]
                     if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins || ($bn eq "scan" && $n == 3)} {
                         # (stays in its own frame, runs no script)
-                        if {![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]} { lappend bins $nm }
+                        if {(![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]) || [regexp {^tcl::mathfunc::s?rand$} $bn]} { lappend bins $nm }
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
                         lappend bins $nm
                     } else {
@@ -2749,7 +2749,9 @@ proc stepInvoke {key pc in d n} {
     set guard [expr {[isMathBuiltin $nm0] ? "if (TBC_UNLIKELY(!tbc_mf_ok)) goto D$pc; " : ""}]
     # (a built-in that the module has pinned is called through its C procedure when nothing the interpreter's dispatch would do can matter: tbc_direct)
     set call "Tcl_EvalObjv(interp, $n, ov_, TBC_EV)"
-    if {![isMathBuiltin $nm0]} {
+    # (a math function that typed code does not compute, `rand` and `srand`, is called through its pinned command like a pure built-in: calling it by name resolves the
+    # name afresh at every call, which costs more than the interpreter's own call of it)
+    if {![isMathBuiltin $nm0] || [regexp {^(?:::)?tcl::mathfunc::s?rand$} $nm0]} {
         set dcid dc_[cident $nm0]
         dict set ::DCNAMES $nm0 $dcid
         set ecid NULL
@@ -2758,6 +2760,11 @@ proc stepInvoke {key pc in d n} {
         # (an execution trace on the ensemble is run by the interpreter's dispatch of `binary format`, not by a call of ::tcl::binary::format by name: boxed code makes the call then)
         if {$ecid ne "NULL"} { append guard "if (TBC_UNLIKELY($ecid && ($ecid->flags & CMD_HAS_EXEC_TRACES))) goto D$pc; " }
         set call "(tbc_direct(interp, tbc_$dcid, $ecid, $n, ov_) ? TCL_OK : $call)"
+    }
+    if {[regexp {^(?:::)?tcl::mathfunc::rand$} $nm0] && $n == 1} {
+        # (`rand()` is always a double: the result is taken as one, which keeps `rand() * $n` and `int(...)` in typed code)
+        set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = $call; if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel \{ Tcl_Obj *r2_ = tbc_takeres(interp); sd$q = 0; (void) Tcl_GetDoubleFromObj(NULL, r2_, &sd$q); Tcl_DecrRefCount(r2_); \} \}"
+        return [R fall [list {*}$below D] $c]
     }
     set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = $call; if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp); \}"
     return [R fall [list {*}$below B] $c]
