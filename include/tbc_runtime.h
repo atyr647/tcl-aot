@@ -760,6 +760,35 @@ static int tbc_s_last(Tcl_Obj *needle, Tcl_Obj *hay, int64_t *out) {
     }
     return 1;
 }
+/* `gets chan var` as Tcl_GetsObjCmd does it, for a local scalar that typed code sets itself.  Returns 1 with the line (one reference) and the command's result; 0, with nothing read, when
+ * the command must make the call (the channel is not found, or not open for reading: it raises the error); -1 when reading failed, with the interpreter's result set (as the command does) */
+extern int TclGetChannelFromObj(Tcl_Interp *, Tcl_Obj *, Tcl_Channel *, int *, int);
+extern void TclChannelPreserve(Tcl_Channel);
+extern void TclChannelRelease(Tcl_Channel);
+extern int TclChanCaughtErrorBypass(Tcl_Interp *, Tcl_Channel);
+static int tbc_gets_var(Tcl_Interp *interp, Tcl_Obj *chanObj, Tcl_Obj **line, int *len) {
+    Tcl_Channel chan;
+    int mode, n;
+    Tcl_Obj *l;
+    if (TclGetChannelFromObj(interp, chanObj, &chan, &mode, 0) != TCL_OK) { Tcl_ResetResult(interp); return 0; }
+    if (!(mode & TCL_READABLE)) return 0;
+    TclChannelPreserve(chan);
+    l = Tcl_NewObj();
+    Tcl_IncrRefCount(l);
+    n = Tcl_GetsObj(chan, l);
+    if (n < 0) {
+        if (!Tcl_Eof(chan) && !Tcl_InputBlocked(chan)) {
+            Tcl_DecrRefCount(l);
+            if (!TclChanCaughtErrorBypass(interp, chan)) Tcl_SetObjResult(interp, Tcl_ObjPrintf("error reading \"%s\": %s", Tcl_GetString(chanObj), Tcl_PosixError(interp)));
+            TclChannelRelease(chan);
+            return -1;
+        }
+        n = -1;
+    }
+    TclChannelRelease(chan);
+    *line = l; *len = n;
+    return 1;
+}
 /* `scan $s %c var` as Tcl_ScanObjCmd does it: -1 for an empty string (the variable is not set), else 1 and the code of the first character (TclUtfToUCS4,
  * which reads a surrogate pair as one character, as the command does) */
 static int tbc_scan_c(Tcl_Obj *s, int *ch) {

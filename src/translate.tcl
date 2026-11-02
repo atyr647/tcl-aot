@@ -79,7 +79,7 @@ if {$census} { set procNames [lsort [::tbcx::allprocs ::]] }
 
 # built-in commands that neither reach the variables of the calling frame nor call back into scripts: a proc that uses nothing else
 # (and calls only such procs) is "pure": nothing can observe its frame, so it needs none of its own while it runs
-set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min tcl::binary::format}
+set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min tcl::binary::format eof tell seek flush read}
 # built-ins that work on the variables of the frame they run in, and nothing else
 # the formats of `binary scan` typed code does itself: one of c s S i I, an optional u, and *
 set tbcScanFmt {^([cisSI])(u?)\*$}
@@ -87,7 +87,9 @@ set tbcScanFmt {^([cisSI])(u?)\*$}
 set tbcStrOps {strindex ::tcl::string::index strfind ::tcl::string::first strrfind ::tcl::string::last strrange ::tcl::string::range strrangeImm ::tcl::string::range
     strreplace ::tcl::string::replace strcaseUpper ::tcl::string::toupper strcaseLower ::tcl::string::tolower strcaseTitle ::tcl::string::totitle
     strtrim ::tcl::string::trim strtrimLeft ::tcl::string::trimleft strtrimRight ::tcl::string::trimright strmatch ::tcl::string::match strmap ::tcl::string::map}
-set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan scan}
+# (and, by their number of words: `scan s fmt` and `gets chan` set no variable)
+set tbcPureArity {scan 3 gets 2}
+set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan scan gets}
 # one of Tcl's own math functions that is a command written in C (max and min are procs of the Tcl library): it never uses the caller's variables
 proc isMathBuiltin {b} { expr {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f] && $f ni {max min}} }
 
@@ -521,12 +523,20 @@ proc prepare {P} {
                         if {$vi >= 0} { set scanVar($pc) $vi }
                     }
                 }
+                # `gets chan var` (typed code does it inline when var is a local): the instruction writes that local by name
+                if {[regexp {^(?:::)?gets$} $nm] && $n == 3} {
+                    set wv [lindex $st [expr {$q+2}]]
+                    if {$wv ne "-"} {
+                        set vi [lsearch -exact $vnames [lindex [dict get $bc literals] $wv]]
+                        if {$vi >= 0} { set scanVar($pc) $vi }
+                    }
+                }
                 set callee [resolveProc $ns $nm]
                 if {$callee ne ""} {
                     lappend callees $callee
                 } else {
                     set bn [string trimleft $nm :]
-                    if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins || ($bn eq "scan" && $n == 3)} {
+                    if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins || ([dict exists $::tbcPureArity $bn] && [dict get $::tbcPureArity $bn] == $n)} {
                         # (stays in its own frame, runs no script)
                         if {(![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]) || [regexp {^tcl::mathfunc::s?rand$} $bn]} { lappend bins $nm }
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
@@ -542,7 +552,7 @@ proc prepare {P} {
                         # the string ensemble's own implementations and the math functions never use the caller's variables
                     } elseif {$b eq "dict"} {
                         if {$sub ni {size keys values get exists create merge replace remove}} { set pure 0 }
-                    } elseif {$b ni $::tbcPureBuiltins && !($b eq "scan" && $n == 3)} {
+                    } elseif {$b ni $::tbcPureBuiltins && !([dict exists $::tbcPureArity $b] && [dict get $::tbcPureArity $b] == $n)} {
                         # (`scan $s $fmt` with no variable names returns what it scanned and sets nothing: pure, as `format` is)
                         set pure 0
                     }
@@ -2743,8 +2753,12 @@ proc stepInvoke {key pc in d n} {
         set r [charScan $key $P $pc $in $d $n $q]
         if {$r ne ""} { return $r }
     }
+    if {[regexp {^(?:::)?gets$} $nm0]} {
+        set r [getsVar $key $P $pc $in $d $n $q]
+        if {$r ne ""} { return $r }
+    }
     set sub [expr {[llength $args] ? [expr {[kd [lindex $args 0]] eq "L" ? [lindex $PI($P,lits) [lt [lindex $args 0]]] : "-"}] : "-"}]
-    if {![pureBuiltin $nm0 $sub] && !([string trimleft $nm0 :] eq "scan" && $n == 3)} { return $dead }
+    if {![pureBuiltin $nm0 $sub] && !([dict exists $::tbcPureArity [string trimleft $nm0 :]] && [dict get $::tbcPureArity [string trimleft $nm0 :]] == $n)} { return $dead }
     foreach e $args { if {[kd $e] in {A N M Q}} { return $dead } }
     set pre ""; set slots {}; set rel ""
     for {set k $q} {$k < $d} {incr k} {
@@ -2779,6 +2793,23 @@ proc stepInvoke {key pc in d n} {
 
 # `binary scan $data <t>[u]* var` with var a local held as an object: the list is built in C (tbc_bscan) and stored like a `set`; the result of the command is 1.
 # "" when the call is not of that form (the boxed code then runs the command).
+# `gets chan var` with var a local held as an object: the line is stored like a `set`, and the result is its length (-1 at the end of the input).  "" when the call is not of that form.
+proc getsVar {key P pc in d n q} {
+    global PI
+    if {$n != 3} { return "" }
+    set below [lrange $in 0 [expr {$q-1}]]
+    lassign [lrange $in [expr {$q+1}] end] ec ev
+    if {[kd $ev] ne "L" || [kd $ec] ni {B L U}} { return "" }
+    set vi [lsearch -exact $PI($P,vnames) [lindex $PI($P,lits) [lt $ev]]]
+    if {$vi < 0 || [kap $key $vi] ni {B -}} { return "" }
+    if {[kd $ec] eq "U"} { return [R fall [list {*}$below U] ""] }
+    set pc1 [expr {$q+1}]
+    set dx [expr {[kd $ec] eq "B" ? "s$pc1" : "L_[cident $P]_[lt $ec]"}]
+    set rel [expr {[kd $ec] eq "B" ? " Tcl_DecrRefCount(s$pc1);" : ""}]
+    set st [list {*}$below B B]
+    set c "\{ Tcl_Obj *ln_ = NULL; int len_ = 0, r_ = tbc_gets_var(interp, $dx, &ln_, &len_); if (TBC_UNLIKELY(r_ == 0)) goto D$pc; if (TBC_UNLIKELY(r_ < 0)) \{ rc = TCL_ERROR; goto [fl $key $st]; \}$rel if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = ln_; si$q = len_; \}"
+    return [R fall [list {*}$below I] $c stores [list [list $vi B]]]
+}
 # `scan string %c var` with var a local held as an object: the code of the first character is stored like a `set`, and the result is 1, or -1 for an empty string
 # (which sets nothing).  "" when the call is not of that form.
 proc charScan {key P pc in d n q} {
