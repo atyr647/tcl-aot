@@ -1873,3 +1873,10 @@ proc sx_uni {} { set s ""; foreach c [list a "é" "€" "\U0001F600" z] { append
 proc sx_scan {s} { set t ""; append t $s $s; set n [string length $t]; set r {}; for {set i 0} {$i < $n} {incr i} { lappend r [string index $t $i] }; return [list $n [join $r ,]] }
 proc sx_range {n} { set s ""; for {set i 0} {$i < $n} {incr i} { append s x$i }; return [list [string range $s 1 4] [string range $s end-3 end] [string first x3 $s] [string last x1 $s] [string length $s]] }
 proc sx_neg {} { set s ""; append s abc; return [list [string index $s -1] [string index $s 3] [string index $s 2] [string index $s end-5]] }
+
+# unsupported commands before a loop, inside a short loop, and then the long loop: typed code is entered again at the long loop (and not at the short one it handed over in)
+proc ob_chain {n} { array set a {x 1}; array set a {y 2}; set r 0; foreach k [array names a] { incr r [lsearch -exact [array names a] $k] }; for {set i 0} {$i < $n} {incr i} { incr r [expr {$i & 3}] }; return [list $r [lsort [array names a]]] }
+proc ob_two {args} { array set o {-m 1 -w 2}; array set o $args; set s 0; foreach {k v} [array get o] { incr s [string length $k] }; for {set i 0} {$i < 50} {incr i} { incr s [expr {($i * 3) ^ 5}] }; return [list $s [lsort [array names o]]] }
+proc ob_err {args} { if {[llength $args] > 4} { return -code error "wrong # args: [lindex [info level 0] 0]" }; set t 0; for {set i 0} {$i < 20} {incr i} { incr t $i }; return $t }
+proc ob_late {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l $i }; array set a {p 1}; set t 0; foreach v $l { incr t [expr {$v * $v}] }; array set a {q 2}; for {set i 0} {$i < $n} {incr i} { incr t $i }; return [list $t [lsort [array names a]]] }
+proc ob_inner {n} { array set a {}; set t 0; for {set i 0} {$i < $n} {incr i} { array set a [list k$i $i]; incr t [llength [array names a]] }; return $t }

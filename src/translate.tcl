@@ -2948,16 +2948,17 @@ proc specStore {P pc v} {
 proc frameSeed {P pc in} {
     global PI
     lassign $PI($P,ins,$pc) op a
-    if {$op ni {invokeStk1 invokeStk4} || $PI($P,hasYield)} { return "" }
-    set n [lindex $a 0]; set q [expr {[llength $in] - $n}]
-    set ce [lindex $in $q]
-    if {[kd $ce] ne "L" || [lt $ce] eq ""} { return "" }
-    if {[string trimleft [lindex $PI($P,lits) [lt $ce]] :] ni {variable upvar global}} { return "" }
+    if {$PI($P,hasYield)} { return "" }
+    # (any instruction that typed code hands over at and that falls through - not only the ones that link variables by name: the boxed code runs it, and goes on until a loop
+    # head where typed code is entered again if the locals have the kinds it expects; a proc whose first `array set` or `info level` would otherwise keep its loops boxed)
+    if {[catch {effect $op $a [llength $in] $PI($P,mk,$pc)} eff]} { return "" }
+    lassign $eff pops pushes kind
+    if {$kind ne "fall" || $pops > [llength $in]} { return "" }
     set st {}
-    foreach e [lrange $in 0 [expr {$q-1}]] {
+    foreach e [lrange $in 0 [expr {[llength $in] - $pops - 1}]] {
         switch [kd $e] { I - D - B - T { lappend st $e } L { lappend st B } default { return "" } }
     }
-    lappend st B
+    for {set i 0} {$i < $pushes} {incr i} { lappend st B }
     set nx $PI($P,next,$pc)
     set seen [dict create $nx 1]; set todo [list $nx]; set found 0
     while {[llength $todo] && !$found} {
@@ -3645,7 +3646,7 @@ proc entryCalled {cid pc} {
     if {![info exists ENT]} {
         array set ENT {}
         foreach {all c n} [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] { set ENT($c,$n) 1 }
-        foreach {all c n} [regexp -all -inline {TBC_GNOF\(resumed_, G_(\w+), interp, (-?\d+),} $out] { set ENT($c,$n) 1 }
+        foreach {all c n} [regexp -all -inline {TBC_GNOF\([^,]+, G_(\w+), interp, (-?\d+),} $out] { set ENT($c,$n) 1 }
         # (the resume callbacks of the procs that yield enter at the instruction after each yield, and at the yield itself with an error)
         global PI translatable
         foreach P $translatable {
@@ -3730,6 +3731,7 @@ proc osrAttempt {P pc d} {
     if {$gk ne "" && $wk ne ""} { set fin "if (tbc_wp_$cid) \{ [osrFin $P $wk $pc $d] \} else \{ [osrFin $P $gk $pc $d] \}"; set cond "osr_" } \
     elseif {$wk ne ""} { set fin [osrFin $P $wk $pc $d]; set cond "osr_ && tbc_wp_$cid" } \
     else { set fin [osrFin $P $gk $pc $d]; set cond [expr {$PI($P,wadapt) ? "osr_ && !tbc_wp_$cid" : "osr_"}] }
+    set cond "noosr_ != -1 && noosr_ != [expr {$pc + 1}] && $cond"
     return "    if ($cond) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d; $fin goto gexit; \}\n"
 }
 
@@ -3742,7 +3744,7 @@ proc emitG {P} {
     append fn "static int G_${cid}(Tcl_Interp *interp, int entryPc, Tcl_Obj **stk, int nstk)\n\{\n"
     append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
     set osrPts [osrPointsOf $P]
-    if {[llength $osrPts]} { append fn "    int osr_ = !tbc_noosr; tbc_noosr = 0;\n" }
+    if {[llength $osrPts]} { append fn "    int osr_ = 1, noosr_ = tbc_noosr; tbc_noosr = 0;\n" }
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
     foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
     for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    Tcl_Obj *ex${it}_ = NULL;\n" }
@@ -3971,7 +3973,7 @@ proc emitVariant {key recursive {resume 0}} {
     set osrHere [expr {!$resume && (([dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key) || ([dict exists $::OSRKEYW $P] && [dict get $::OSRKEYW $P] eq $key))}]
     if {$osrHere} {
         append fn "    int resumed_ = 0, rpc = 0, rn = 0; Tcl_Obj **rstk = NULL; (void) rstk; (void) rn;\n"
-        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = 1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0; goto RESUME; \}\n"
+        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0; goto RESUME; \}\n"
     }
     # arguments into locals
     for {set v 0} {$v < $PI($P,nargs) && !$resume} {incr v} {
@@ -4098,7 +4100,15 @@ proc emitVariant {key recursive {resume 0}} {
     }
     set fn [string map [list @@VECDECLS@@ $decls] $fn]
     # a variant that was entered from the boxed code, and every hand-over from it, must not make the boxed code enter typed code again (see osrAttempt)
-    if {$osrHere} { set fn [regsub -all "G_${cid}\\(interp," $fn "TBC_GNOF(resumed_, G_${cid}, interp,"] }
+    # (not when the hand-over is at an instruction that is in no loop: control then only goes forward from it, and the boxed code may enter typed code at a later loop head - a proc
+    # with two unsupported commands before its loop would otherwise keep the loop boxed)
+    if {$osrHere} {
+        # (a hand-over from a variant that the boxed code entered at a loop head: the boxed code that goes on must not enter typed code at that head again - it would be at once
+        # handed over to again from the same place, loop after loop - but it may at the heads after it; the give-up path, where the entry checks failed, goes on with no entry
+        # at all)
+        set fn [regsub -all "G_${cid}\\(interp, (-?\\d+)," $fn "TBC_GNOF(resumed_, G_${cid}, interp, \\1,"]
+        set fn [regsub -all "G_${cid}\\(interp, (rpc)," $fn "TBC_GNOF(-1, G_${cid}, interp, \\1,"]
+    }
     return $fn
 }
 
@@ -4241,7 +4251,7 @@ dict for {P gk} $REKEY { set t [emitVariant $gk $REC($gk) 1]; append out $t "\n"
 foreach P $translatable { set t [emitG $P]; append out $t "\n"; set GTXT($P) $t }
 # every literal entry into the boxed code that generated code makes must have a case in the entry switch of that proc (a missing one would run `default`)
 foreach P $translatable { set G2P([cident $P]) $P }
-foreach {all c n} [concat [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] [regexp -all -inline {TBC_GNOF\(resumed_, G_(\w+), interp, (-?\d+),} $out]] {
+foreach {all c n} [concat [regexp -all -inline {\yG_(\w+)\(interp, (-?\d+),} $out] [regexp -all -inline {TBC_GNOF\([^,]+, G_(\w+), interp, (-?\d+),} $out]] {
     if {$n == 0 || ![info exists G2P($c)]} continue
     if {[string first "    case $n: " $GTXT($G2P($c))] < 0} { error "internal error: the boxed code of $G2P($c) is entered at instruction $n and has no case for it" }
 }
