@@ -729,6 +729,9 @@ TBC_INLINE Tcl_Obj *tbc_ref(Tcl_Obj *o) { Tcl_IncrRefCount(o); return o; }
 TBC_INLINE const char *tbc_ascii(Tcl_Obj *o, int *len) {
     const char *s;
     if (o->typePtr && o->typePtr != tbcString) return NULL;
+    /* (a string that has its Unicode form and not its text - one that was appended to - is left to the command, which works on the Unicode form: making the text of
+     * it is the whole string again, at every call, where the command's own work is O(1)) */
+    if (!o->bytes && o->typePtr) return NULL;
     s = Tcl_GetStringFromObj(o, len);
     return Tcl_GetCharLength(o) == *len ? s : NULL;
 }
@@ -769,7 +772,21 @@ static int tbc_scan_c(Tcl_Obj *s, int *ch) {
 static Tcl_Obj *tbc_chr1[128];
 static int tbc_s_index(Tcl_Obj *s, int64_t i, Tcl_Obj **out) {
     int len;
-    const char *str = tbc_ascii(s, &len);
+    const char *str;
+    if (!s->bytes && s->typePtr == tbcString) {
+        /* the Unicode form only (as the interpreter's own instruction takes it): one character, no text made of the whole string */
+        int n = Tcl_GetCharLength(s);
+        Tcl_UniChar ch;
+        if (i < 0 || i >= n) { *out = tbcEmpty; Tcl_IncrRefCount(tbcEmpty); return 1; }
+        ch = Tcl_GetUniChar(s, (int) i);
+        if (ch < 128) {
+            unsigned char c = (unsigned char) ch;
+            if (!tbc_chr1[c]) { tbc_chr1[c] = Tcl_NewStringObj((const char *) &c, 1); Tcl_IncrRefCount(tbc_chr1[c]); }
+            *out = tbc_chr1[c]; Tcl_IncrRefCount(*out);
+        } else { *out = Tcl_NewUnicodeObj(&ch, 1); Tcl_IncrRefCount(*out); }
+        return 1;
+    }
+    str = tbc_ascii(s, &len);
     if (!str) return 0;
     if (i < 0 || i >= len) { *out = tbcEmpty; Tcl_IncrRefCount(tbcEmpty); return 1; }
     {

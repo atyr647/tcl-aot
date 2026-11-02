@@ -1866,3 +1866,10 @@ proc ll_eval3 {} { eval [list set v 42]; return $v }
 proc ll_commentlist {x} { return [concat [list \#a b] $x] }
 proc ll_evalbad {x} { eval [list nosuchcmd a] $x }
 proc ll_listlit {} { set l {a  b}; return [list [llength $l] $l [lindex $l 1] [concat $l c]] }
+
+# string commands on a string that was appended to (it has its Unicode form and no text): the characters, ranges and searches must be the interpreter's
+proc sx_idx {n} { set s ""; set r {}; for {set i 0} {$i < $n} {incr i} { append s [format %c [expr {97 + $i % 26}]]; lappend r [string index $s $i] [string index $s end] [string index $s [expr {$i + 1}]] }; return $r }
+proc sx_uni {} { set s ""; foreach c [list a "é" "€" "\U0001F600" z] { append s $c; lappend r [string index $s end] [string length $s] [string range $s 0 end] [string first z $s] [string last a $s] }; return $r }
+proc sx_scan {s} { set t ""; append t $s $s; set n [string length $t]; set r {}; for {set i 0} {$i < $n} {incr i} { lappend r [string index $t $i] }; return [list $n [join $r ,]] }
+proc sx_range {n} { set s ""; for {set i 0} {$i < $n} {incr i} { append s x$i }; return [list [string range $s 1 4] [string range $s end-3 end] [string first x3 $s] [string last x1 $s] [string length $s]] }
+proc sx_neg {} { set s ""; append s abc; return [list [string index $s -1] [string index $s 3] [string index $s 2] [string index $s end-5]] }
