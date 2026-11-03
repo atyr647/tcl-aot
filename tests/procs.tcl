@@ -2050,3 +2050,16 @@ proc cr_modify {} {
     return [list $x $s $l]
 }
 proc cr_modify2 {} { uplevel 1 {incr x 10; append s Z; lappend l 9} }
+proc cr_ydgen {} {
+    set r {}
+    for {set i 0} {$i < 4} {incr i} { yield $i; lappend r [string length abc$i] [join {a b} ,] }
+    return $r
+}
+proc cr_ydrun {} {
+    set out {}
+    coroutine cr_c1 cr_ydgen
+    lappend out [cr_c1]
+    cr_swap string {return NEW}; cr_swap join {return JOINED}
+    try { while 1 { lappend out [cr_c1] } } on error {e} { } finally { cr_restore string; cr_restore join }
+    return $out
+}
