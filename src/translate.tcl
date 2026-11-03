@@ -4152,6 +4152,11 @@ proc emitG {P} {
             if {![tbcCanBC $op $a] && $op ne "startCommand"} continue
             set r [findRange $PI($P,ranges) $pc $mode]
             if {[info exists PI($P,drop,$pc,$mode)] && $r ne "" && [dict get $r type] ne "catch"} { set r "" }
+            # (a command evaluated from its source at a startCommand: the loop's target must be an instruction at the depth the stack has there, else the result cannot happen)
+            if {$op eq "startCommand" && $r ne "" && [dict get $r type] ne "catch"} {
+                set tg [dict get $r [expr {$mode == 3 ? "break" : "continue"}]]
+                if {![info exists PI($P,depth,$tg)] || $PI($P,depth,$tg) != $d} { set r "" }
+            }
             append fn "    case $code: "
             if {$r eq ""} { append fn "goto gf_$d;\n"; continue }
             if {[dict get $r type] eq "catch"} {
