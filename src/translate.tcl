@@ -3266,7 +3266,8 @@ proc liteProc {P} {
     # (recursive: some typed variant of it reaches itself)
     foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
     # (the entry costs about 750 instructions, bench/entry.sh; the estimates are good to a third: the entry is left out unless the body clearly saves more)
-    return [expr {$::LITEW($gk) <= 1100}]
+    # (a proc that needs a frame is called by compiled code through the interpreter, which makes the entry cost more still)
+    return [expr {$::LITEW($gk) <= ($P in $::pureProcs ? 1100 : 2000)}]
 }
 proc epochChk {P} { return [epochChkX $P 0] }
 proc epochChkG {P} { return [epochChkX $P 1] }
