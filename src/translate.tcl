@@ -3252,6 +3252,20 @@ proc depCheck {P pc nm} {
     return "if (TBC_UNLIKELY(rv_ != svd_$pc)) { if (TBC_UNLIKELY(!tbc_depok_${initName}(interp, $di))) goto D$pc; svd_$pc = rv_; } "
 }
 # the startCommand instructions of P that follow, on some path, an instruction that can have run a script: where the epochs are compared
+# A proc that the interpreter runs as it is, when it is called from interpreted code (the entry stub is not written over its bytecode): a call into compiled code from the
+# interpreter costs a second dispatch of a command (the stub's) and the entry of the native code, about 700 instructions, and a body without a loop, not recursive, whose typed code is
+# a few instructions saves less than that (about 5 for each instruction that typed code does, in procs of 3 to 14 typed instructions; both figures measured, bench/entry.sh).  Compiled callers still call the compiled code
+# directly.  Not in boxed-only modules, and not with TBC_NOLITE=1 (the tests run every compiled body that way, and test this separately).
+proc liteProc {P} {
+    global PI REC typedMode
+    if {[info exists ::env(TBC_NOLITE)] || !$typedMode} { return 0 }
+    if {[llength $PI($P,loopheads)] || $PI($P,hasYield)} { return 0 }
+    set gk $P/[string repeat B $PI($P,nargs)]
+    if {![info exists ::TYPEDN($gk)]} { return 0 }
+    # (recursive: some typed variant of it reaches itself)
+    foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
+    return [expr {$::TYPEDN($gk) * 5 <= 700}]
+}
 proc epochChk {P} { return [epochChkX $P 0] }
 proc epochChkG {P} { return [epochChkX $P 1] }
 proc hasEp {P} { return [expr {[llength [epochChkG $P]] > 0}] }
@@ -4459,7 +4473,9 @@ proc emitVariant {key recursive {resume 0}} {
     # and continues in the boxed code; a function called directly (no frame) reports that the call must be made the ordinary way.
     set usedD {}
     foreach m [regexp -all -inline {goto D(\d+)} "$fn$stubs"] { if {![string match goto* $m]} { dict set usedD $m 1 } }
-    if {[info exists ::env(TBC_REPORT)]} { set ::REPORT($key) [variantReport $key $P $tpcs $usedD DSITE] }
+    set vr_ [variantReport $key $P $tpcs $usedD DSITE]
+    set ::TYPEDN($key) [lindex $vr_ 1]
+    if {[info exists ::env(TBC_REPORT)]} { set ::REPORT($key) $vr_ }
     foreach pc $tpcs {
         if {![dict exists $usedD $pc]} continue
         set in $VK($key,in,$pc)
@@ -4744,7 +4760,7 @@ foreach P $translatable {
     set gx [lmap d [gdeps $P] {lsearch -exact $gall $d}]
     if {[llength $gx]} { append out "static const unsigned short tbc_gx_$cid\[\] = { [join $gx {, }] };\n" }
     if {[llength [ydeps $P]]} { append out "static int *tbc_yd_$cid\[\] = { [join [lmap c [ydeps $P] {string cat &tbc_valid_[cident $c]}] {, }], NULL };\n" }
-    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring $PI($P,infoBody)], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}], [ensMask $P] \};\n"
+    append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring $PI($P,infoBody)], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}], [ensMask $P], [liteProc $P] \};\n"
     if {[hasDeps $P]} { append out "static int tbc_gok_${cid}(Tcl_Interp *interp) \{ return tbc_guard_ok(interp, &tbc_e_${cid}); \}\n" }
 }
 # the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled

@@ -12,6 +12,8 @@ mode=${1:-all}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 status=0
+# every compiled body is run through the interpreter's entry in these tests (tests/lite.sh tests the bodies the module leaves to the interpreter)
+export TBC_NOLITE=1
 fail() { echo "FAILED: $*"; status=1; }
 
 echo "== building the test module"
@@ -64,7 +66,7 @@ for rate in 3 17 101; do
 done
 
 echo "== guard, nest cap, capture loop, unmodified Tcl"
-for t in guard typed osr hot cmdmap names nestcap capture pristine; do
+for t in guard typed osr hot cmdmap names nestcap capture pristine lite; do
   out=$(tests/$t.sh 2>&1) || { echo "$out"; fail "tests/$t.sh"; continue; }
   echo "$out" | grep -E ': ok$'
 done

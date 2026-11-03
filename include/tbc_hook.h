@@ -36,6 +36,7 @@ typedef struct TbcEntry {
     struct TbcGuard *guard;
     int yres;				/* it yields itself, and everything else it runs is yield-safe: its boxed code can suspend a coroutine */
     unsigned char ens;			/* bit i: it uses a subcommand of ensemble tbc_ens_names[i] (an execution trace on the ensemble is the interpreter's to run: tbc_guard_ok) */
+    unsigned char lite;			/* the interpreter runs it as it is when it is called from interpreted code (no entry stub); compiled callers call the compiled code */
 } TbcEntry;
 
 typedef struct TbcRec {			/* one attached proc */
@@ -1816,6 +1817,7 @@ static int tbc_patch(Tcl_Interp *interp, Proc *p, TbcEntry *e, unsigned char **o
     if (p->bodyPtr->typePtr != &tclByteCodeType) return 0;
     bc = (ByteCode *) p->bodyPtr->internalRep.twoPtrValue.ptr1;
     if (tbc_fingerprint(bc) != e->fp) { *why = "the interpreter's bytecode for this definition differs from the one that was compiled (a command it uses is redefined or traced, an ensemble changed, or a folded constant differs)"; if (getenv("TBC_DEBUG")) fprintf(stderr, "tbc: %s: bytecode differs from the compiled one\n", e->name); return 2; }
+    if (e->lite && !(bc->flags & TCL_BYTECODE_PRECOMPILED)) { *why = "left to the interpreter when called from interpreted code: its typed code saves less than the entry into compiled code costs (compiled callers call the compiled code directly)"; return 3; }
     if (bc->numCodeBytes < 5 || (bc->flags & TCL_BYTECODE_PRECOMPILED)) { *why = (bc->flags & TCL_BYTECODE_PRECOMPILED) ? "the body's bytecode was already replaced" : "trivial body: shorter than the entry stub, and the interpreter runs it faster than a call into compiled code would"; if (getenv("TBC_DEBUG")) fprintf(stderr, "tbc: %s: code too short (%d bytes, %d literals, flags %x)\n", e->name, bc->numCodeBytes, bc->numLitObjects, bc->flags); return (bc->flags & TCL_BYTECODE_PRECOMPILED) ? 0 : 3; }
     cn = Tcl_ObjPrintf("::tbc::e%d", e->id);
     Tcl_IncrRefCount(cn);
@@ -1864,7 +1866,17 @@ static int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char
     unsigned char *orig = NULL;
     const char *why = NULL;
     int rc = tbc_patch(interp, p, e, &orig, &why);
-    if (rc != 1) { tbc_note_def(p, fullName, rc == 3 ? TBC_DEF_TRIVIAL : TBC_DEF_DIFFERS, why); return rc; }
+    if (rc == 3) {
+        /* a body shorter than the entry stub stays the interpreter's (a call from interpreted code costs more with the stub than the body does), but its definition is the one
+         * that was compiled: compiled callers may call the compiled code directly, as they do for an attached proc */
+        tbc_note_def(p, fullName, TBC_DEF_TRIVIAL, why);
+        if (e->valid && strcmp(fullName, e->name) == 0) {
+            *e->valid = 1;
+            tbc_trace(interp, "add", "command", fullName, "rename delete", "::tbc::invalidate", 1);
+        }
+        return rc;
+    }
+    if (rc != 1) { tbc_note_def(p, fullName, TBC_DEF_DIFFERS, why); return rc; }
     {
         int isNew;
         TbcRec *r = (TbcRec *) ckalloc(sizeof *r);
