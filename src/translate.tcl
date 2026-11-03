@@ -3253,18 +3253,19 @@ proc depCheck {P pc nm} {
 }
 # the startCommand instructions of P that follow, on some path, an instruction that can have run a script: where the epochs are compared
 # A proc that the interpreter runs as it is, when it is called from interpreted code (the entry stub is not written over its bytecode): a call into compiled code from the
-# interpreter costs a second dispatch of a command (the stub's) and the entry of the native code, about 700 instructions, and a body without a loop, not recursive, whose typed code is
-# a few instructions saves less than that (about 5 for each instruction that typed code does, in procs of 3 to 14 typed instructions; both figures measured, bench/entry.sh).  Compiled callers still call the compiled code
+# interpreter costs a second dispatch of a command (the stub's) and the entry of the native code, about 700 instructions, and a body without a loop, not recursive, whose typed code
+# does little saves less than that (liteWeight adds up what each instruction it does saves; the procs of bench/entry.sh, up to 14 typed instructions of which at most 2 do arithmetic,
+# gain nothing from it, and the 14 operations of ascii85's encode4bytes gain 3700 a call).  Compiled callers still call the compiled code
 # directly.  Not in boxed-only modules, and not with TBC_NOLITE=1 (the tests run every compiled body that way, and test this separately).
 proc liteProc {P} {
     global PI REC typedMode
     if {[info exists ::env(TBC_NOLITE)] || !$typedMode} { return 0 }
     if {[llength $PI($P,loopheads)] || $PI($P,hasYield)} { return 0 }
     set gk $P/[string repeat B $PI($P,nargs)]
-    if {![info exists ::TYPEDN($gk)]} { return 0 }
+    if {![info exists ::LITEW($gk)]} { return 0 }
     # (recursive: some typed variant of it reaches itself)
     foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
-    return [expr {$::TYPEDN($gk) * 5 <= 700}]
+    return [expr {$::LITEW($gk) <= 700}]
 }
 proc epochChk {P} { return [epochChkX $P 0] }
 proc epochChkG {P} { return [epochChkX $P 1] }
@@ -3407,14 +3408,25 @@ proc siteInfo {P pc in kind} {
 proc variantReport {key P tpcs usedD dsiteVar} {
     global PI VK
     upvar $dsiteVar DS
-    set uns {}; set guarded 0
+    set uns {}; set guarded 0; set lw 0
     foreach pc $tpcs {
         lassign $DS($key,$pc) kind op detail
+        if {$kind ne "unsupported"} { incr lw [liteWeight $op] }
         if {$kind eq "unsupported"} { lappend uns [expr {$detail ne "" ? "$op $detail" : $op}]@$pc } elseif {[dict exists $usedD $pc]} { incr guarded }
     }
     set kinds {}
     dict for {v k} $VK($key,kap) { set vn [lindex $PI($P,vnames) $v]; if {$vn eq ""} { set vn "#$v" }; lappend kinds "$vn=$k" }
+    set ::LITEW($key) $lw
     return [list [llength $PI($P,reach)] [expr {[llength $tpcs] - [llength $uns]}] $guarded $uns $kinds $VK($key,ret)]
+}
+# what an instruction that typed code does saves the interpreter's executor, in instructions (measured, bench/entry.sh and the encode4bytes of tclbench's ascii85): an arithmetic or
+# comparison operation about 250 (operands taken from their objects, the result made into one and released), an operation on a string or a list about 100, a push, a store, a jump nothing
+proc liteWeight {op} {
+    switch -- $op {
+        add - sub - mult - div - mod - lt - le - gt - ge - eq - neq - bitand - bitor - bitxor - lshift - rshift - expon - uminus - uplus - not - bitnot - incrScalar1Imm - incrScalar1 { return 250 }
+        strlen - strindex - strrange - strrangeImm - strfind - strrfind - strmatch - strcaseUpper - strcaseLower - strtrim - listIndex - listIndexImm - listLength - strcat { return 100 }
+    }
+    return 0
 }
 
 proc analyze {key} {
@@ -4474,7 +4486,6 @@ proc emitVariant {key recursive {resume 0}} {
     set usedD {}
     foreach m [regexp -all -inline {goto D(\d+)} "$fn$stubs"] { if {![string match goto* $m]} { dict set usedD $m 1 } }
     set vr_ [variantReport $key $P $tpcs $usedD DSITE]
-    set ::TYPEDN($key) [lindex $vr_ 1]
     if {[info exists ::env(TBC_REPORT)]} { set ::REPORT($key) $vr_ }
     foreach pc $tpcs {
         if {![dict exists $usedD $pc]} continue

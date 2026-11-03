@@ -29,3 +29,8 @@ proc m_cp {x} { set s 0; for {set i 0} {$i < 3} {incr i} { incr s $x }; return $
 proc m_lp {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [m_cp $i] }; return $s }
 proc m_lu {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [m_cu $i] }; return $s }
 proc m_cu {x} { return [string length [format %d $x]] }
+proc m_e4 {val} {
+    if {$val == 0} {return z}
+    return [binary format ccccc [expr { ( $val / 52200625) + 33 }] [expr { (($val % 52200625) / 614125) + 33 }] [expr { (($val % 614125) / 7225) + 33 }] [expr { (($val % 7225) / 85) + 33 }] [expr { ( $val % 85) + 33 }]]
+}
+proc m_e4c {val} { m_e4 $val }
