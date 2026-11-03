@@ -23,3 +23,9 @@ proc m_split {s} { llength [split $s ,] }
 proc m_join {l} { join [split $l ""] - }
 proc m_eval {x} { eval [list expr $x + 1] }
 proc m_incr {} { set i 0; incr i; incr i; return $i }
+proc m_cl {x} { upvar 0 x y; set s 0; for {set i 0} {$i < 3} {incr i} { incr s $y }; return $s }
+proc m_lc {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [m_cl $i] }; return $s }
+proc m_cp {x} { set s 0; for {set i 0} {$i < 3} {incr i} { incr s $x }; return $s }
+proc m_lp {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [m_cp $i] }; return $s }
+proc m_lu {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [m_cu $i] }; return $s }
+proc m_cu {x} { return [string length [format %d $x]] }
