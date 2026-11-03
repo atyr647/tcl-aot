@@ -730,6 +730,14 @@ TBC_SHARED int tbc_susp;			/* boxed code has suspended a coroutine: the callback
  * the operand stack in tbc_rstk/tbc_rn; the variant reads and clears them first thing.  tbc_noosr is set by typed code that was entered that way (or that has just
  * given up) when it goes on in the boxed code: that boxed code must not try to enter typed code at its loop heads once more. */
 TBC_SHARED int tbc_noosr, tbc_rpc1, tbc_rn;
+/* The interpreter runs a command of a bytecode again from its source, with the names looked up afresh, when a command was renamed, defined or deleted (or a namespace's
+ * command path or resolvers changed) since the bytecode was compiled: INST_START_CMD compares the interpreter's compile epoch, and the epoch of the namespace's
+ * resolvers, with those of the bytecode, after anything that could have run a script.  Compiled code takes the two epochs when a proc is entered and does the same
+ * comparison where the bytecode has that instruction (tbc_epb and tbc_nseb carry them from typed code to boxed code and back at a hand-over). */
+TBC_SHARED int tbc_epb, tbc_nseb, tbc_genb;
+#define TBC_EPNOW(interp) (((Interp *) (interp))->compileEpoch)
+#define TBC_NSNOW(interp) (((Interp *) (interp))->varFramePtr->nsPtr->resolverEpoch)
+#define TBC_EPCHG(interp, ep, nse) (((Interp *) (interp))->compileEpoch != (ep) || ((Interp *) (interp))->varFramePtr->nsPtr->resolverEpoch != (nse))
 TBC_SHARED Tcl_Obj **tbc_rstk;
 #define TBC_GNOF(f, g, ...) (tbc_noosr = (f), g(__VA_ARGS__))
 TBC_SHARED Tcl_Obj *tbc_box;

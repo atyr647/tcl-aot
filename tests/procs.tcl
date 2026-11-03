@@ -1938,3 +1938,115 @@ proc zb_cond {c} { set s ""; if {$c} { append s yes } else { append s no }; retu
 proc zb_upv {} { set s ""; append s a; zb_upv2 s; return $s }
 proc zb_upv2 {name} { upvar 1 $name v; append v Z }
 proc zb_err {} { set s ""; append s a; return [string index $s notanindex] }
+
+# commands replaced while a proc runs (decision 49): the interpreter looks a name up at every call and runs a command again from its source once a command was replaced; compiled
+# code does the same from the next command on.  Every proc puts back what it replaced.
+proc cr_swap {name body} { rename ::$name ::cr_orig_$name; proc ::$name {args} $body }
+proc cr_restore {name} { if {[llength [info commands ::cr_orig_$name]]} { catch {rename ::$name {}}; rename ::cr_orig_$name ::$name } }
+proc cr_string {n} {
+    set r {}
+    try { for {set i 0} {$i < $n} {incr i} { if {$i == 1} {cr_swap string {return NEW}}; lappend r [string length abc$i] [string index abc $i] } } finally { cr_restore string }
+    return $r
+}
+proc cr_join {n} {
+    set r {}
+    try { for {set i 0} {$i < $n} {incr i} { if {$i == 1} {cr_swap join {return JOINED}}; lappend r [join {a b} ,] [expr {$i * 2}] } } finally { cr_restore join }
+    return $r
+}
+proc cr_first {n} {
+    set r {}; set s abcabc
+    try { for {set i 0} {$i < $n} {incr i} { if {$i == 2} {cr_swap lsearch {return -7}}; lappend r [string first c $s] [lsearch {x y z} y] } } finally { cr_restore lsearch }
+    return $r
+}
+proc cr_typed {n} {
+    set r {}; set s ""; set k 0
+    try {
+        for {set i 0} {$i < $n} {incr i} {
+            append s $i; incr k $i
+            if {$i == 2} {cr_swap string {return 100}}
+            lappend r [string length $s] $k
+        }
+    } finally { cr_restore string }
+    return [list $r $s $k]
+}
+proc cr_shadow {} {
+    set r {}
+    namespace eval ::cr_ns {
+        proc t {} {
+            set r {}
+            lappend r [string length abc]
+            proc ::cr_ns::string {args} {return SHADOW}
+            lappend r [string length abc]
+            rename ::cr_ns::string {}
+            lappend r [string length abc]
+            return $r
+        }
+    }
+    set r [::cr_ns::t]
+    namespace delete ::cr_ns
+    return $r
+}
+proc cr_eofh {cmd chan args} {
+    switch $cmd {
+        initialize { return {initialize finalize watch read write} }
+        finalize - watch { return }
+        read { if {$::cr_mode eq "eof"} { cr_swap eof {return 42} }; return abcdef }
+        write { return [string length [lindex $args 0]] }
+    }
+}
+proc cr_reflect {mode} {
+    set ::cr_mode $mode
+    set ch [chan create {read write} cr_eofh]
+    set n {}
+    try {
+        for {set i 0} {$i < 3} {incr i} { set d [read $ch 2]; lappend n [eof $ch] [string length $d] }
+    } finally { if {$mode eq "eof"} { cr_restore eof }; catch {close $ch} }
+    return $n
+}
+proc cr_seeall {cmd chan args} {
+    switch $cmd {
+        initialize { return {initialize finalize watch read write seek} }
+        finalize - watch { return }
+        read { lappend ::cr_log [list L [info level] [catch {uplevel #1 {list $x $y $s $l}} r] $r [catch {upvar #1 x v; set v} r2] $r2]; return abc }
+        write { lappend ::cr_log [list W [info level] [catch {uplevel #1 {list $x $y $s $l}} r] $r]; return [string length [lindex $args 0]] }
+        seek { lappend ::cr_log [list S [info level] [catch {uplevel #1 {incr x 100}} r] $r]; return 0 }
+    }
+}
+proc cr_refl_vars {} {
+    set ::cr_log {}
+    set x 5; set y 2.5; set s ""; set l {}
+    for {set i 0} {$i < 3} {incr i} { incr x 10; append s a; set y [expr {$y * 2}]; lappend l $i }
+    set ch [chan create {read write} cr_seeall]
+    chan configure $ch -buffering none
+    set data [read $ch 2]
+    incr x
+    puts -nonewline $ch hello
+    seek $ch 0
+    close $ch
+    catch {unset ::x}
+    return [list $data $x $y $s $l $::cr_log]
+}
+proc cr_vtracer {args} { lappend ::cr_log [uplevel 1 {list $x $y $s $l}] }
+proc cr_vtrace {} {
+    set ::cr_log {}
+    trace add variable ::cr_g write cr_vtracer
+    set x 1; set y 0.5; set s ""; set l {}
+    for {set i 0} {$i < 4} {incr i} { incr x $i; append s $i; set y [expr {$y + 1}]; lappend l $i; set ::cr_g $i }
+    trace remove variable ::cr_g write cr_vtracer
+    return [list $x $y $s $l $::cr_log]
+}
+proc cr_ctarget {a} { return [expr {$a + 1}] }
+proc cr_ctrace {} {
+    set ::cr_log {}
+    trace add execution cr_ctarget enter cr_vtracer
+    set x 1; set y 0.5; set s ""; set l {}
+    for {set i 0} {$i < 3} {incr i} { incr x $i; append s $i; set y [expr {$y + 1}]; lappend l $i; cr_ctarget $i }
+    trace remove execution cr_ctarget enter cr_vtracer
+    return [list $x $y $s $l $::cr_log]
+}
+proc cr_modify {} {
+    set x 1; set s ""; set l {}
+    for {set i 0} {$i < 3} {incr i} { incr x; append s b; lappend l $i; cr_modify2 }
+    return [list $x $s $l]
+}
+proc cr_modify2 {} { uplevel 1 {incr x 10; append s Z; lappend l 9} }

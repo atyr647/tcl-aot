@@ -79,7 +79,12 @@ if {$census} { set procNames [lsort [::tbcx::allprocs ::]] }
 
 # built-in commands that neither reach the variables of the calling frame nor call back into scripts: a proc that uses nothing else
 # (and calls only such procs) is "pure": nothing can observe its frame, so it needs none of its own while it runs
-set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min tcl::binary::format eof tell seek flush read}
+set tbcPureBuiltins {string list lindex llength lrange lsearch join split concat format lrepeat lreverse lreplace linsert encoding abs max min tcl::binary::format}
+# built-ins that stay in their own frame and use no variable of it, but can run a script: a channel with a Tcl command behind it (a reflected or transformed channel) calls it
+# from eof, tell, seek, flush, read and gets.  They are called from typed code as the pure ones are, but a proc that uses them is not pure, and what follows a call of one is
+# checked for a command the script replaced (epochChk).
+set tbcChanBuiltins {eof tell seek flush read}
+set tbcChanArity {gets 2}
 # built-ins that work on the variables of the frame they run in, and nothing else
 # the formats of `binary scan` typed code does itself: one of c s S i I, an optional u, and *
 set tbcScanFmt {^([cisSI])(u?)\*$}
@@ -88,7 +93,7 @@ set tbcStrOps {strindex ::tcl::string::index strfind ::tcl::string::first strrfi
     strreplace ::tcl::string::replace strcaseUpper ::tcl::string::toupper strcaseLower ::tcl::string::tolower strcaseTitle ::tcl::string::totitle
     strtrim ::tcl::string::trim strtrimLeft ::tcl::string::trimleft strtrimRight ::tcl::string::trimright strmatch ::tcl::string::match strmap ::tcl::string::map}
 # (and, by their number of words: `scan s fmt` and `gets chan` set no variable)
-set tbcPureArity {scan 3 gets 2}
+set tbcPureArity {scan 3}
 set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan scan gets}
 # one of Tcl's own math functions that is a command written in C (max and min are procs of the Tcl library): it never uses the caller's variables
 proc isMathBuiltin {b} { expr {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f] && $f ni {max min}} }
@@ -494,6 +499,7 @@ proc prepare {P} {
     # the built-in commands whose identity the analysis relies on (that they run no script and leave the caller's variables alone)
     set bins {}
     array unset scanVar
+    array unset cmdAt
     set pst(0) {}; set pwork {0}
     while {[llength $pwork]} {
         set pc [lindex $pwork end]; set pwork [lrange $pwork 0 end-1]
@@ -524,6 +530,7 @@ proc prepare {P} {
                 set pure 0; set csafe 0; set yres 0
             } else {
                 set nm [lindex [dict get $bc literals] $c]
+                set cmdAt($pc) $nm
                 set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
                 # `binary scan data fmt var` (typed code does it inline when var is a local): the instruction reads and writes that local by name
                 if {[regexp {^(?:::)?tcl::binary::scan$} $nm] && $n == 4} {
@@ -569,7 +576,7 @@ proc prepare {P} {
                     lappend callees $callee
                 } else {
                     set bn [string trimleft $nm :]
-                    if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins || ([dict exists $::tbcPureArity $bn] && [dict get $::tbcPureArity $bn] == $n)} {
+                    if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins || $bn in $::tbcChanBuiltins || ([dict exists $::tbcChanArity $bn] && [dict get $::tbcChanArity $bn] == $n) || ([dict exists $::tbcPureArity $bn] && [dict get $::tbcPureArity $bn] == $n)} {
                         # (stays in its own frame, runs no script)
                         if {(![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]) || [regexp {^tcl::mathfunc::s?rand$} $bn]} { lappend bins $nm }
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
@@ -721,6 +728,7 @@ proc prepare {P} {
     set PI($P,fvars) [lsort -integer -unique $fv]
     if {[llength $fv]} { set pure 0 }
     set PI($P,csafe) $csafe; set PI($P,ysafe) [expr {$yres && !$hasYield}]; set PI($P,yres) [expr {$yres && $hasYield}]; set PI($P,hasYield) $hasYield; set PI($P,bins) [lsort -unique $bins]
+    foreach {cpc cnm} [array get cmdAt] { set PI($P,cmdAt,$cpc) $cnm }
     set PI($P,callees) [lsort -unique $callees]; set PI($P,pure) $pure; set PI($P,mustBoxNamed) [lsort -unique $mustBoxNamed]
     set PI($P,args) $args; set PI($P,nargs) $nargs; set PI($P,vnames) $vnames; set PI($P,lits) [dict get $bc literals]
     # a literal the compiler folded is a double object with no string yet (or one whose printed form is not exact: Tcl prints 2^64 as
@@ -1333,7 +1341,11 @@ proc stepT {key pc in} {
         for {set k [expr {$d - $np}]} {$k < $d} {incr k} { if {[kd [lindex $in $k]] in {A N M Q}} { return $dead } }
     }
     switch -- $op {
-        nop - startCommand { return [R fall $in ""] }
+        nop { return [R fall $in ""] }
+        startCommand {
+            if {$pc in [epochChk $P]} { return [R fall $in "if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_)[genChk $P])) goto D$pc;"] }
+            return [R fall $in ""]
+        }
         beginCatch4 { return [R fall $in ""] }
         endCatch { return [R fall $in "Tcl_ResetResult(interp);"] }
         tryCvtToNumeric {
@@ -2805,7 +2817,7 @@ proc enterG {key gpc slots pre flush} {
     for {set p 0} {$p < $n} {incr p} { append c " [boxc $P $p [lindex $slots $p]]" }
     set ::boxMode copy
     set arr {}; for {set p 0} {$p < $n} {incr p} { lappend arr s$p }
-    append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] }; int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
+    append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] };[epSave $P] int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
     if {$::PI($P,hasYield)} { append c " if (TBC_UNLIKELY(tbc_susp)) \{ tbc_st = 4; rc = TCL_OK; goto ret; \}" }
     append c " if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} goto ret; \}"
     return $c
@@ -2944,7 +2956,8 @@ proc stepInvoke {key pc in d n} {
         if {$r ne ""} { return $r }
     }
     set sub [expr {[llength $args] ? [expr {[kd [lindex $args 0]] eq "L" ? [lindex $PI($P,lits) [lt [lindex $args 0]]] : "-"}] : "-"}]
-    if {![pureBuiltin $nm0 $sub] && !([dict exists $::tbcPureArity [string trimleft $nm0 :]] && [dict get $::tbcPureArity [string trimleft $nm0 :]] == $n)} { return $dead }
+    set nmt [string trimleft $nm0 :]
+    if {![pureBuiltin $nm0 $sub] && !([dict exists $::tbcPureArity $nmt] && [dict get $::tbcPureArity $nmt] == $n) && !([dict exists $::tbcChanArity $nmt] && [dict get $::tbcChanArity $nmt] == $n)} { return $dead }
     foreach e $args { if {[kd $e] in {A N M Q}} { return $dead } }
     set pre ""; set slots {}; set rel ""
     for {set k $q} {$k < $d} {incr k} {
@@ -3163,7 +3176,83 @@ proc pureBuiltin {nm sub} {
     if {[regexp {^tcl::dict::(\w+)$} $b -> s1]} { set b dict; set sub $s1 }
     if {[string match tcl::string::* $b] || [string match tcl::list::* $b] || [isMathBuiltin $b]} { return 1 }
     if {$b eq "dict"} { return [expr {$sub in {size keys values get exists create merge replace remove}}] }
-    return [expr {$b in $::tbcPureBuiltins}]
+    return [expr {$b in $::tbcPureBuiltins || $b in $::tbcChanBuiltins}]
+}
+
+# ---------------------------------------------------------------- commands replaced while a proc runs (decision 49)
+# The interpreter's INST_START_CMD (which a proc has when it can run a script: invokeStk, evalStk, upvar...) compares the epochs of the bytecode with the interpreter's after
+# anything that could have run one, and evaluates the command from its source, names looked up afresh, when a command was renamed, defined or deleted in between.  Compiled
+# code does the same where it has the instruction: typed code hands over to the boxed code at the instruction, the boxed code evaluates the source.  This is the set of
+# instructions that cannot run a script, and so need no test after them:
+set tbcInlineOps {nop startCommand push1 push4 pop dup over reverse add sub mult div mod lt le gt ge eq neq jump1 jump4 jumpTrue1 jumpTrue4 jumpFalse1 jumpFalse4 done
+    uminus uplus not bitnot bitand bitor bitxor lshift rshift expon streq strneq strcmp strlen strcat strindex strmatch strfind strrfind strrange strrangeImm strreplace
+    strmap strcaseUpper strcaseLower strcaseTitle strtrim strtrimLeft strtrimRight strclass listIndex listIndexImm listLength list lsetList listConcat lindexMulti
+    lsetFlat listRangeImm listIn listNotIn dictGet dictExists dictIncrImm verifyDict dictFirst dictNext tryCvtToNumeric jumpTable regexp returnImm syntax returnStk
+    returnCodeBranch pushResult pushReturnCode pushReturnOpts break continue beginCatch4 endCatch infoLevelNumber infoLevelArgs currentNamespace expandStart expandStkTop
+    expandDrop lmap_collect}
+set tbcVarOps {loadScalar1 loadScalar4 storeScalar1 storeScalar4 incrScalar1 incrScalar1Imm appendScalar1 appendScalar4 lappendScalar1 lappendScalar4 existScalar loadArray1
+    loadArray4 storeArray1 storeArray4 incrArray1 incrArray1Imm appendArray1 appendArray4 lappendArray1 lappendArray4 existArray foreach_start foreach_step foreach_end}
+proc reenters {P pc} {
+    global PI pureProcs
+    lassign $PI($P,ins,$pc) op a
+    if {$op in $::tbcInlineOps} { return 0 }
+    if {$op in $::tbcVarOps} {
+        # (a variable of the frame can have a trace, or be linked to one that has; a local of its own cannot, before something has run a script)
+        if {$op in {foreach_start foreach_step foreach_end}} { set vs [lsort -integer -unique [concat {*}[lindex $a 3]]] } else { set vs [list [operand [lindex $a 0]]] }
+        foreach v $vs { if {$v in $PI($P,fvars)} { return 1 } }
+        return 0
+    }
+    if {$op in {invokeStk1 invokeStk4} && [info exists PI($P,cmdAt,$pc)]} {
+        set nm [string trimleft $PI($P,cmdAt,$pc) :]
+        set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+        set callee [resolveProc $ns $PI($P,cmdAt,$pc)]
+        if {$callee ne ""} { return [expr {$callee ni $pureProcs}] }
+        if {[string match tcl::string::* $nm] || [string match tcl::list::* $nm] || [isMathBuiltin $nm] || $nm in $::tbcPureBuiltins} { return 0 }
+        if {[regexp {^tcl::dict::(size|keys|values|get|exists|create|merge|replace|remove)$} $nm]} { return 0 }
+        set n [lindex $a 0]
+        if {[dict exists $::tbcPureArity $nm] && [dict get $::tbcPureArity $nm] == $n} { return 0 }
+    }
+    return 1
+}
+# what typed code compares besides the epochs after anything that could have run a script: the epochs of the namespaces the module's guard looks built-ins up in (a
+# built-in it calls through its pinned command, which the interpreter would look up by name again, may have been replaced)
+proc genUse {P} { return [expr {[llength [gdeps $P]] > 0}] }
+proc genChk {P} { global initName; return [expr {[genUse $P] ? " || tbc_gen_${initName}() != gen_" : ""}] }
+# the baselines of an activation: taken when typed code is entered, and handed from typed code to boxed code and back at a hand-over
+proc epSave {P} { return [expr {[llength [epochChk $P]] ? " tbc_epb = ep_; tbc_nseb = nse_; tbc_genb = gen_;" : ""}] }
+# the startCommand instructions of P that follow, on some path, an instruction that can have run a script: where the epochs are compared
+proc epochChk {P} {
+    global PI
+    if {[info exists PI($P,chk)]} { return $PI($P,chk) }
+    set PI($P,chk) {}
+    if {$PI($P,hasYield)} { return {} }
+    set re {}
+    foreach pc $PI($P,reach) { if {[reenters $P $pc]} { dict set re $pc 1 } }
+    if {![dict size $re]} { return {} }
+    foreach pc $PI($P,reach) { set in($pc) 0 }
+    set work $PI($P,reach)
+    while {[llength $work]} {
+        set pc [lindex $work end]; set work [lrange $work 0 end-1]
+        set out [expr {$in($pc) || [dict exists $re $pc]}]
+        if {!$out} { set outs 0 } else { set outs 1 }
+        set succs $PI($P,succ,$pc)
+        if {[dict exists $re $pc]} {
+            # (a script can end with an error or a break or continue: the targets of the ranges around it)
+            foreach mode {1 3 4} {
+                set r [findRange $PI($P,ranges) $pc $mode]
+                if {$r eq ""} continue
+                if {[dict get $r type] eq "catch"} { lappend succs [dict get $r catch] } else { set t [dict get $r [expr {$mode == 3 ? "break" : "continue"}]]; if {$t != -1} { lappend succs $t } }
+            }
+        }
+        if {!$outs} continue
+        foreach s $succs {
+            if {[info exists in($s)] && !$in($s)} { set in($s) 1; lappend work $s }
+        }
+    }
+    set r {}
+    foreach pc $PI($P,reach) { if {[lindex $PI($P,ins,$pc) 0] eq "startCommand" && $in($pc)} { lappend r $pc } }
+    set PI($P,chk) $r
+    return $r
 }
 
 # ---------------------------------------------------------------- fixpoint for one variant
@@ -3450,7 +3539,17 @@ proc genG {key pc d} {
     lassign $PI($P,ins,$pc) op a
     set X [list @E@ [errLabel $P $pc $d] @X@ [xLabel $P $pc $d] @PC@ $pc @D@ $d @s1@ s[expr {$d-1}] @s2@ s[expr {$d-2}] @s3@ s[expr {$d-3}] @sn@ s$d @sn1@ s[expr {$d+1}] @sn2@ s[expr {$d+2}] @P@ [cident $P]]
     switch -- $op {
-        nop - startCommand - beginCatch4 { return "" }
+        nop - beginCatch4 { return "" }
+        startCommand {
+            if {$pc ni [epochChk $P]} { return "" }
+            # a command was replaced since the proc was entered: this command is evaluated from its source, as the interpreter does, and the result stands for it
+            lassign $PI($P,src,$pc) so sl
+            set text [string range $PI($P,infoBody) $so [expr {$so + $sl - 1}]]
+            set tgt [operand [lindex $a 0]]
+            # (a command that ends the code - a `return` - never completes: its result is a return code)
+            set jmp [expr {$tgt in $PI($P,reach) ? "goto G$tgt;" : "rcg_ = TCL_ERROR; Tcl_SetObjResult(interp, Tcl_NewStringObj(\"tbc: internal error: no instruction after a command evaluated from its source\", -1)); goto @X@;"}]
+            return [string map [concat $X [list @TXT@ [cstring $text] @LEN@ [cbytes $text] @JMP@ [string map $X $jmp]]] {if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_))) { Tcl_Obj *sc_ = Tcl_NewStringObj(@TXT@, @LEN@); Tcl_IncrRefCount(sc_); tbc_setpc(interp, @PC@); { NRE_callback *root_ = TOP_CB(interp); ByteCode *bc_ = TclCompileObj(interp, sc_, NULL, 0); rcg_ = TclNRRunCallbacks(interp, TclNRExecuteByteCode(interp, bc_), root_); } Tcl_DecrRefCount(sc_); ((Interp *) interp)->flags |= ERR_ALREADY_LOGGED; if (rcg_ != TCL_OK) goto @X@; @sn@ = tbc_takeres(interp); @JMP@ }}]
+        }
         endCatch { return "Tcl_ResetResult(interp); rcg_ = TCL_OK;" }
         tryCvtToNumeric { return [string map $X {if (tbc_trycvt(interp, &@s1@)) goto @E@;}] }
         push1 - push4 { return [string map [concat $X [list @N@ [operand [lindex $a 0]]]] {@sn@ = L_@P@_@N@; Tcl_IncrRefCount(@sn@);}] }
@@ -3992,11 +4091,13 @@ proc osrAttempt {P pc d} {
     elseif {$wk ne ""} { set fin [osrFin $P $wk $pc $d]; set cond "osr_ && tbc_wp_$cid" } \
     else { set fin [osrFin $P $gk $pc $d]; set cond [expr {$PI($P,wadapt) ? "osr_ && !tbc_wp_$cid" : "osr_"}] }
     set cond "noosr_ != -1 && noosr_ != [expr {$pc + 1}] && $cond"
-    return "    if ($cond) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d; $fin goto gexit; \}\n"
+    # (typed code would only hand over again at once if a command was replaced since the proc was entered)
+    if {[llength [epochChk $P]]} { set cond "$cond && !(TBC_EPCHG(interp, ep_, nse_)[genChk $P])" }
+    return "    if ($cond) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d;[epSave $P] $fin goto gexit; \}\n"
 }
 
 proc emitG {P} {
-    global PI
+    global PI initName
     set cid [cident $P]
     set maxd2 [expr {$PI($P,maxd) + 1}]
     set fn ""
@@ -4005,6 +4106,7 @@ proc emitG {P} {
     append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
     set osrPts [osrPointsOf $P]
     if {[llength $osrPts]} { append fn "    int osr_ = 1, noosr_ = tbc_noosr; tbc_noosr = 0;\n" }
+    if {[llength [epochChk $P]]} { append fn "    int ep_, nse_, gen_;\n    if (entryPc == 0) \{ ep_ = TBC_EPNOW(interp); nse_ = TBC_NSNOW(interp); gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}]; \} else \{ ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; \}\n" }
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
     foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
     for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    Tcl_Obj *ex${it}_ = NULL;\n" }
@@ -4047,7 +4149,7 @@ proc emitG {P} {
         set swStart [string length $fn]
         append fn "    switch (rcg_) \{\n"
         foreach {code mode} {TCL_BREAK 3 TCL_CONTINUE 4} {
-            if {![tbcCanBC $op $a]} continue
+            if {![tbcCanBC $op $a] && $op ne "startCommand"} continue
             set r [findRange $PI($P,ranges) $pc $mode]
             if {[info exists PI($P,drop,$pc,$mode)] && $r ne "" && [dict get $r type] ne "catch"} { set r "" }
             append fn "    case $code: "
@@ -4196,7 +4298,7 @@ proc resumePrologue {key} {
 }
 
 proc emitVariant {key recursive {resume 0}} {
-    global VK PI FM FRM typedMode
+    global VK PI FM FRM typedMode initName
     lassign [keysplit $key] P sig
     set ::curWpol [wpolK $key]
     set cid [cident $P]
@@ -4217,6 +4319,7 @@ proc emitVariant {key recursive {resume 0}} {
         set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
     }
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
+    if {[llength [epochChk $P]]} { global initName; append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0, gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}];\n" }
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
         switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } Z { append fn " tbc_sbuf zv$v = {NULL, 0, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
@@ -4233,7 +4336,7 @@ proc emitVariant {key recursive {resume 0}} {
     set osrHere [expr {!$resume && (([dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key) || ([dict exists $::OSRKEYW $P] && [dict get $::OSRKEYW $P] eq $key))}]
     if {$osrHere} {
         append fn "    int resumed_ = 0, rpc = 0, rn = 0; Tcl_Obj **rstk = NULL; (void) rstk; (void) rn;\n"
-        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0; goto RESUME; \}\n"
+        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0;[expr {[llength [epochChk $P]] ? " ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb;" : ""}] goto RESUME; \}\n"
     }
     # arguments into locals
     for {set v 0} {$v < $PI($P,nargs) && !$resume} {incr v} {
@@ -4498,6 +4601,9 @@ proc vproto {key} {
 }
 proc gproto {P} { return "int G_[cident $P](Tcl_Interp *, int, Tcl_Obj **, int);\n" }
 foreach key $variants { append out "static [vproto $key]" }
+set modGuard 0
+foreach P $translatable { if {[llength [gdeps $P]]} { set modGuard 1; break } }
+if {$modGuard} { append out "static int tbc_gen_${initName}(void);\n" }
 dict for {P gk} $REKEY { append out "static [rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
 foreach P $translatable { append out "static [gproto $P]" }
 append out "\n"
@@ -4587,6 +4693,7 @@ if {[llength $gall]} {
     append out "static const char *const tbc_gs_${initName}\[\] = { [join [lmap n $gnss {cstring $n}] {, }] };\n"
     append out "static const TbcGDep tbc_gd_${initName}\[\] = { [join [lmap d $gall {format "{%d, %d}" [lsearch -exact $gnames [lindex $d 0]] [lsearch -exact $gnss [lindex $d 1]]}] {, }] };\n"
     append out "static TbcGuard tbc_guard_${initName} = { tbc_gn_${initName}, [llength $gnames], tbc_gs_${initName}, [llength $gnss], tbc_gd_${initName}, [llength $gall] };\n"
+    append out "static int tbc_gen_${initName}(void) \{ const TbcGuard *g = &tbc_guard_${initName}; int k, s = 0; for (k = 0; k < g->nnss; k++) if (g->nsp\[k\]) s += g->nsp\[k\]->cmdRefEpoch + g->nsp\[k\]->resolverEpoch; for (k = 0; k < g->nnames; k++) if (g->exp\[k\]) s += g->exp\[k\]->cmdEpoch + ((g->exp\[k\]->flags \& CMD_IS_DELETED) ? 1 : 0); return s; \}\n"
 }
 foreach P $translatable {
     set cid [cident $P]
@@ -4645,6 +4752,7 @@ if {$splitN > 0} {
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append hdr "extern Tcl_Obj *L_${cid}_$i;\n" }
     }
     append hdr $dcExtern
+    if {$modGuard} { append hdr "int tbc_gen_${initName}(void);\n" }
     foreach key $variants { append hdr [vproto $key] }
     foreach P $translatable { append hdr [gproto $P] }
     dict for {P gk} $REKEY { append hdr "[rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
@@ -4686,7 +4794,7 @@ if {$splitN > 0} {
         if {$PI($P,wadapt)} { append init "int tbc_wp_$cid = 0;\n" }
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append init "Tcl_Obj *L_${cid}_$i;\n" }
     }
-    append init $dcDef "\n" [string range $out $outAfterG end]
+    append init $dcDef "\n" [string map [list "\nstatic int tbc_gen_" "\nint tbc_gen_"] [string range $out $outAfterG end]]
     set f [open $outFile w]; puts -nonewline $f $init; close $f
     puts "tcl-aot: split into [llength $files] code files + $base.h + $outFile"
 } else {

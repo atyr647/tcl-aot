@@ -290,6 +290,10 @@ foreach s {{} a abc "\u00e9t" "x\u20ac"} { foreach i {0 1 2 -1 99 end end-1} { l
 foreach i {0 4 5 -1 end end-1 end-9 foo 1.5 {} 99999999999 -99999999999} { lappend calls [list zb_idxerr $i] }
 foreach x {0 1 2.5 -3 1e3 abc "\u00e9" 12345678901234567890} { lappend calls [list zb_double $x] }
 lappend calls {zb_cond 0} {zb_cond 1}
+# commands replaced while a proc runs; reflected channels, traces and uplevel looking at the variables of the proc
+foreach n {0 1 2 3 5} { lappend calls [list cr_string $n] [list cr_join $n] [list cr_first $n] [list cr_typed $n] }
+foreach m {none eof} { lappend calls [list cr_reflect $m] }
+lappend calls {cr_shadow} {cr_refl_vars} {cr_vtrace} {cr_ctrace} {cr_modify}
 # list literals made by the compiler
 foreach x [list {} a {a b c} {1 2 3 4 5 6 7 8 9 10} "x\ty" {\{} {a {b c} d} " lead" "trail "] { lappend calls [list ll_eval $x] [list ll_evalq $x] [list ll_cat $x] [list ll_cat2 $x] [list ll_eval2 $x] [list ll_commentlist $x] [list ll_evalbad $x] }
 lappend calls {ll_eval3} {ll_listlit} {ll_eval2} {ll_eval2 1 2 3}
