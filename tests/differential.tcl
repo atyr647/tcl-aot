@@ -281,6 +281,8 @@ lappend calls {ob_err} {ob_err 1 2 3 4 5} {ob_err 1 2}
 foreach n {0 1 5 40} { lappend calls [list sx_idx $n] [list sx_range $n] }
 foreach s {{} a abc "\u00e9t\u00e9" "\u20ac\u20ac" "\U0001F600x" "a b"} { lappend calls [list sx_scan $s] }
 lappend calls {sx_uni} {sx_neg}
+lappend calls {se_forms}
+foreach s {{} e abcdeabcde "\u00e9e\u00e9" "\u20ace" "e\U0001F600"} { lappend calls [list se_chars $s [string length $s]] [list se_chars $s [expr {[string length $s] + 2}]] }
 # list literals made by the compiler
 foreach x [list {} a {a b c} {1 2 3 4 5 6 7 8 9 10} "x\ty" {\{} {a {b c} d} " lead" "trail "] { lappend calls [list ll_eval $x] [list ll_evalq $x] [list ll_cat $x] [list ll_cat2 $x] [list ll_eval2 $x] [list ll_commentlist $x] [list ll_evalbad $x] }
 lappend calls {ll_eval3} {ll_listlit} {ll_eval2} {ll_eval2 1 2 3}

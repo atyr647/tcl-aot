@@ -1906,3 +1906,13 @@ proc rv_bad {p} { return [regexp $p abc x] }
 proc rv_wrong {} { return [regexp {a}] }
 proc rv_dyn {p s} { set k none; set r [regexp $p $s k]; return [list $r $k] }
 proc rv_use {s} { set t 0; foreach w [split $s ,] { if {[regexp {^(\d+)$} $w -> d]} { incr t $d } }; return $t }
+
+# string equality of two values whatever their internal forms (text compared directly when both have it)
+proc se_forms {} {
+    set bin [binary format c 0xe9]; set u "é"; set r {}
+    set vals [list 5 5.0 0x5 " 5" "" a abc $bin $u "€" "a\u0000b" [string repeat x 3] [format %s xxx] [expr {2+3}] [list a b] {a b} [string index abc 1] b]
+    foreach a $vals { foreach b $vals { lappend r [expr {$a eq $b}] [expr {$a ne $b}] } }
+    set s ""; append s é; lappend r [expr {$s eq $u}] [expr {$s eq $bin}] [expr {[string length $s] == 1}]
+    return $r
+}
+proc se_chars {s n} { set c 0; for {set i 0} {$i < $n} {incr i} { if {[string index $s $i] eq "e"} { incr c }; if {[string index $s $i] ne "e"} { incr c 10 } }; return $c }

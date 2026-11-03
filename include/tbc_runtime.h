@@ -42,6 +42,9 @@ TBC_SHARED const Tcl_ObjType *tbcInt, *tbcWide, *tbcDouble, *tbcString, *tbcList
 TBC_SHARED Tcl_Obj *tbcZero, *tbcOne, *tbcEmpty;
 enum { TBC_ADD, TBC_SUB, TBC_MULT, TBC_DIV, TBC_MOD, TBC_LT, TBC_LE, TBC_GT, TBC_GE, TBC_EQ, TBC_NEQ, TBC_BAND, TBC_BOR, TBC_BXOR, TBC_SHL, TBC_SHR, TBC_POW, TBC_NEG, TBC_POS, TBC_BNOT, TBC_LNOT, TBC_NOPS };
 TBC_SHARED Tcl_Obj *tbcMathop[TBC_NOPS];
+/* The character count a string object already holds (tclStringObj.c keeps it as the first member of its internal String record); read directly where a
+ * check at start-up shows the record has that shape, and asked of Tcl otherwise */
+TBC_SHARED int tbcNumCharsOk;
 
 static void tbc_rt_init(void) {
     static int done;
@@ -61,6 +64,12 @@ static void tbc_rt_init(void) {
     tbcZero = Tcl_NewIntObj(0); Tcl_IncrRefCount(tbcZero);
     tbcOne = Tcl_NewIntObj(1); Tcl_IncrRefCount(tbcOne);
     tbcEmpty = Tcl_NewObj(); Tcl_IncrRefCount(tbcEmpty);
+    {
+        Tcl_Obj *t = Tcl_NewStringObj("abc\xc3\xa9", -1);
+        Tcl_IncrRefCount(t);
+        tbcNumCharsOk = Tcl_GetCharLength(t) == 4 && t->typePtr == tbcString && t->internalRep.twoPtrValue.ptr1 && *(int *) t->internalRep.twoPtrValue.ptr1 == 4;
+        Tcl_DecrRefCount(t);
+    }
     for (i = 0; i < TBC_NOPS; i++) { tbcMathop[i] = Tcl_NewStringObj(names[i], -1); Tcl_IncrRefCount(tbcMathop[i]); }
 }
 
@@ -562,6 +571,14 @@ slow:
     }
 }
 
+/* string equality of two values (eq / ne): the text of both, when both have it, is compared directly (the same comparison Tcl makes for two values that
+ * are not both byte arrays or both Unicode strings); anything else is left to TclStringCmp */
+TBC_INLINE int tbc_streq(Tcl_Obj *a, Tcl_Obj *b) {
+    if (a == b) return 1;
+    if (a->bytes && b->bytes) return a->length == b->length && memcmp(a->bytes, b->bytes, (size_t) a->length) == 0;
+    return TclStringCmp(a, b, 1, 0, -1) == 0;
+}
+
 /* append: *pv is the variable's object (NULL if unset), v the value on top of the stack.  Returns 0 or nonzero on error. */
 TBC_INLINE int tbc_append(Tcl_Obj **pv, Tcl_Obj *v) {
     Tcl_Obj *o = *pv;
@@ -726,6 +743,13 @@ TBC_INLINE Tcl_Obj *tbc_ref(Tcl_Obj *o) { Tcl_IncrRefCount(o); return o; }
  * byte count, which is O(1) once Tcl has counted them (the command does the same count).  Each function returns 0, having done nothing, for anything else; the caller
  * then makes the call.  The semantics are those of StringFirstCmd, StringLastCmd, StringIndexCmd and StringRangeCmd (tclCmdMZ.c): the needle must not be empty and
  * not longer than the haystack; an index outside the string gives the empty string; first is raised to 0 and last lowered to the end for a range. */
+TBC_INLINE int tbc_numchars(Tcl_Obj *o) {
+    if (tbcNumCharsOk && o->typePtr == tbcString) {
+        int n = *(int *) o->internalRep.twoPtrValue.ptr1;
+        if (n >= 0) return n;
+    }
+    return Tcl_GetCharLength(o);
+}
 TBC_INLINE const char *tbc_ascii(Tcl_Obj *o, int *len) {
     const char *s;
     if (o->typePtr && o->typePtr != tbcString) return NULL;
@@ -733,7 +757,7 @@ TBC_INLINE const char *tbc_ascii(Tcl_Obj *o, int *len) {
      * it is the whole string again, at every call, where the command's own work is O(1)) */
     if (!o->bytes && o->typePtr) return NULL;
     s = Tcl_GetStringFromObj(o, len);
-    return Tcl_GetCharLength(o) == *len ? s : NULL;
+    return tbc_numchars(o) == *len ? s : NULL;
 }
 static int tbc_s_first(Tcl_Obj *needle, Tcl_Obj *hay, int64_t *out) {
     int nl, hl;

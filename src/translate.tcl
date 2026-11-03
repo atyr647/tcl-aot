@@ -2125,7 +2125,7 @@ proc stepStrCmp {key pc in d op} {
         return [R fall [list {*}$below I] "\{ int m_; $code m_ = TclStringCmp(s$pa, s$pb, 0, 0, -1); Tcl_DecrRefCount(s$pa); Tcl_DecrRefCount(s$pb); si$pa = m_ < 0 ? -1 : m_ > 0 ? 1 : 0; \}"]
     }
     set inv [expr {$op eq "strneq" ? "!" : ""}]
-    return [R fall [list {*}$below I] "\{ int m_; $code m_ = ${inv}(TclStringCmp(s$pa, s$pb, 1, 0, -1) == 0); Tcl_DecrRefCount(s$pa); Tcl_DecrRefCount(s$pb); si$pa = m_; \}"]
+    return [R fall [list {*}$below I] "\{ int m_; $code m_ = ${inv}tbc_streq(s$pa, s$pb); Tcl_DecrRefCount(s$pa); Tcl_DecrRefCount(s$pb); si$pa = m_; \}"]
 }
 
 # string map from to string, and the concatenation of two lists (the executor's INST_LIST_CONCAT)
@@ -3505,7 +3505,7 @@ proc genG {key pc d} {
         over { return "s$d = s[expr {$d - 1 - [operand [lindex $a 0]]}]; Tcl_IncrRefCount(s$d);" }
         streq - strneq {
             set inv [expr {$op eq "strneq" ? "!" : ""}]
-            return [string map [concat $X [list @INV@ $inv]] {{ Tcl_Obj *r_ = @INV@(TclStringCmp(@s2@, @s1@, 1, 0, -1) == 0) ? tbcOne : tbcZero; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
+            return [string map [concat $X [list @INV@ $inv]] {{ Tcl_Obj *r_ = @INV@tbc_streq(@s2@, @s1@) ? tbcOne : tbcZero; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
         }
         strcmp {
             return [string map $X {{ int m_ = TclStringCmp(@s2@, @s1@, 0, 0, -1); Tcl_Obj *r_ = tbc_newint(m_ < 0 ? -1 : m_ > 0 ? 1 : 0); Tcl_DecrRefCount(@s1@); Tcl_DecrRefCount(@s2@); @s2@ = r_; }}]
