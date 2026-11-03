@@ -1326,6 +1326,13 @@ proc R {flow out code args} { dict create flow $flow out $out code $code stores 
 # stub (code for the post-call stub of a direct call).  Typed code never changes any state before it knows it will not fall
 # back: the instructions that can fall back test first, then act.
 proc stepT {key pc in} {
+    set r [stepT0 $key $pc $in]
+    # (an instruction that can run a script: what follows is checked for a command it replaced, at the next startCommand)
+    lassign [keysplit $key] P sig
+    if {[dict get $r flow] eq "fall" && [llength [epochChk $P]] && [reenters $P $pc]} { dict set r code "dirty_ = 1; [dict get $r code]" }
+    return $r
+}
+proc stepT0 {key pc in} {
     global PI VK procNames translatable typedMode
     set ::stepPC $pc
     lassign [keysplit $key] P sig
@@ -1343,7 +1350,7 @@ proc stepT {key pc in} {
     switch -- $op {
         nop { return [R fall $in ""] }
         startCommand {
-            if {$pc in [epochChk $P]} { return [R fall $in "if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_)[genChk $P])) goto D$pc;"] }
+            if {$pc in [epochChk $P]} { return [R fall $in "if (TBC_UNLIKELY(dirty_)) { dirty_ = 0; if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_)[genChk $P])) goto D$pc; }"] }
             return [R fall $in ""]
         }
         beginCatch4 { return [R fall $in ""] }
@@ -3192,12 +3199,14 @@ set tbcInlineOps {nop startCommand push1 push4 pop dup over reverse add sub mult
     expandDrop lmap_collect}
 set tbcVarOps {loadScalar1 loadScalar4 storeScalar1 storeScalar4 incrScalar1 incrScalar1Imm appendScalar1 appendScalar4 lappendScalar1 lappendScalar4 existScalar loadArray1
     loadArray4 storeArray1 storeArray4 incrArray1 incrArray1Imm appendArray1 appendArray4 lappendArray1 lappendArray4 existArray foreach_start foreach_step foreach_end}
-proc reenters {P pc} {
+proc reenters {P pc {vars 0}} {
     global PI pureProcs
     lassign $PI($P,ins,$pc) op a
     if {$op in $::tbcInlineOps} { return 0 }
     if {$op in $::tbcVarOps} {
-        # (a variable of the frame can have a trace, or be linked to one that has; a local of its own cannot, before something has run a script)
+        # (a variable of the frame can have a trace, or be linked to one that has; a local of its own cannot, before something has run a script.  Typed code does not run the
+        # trace: its helpers hand over to the boxed code for a variable that has one, so for typed code a variable access cannot run a script (vars = 0); the boxed code can)
+        if {!$vars} { return 0 }
         if {$op in {foreach_start foreach_step foreach_end}} { set vs [lsort -integer -unique [concat {*}[lindex $a 3]]] } else { set vs [list [operand [lindex $a 0]]] }
         foreach v $vs { if {$v in $PI($P,fvars)} { return 1 } }
         return 0
@@ -3219,15 +3228,19 @@ proc reenters {P pc} {
 proc genUse {P} { return [expr {[llength [gdeps $P]] > 0}] }
 proc genChk {P} { global initName; return [expr {[genUse $P] ? " || tbc_gen_${initName}() != gen_" : ""}] }
 # the baselines of an activation: taken when typed code is entered, and handed from typed code to boxed code and back at a hand-over
-proc epSave {P} { return [expr {[llength [epochChk $P]] ? " tbc_epb = ep_; tbc_nseb = nse_; tbc_genb = gen_;" : ""}] }
+proc epSave {P} { return [expr {[hasEp $P] ? " tbc_epb = ep_; tbc_nseb = nse_; tbc_genb = gen_;" : ""}] }
 # the startCommand instructions of P that follow, on some path, an instruction that can have run a script: where the epochs are compared
-proc epochChk {P} {
+proc epochChk {P} { return [epochChkX $P 0] }
+proc epochChkG {P} { return [epochChkX $P 1] }
+proc hasEp {P} { return [expr {[llength [epochChkG $P]] > 0}] }
+proc epochChkX {P vars} {
     global PI
-    if {[info exists PI($P,chk)]} { return $PI($P,chk) }
-    set PI($P,chk) {}
+    if {[info exists PI($P,chk$vars)]} { return $PI($P,chk$vars) }
+    set PI($P,chk$vars) {}
     if {$PI($P,hasYield)} { return {} }
     set re {}
-    foreach pc $PI($P,reach) { if {[reenters $P $pc]} { dict set re $pc 1 } }
+    foreach pc $PI($P,reach) { if {[reenters $P $pc $vars]} { dict set re $pc 1 } }
+    if {[info exists ::env(TBC_DBGEPOCH)]} { puts stderr "EPOCH $P reenters: [lmap pc [dict keys $re] {string cat $pc:[lindex $PI($P,ins,$pc) 0]}]" }
     if {![dict size $re]} { return {} }
     foreach pc $PI($P,reach) { set in($pc) 0 }
     set work $PI($P,reach)
@@ -3251,7 +3264,7 @@ proc epochChk {P} {
     }
     set r {}
     foreach pc $PI($P,reach) { if {[lindex $PI($P,ins,$pc) 0] eq "startCommand" && $in($pc)} { lappend r $pc } }
-    set PI($P,chk) $r
+    set PI($P,chk$vars) $r
     return $r
 }
 
@@ -3541,7 +3554,7 @@ proc genG {key pc d} {
     switch -- $op {
         nop - beginCatch4 { return "" }
         startCommand {
-            if {$pc ni [epochChk $P]} { return "" }
+            if {$pc ni [epochChkG $P]} { return "" }
             # a command was replaced since the proc was entered: this command is evaluated from its source, as the interpreter does, and the result stands for it
             lassign $PI($P,src,$pc) so sl
             set text [string range $PI($P,infoBody) $so [expr {$so + $sl - 1}]]
@@ -4092,7 +4105,7 @@ proc osrAttempt {P pc d} {
     else { set fin [osrFin $P $gk $pc $d]; set cond [expr {$PI($P,wadapt) ? "osr_ && !tbc_wp_$cid" : "osr_"}] }
     set cond "noosr_ != -1 && noosr_ != [expr {$pc + 1}] && $cond"
     # (typed code would only hand over again at once if a command was replaced since the proc was entered)
-    if {[llength [epochChk $P]]} { set cond "$cond && !(TBC_EPCHG(interp, ep_, nse_)[genChk $P])" }
+    if {[hasEp $P]} { set cond "$cond && !(TBC_EPCHG(interp, ep_, nse_)[genChk $P])" }
     return "    if ($cond) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d;[epSave $P] $fin goto gexit; \}\n"
 }
 
@@ -4106,7 +4119,7 @@ proc emitG {P} {
     append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
     set osrPts [osrPointsOf $P]
     if {[llength $osrPts]} { append fn "    int osr_ = 1, noosr_ = tbc_noosr; tbc_noosr = 0;\n" }
-    if {[llength [epochChk $P]]} { append fn "    int ep_, nse_, gen_;\n    if (entryPc == 0) \{ ep_ = TBC_EPNOW(interp); nse_ = TBC_NSNOW(interp); gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}]; \} else \{ ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; \}\n" }
+    if {[hasEp $P]} { append fn "    int ep_, nse_, gen_;\n    if (entryPc == 0) \{ ep_ = TBC_EPNOW(interp); nse_ = TBC_NSNOW(interp); gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}]; \} else \{ ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; \}\n" }
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
     foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
     for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    Tcl_Obj *ex${it}_ = NULL;\n" }
@@ -4324,7 +4337,7 @@ proc emitVariant {key recursive {resume 0}} {
         set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
     }
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
-    if {[llength [epochChk $P]]} { global initName; append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0, gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}];\n" }
+    if {[hasEp $P]} { global initName; append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0, gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}];\n"; if {[llength [epochChk $P]]} { append fn "    int dirty_ = 0; (void) dirty_;\n" } }
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
         switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } Z { append fn " tbc_sbuf zv$v = {NULL, 0, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
@@ -4341,7 +4354,7 @@ proc emitVariant {key recursive {resume 0}} {
     set osrHere [expr {!$resume && (([dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key) || ([dict exists $::OSRKEYW $P] && [dict get $::OSRKEYW $P] eq $key))}]
     if {$osrHere} {
         append fn "    int resumed_ = 0, rpc = 0, rn = 0; Tcl_Obj **rstk = NULL; (void) rstk; (void) rn;\n"
-        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0;[expr {[llength [epochChk $P]] ? " ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb;" : ""}] goto RESUME; \}\n"
+        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0;[expr {[hasEp $P] ? " ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb;" : ""}][expr {[llength [epochChk $P]] ? " dirty_ = 1;" : ""}] goto RESUME; \}\n"
     }
     # arguments into locals
     for {set v 0} {$v < $PI($P,nargs) && !$resume} {incr v} {
