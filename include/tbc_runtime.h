@@ -756,7 +756,7 @@ TBC_INLINE const char *tbc_ascii(Tcl_Obj *o, int *len) {
     /* (a string that has its Unicode form and not its text - one that was appended to - is left to the command, which works on the Unicode form: making the text of
      * it is the whole string again, at every call, where the command's own work is O(1)) */
     if (!o->bytes && o->typePtr) return NULL;
-    s = Tcl_GetStringFromObj(o, len);
+    if (o->bytes) { s = o->bytes; *len = o->length; } else s = Tcl_GetStringFromObj(o, len);
     return tbc_numchars(o) == *len ? s : NULL;
 }
 static int tbc_s_first(Tcl_Obj *needle, Tcl_Obj *hay, int64_t *out) {
@@ -828,7 +828,7 @@ static int tbc_s_index(Tcl_Obj *s, int64_t i, Tcl_Obj **out) {
     const char *str;
     if (!s->bytes && s->typePtr == tbcString) {
         /* the Unicode form only (as the interpreter's own instruction takes it): one character, no text made of the whole string */
-        int n = Tcl_GetCharLength(s);
+        int n = tbc_numchars(s);
         Tcl_UniChar ch;
         if (i < 0 || i >= n) { *out = tbcEmpty; Tcl_IncrRefCount(tbcEmpty); return 1; }
         ch = Tcl_GetUniChar(s, (int) i);
