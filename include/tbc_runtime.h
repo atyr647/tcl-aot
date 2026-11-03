@@ -575,7 +575,10 @@ slow:
  * are not both byte arrays or both Unicode strings); anything else is left to TclStringCmp */
 TBC_INLINE int tbc_streq(Tcl_Obj *a, Tcl_Obj *b) {
     if (a == b) return 1;
-    if (a->bytes && b->bytes) return a->length == b->length && memcmp(a->bytes, b->bytes, (size_t) a->length) == 0;
+    if (a->bytes && b->bytes) {
+        if (a->length != b->length) return 0;
+        return a->length == 1 ? a->bytes[0] == b->bytes[0] : memcmp(a->bytes, b->bytes, (size_t) a->length) == 0;
+    }
     return TclStringCmp(a, b, 1, 0, -1) == 0;
 }
 
@@ -849,6 +852,85 @@ static int tbc_s_index(Tcl_Obj *s, int64_t i, Tcl_Obj **out) {
     }
     return 1;
 }
+/* String builder: a string local that is built by `append` and read by `string index` and `string length` (and, outside loops, as a whole) is kept as a byte buffer of
+ * ASCII characters (1..127: a NUL is two bytes in a Tcl string, anything above 127 more than one character per byte, so neither is held).  A value that is not ASCII is
+ * not appended (the append returns 0 and the caller hands over to the boxed code, which has the buffer made a string object first: tbc_sb_obj). */
+TBC_INLINE int tbc_fmt_i64(char *buf, int64_t w);
+typedef struct { char *p; int n, cap; } tbc_sbuf;
+#define TBC_SB_MAX (1 << 30)
+static int tbc_sb_grow(tbc_sbuf *b, size_t need) {
+    size_t want = (size_t) b->n + need, nc = b->cap ? (size_t) b->cap * 2 : 64;
+    char *np;
+    if (want > TBC_SB_MAX) return 0;
+    while (nc < want) nc *= 2;
+    np = (char *) realloc(b->p, nc);
+    if (!np) return 0;
+    b->p = np; b->cap = (int) nc;
+    return 1;
+}
+/* s is ASCII (the caller knows) */
+TBC_INLINE int tbc_sb_append(tbc_sbuf *b, const char *s, int len) {
+    if ((size_t) b->n + (size_t) len > (size_t) b->cap && !tbc_sb_grow(b, (size_t) len)) return 0;
+    memcpy(b->p + b->n, s, (size_t) len);
+    b->n += len;
+    return 1;
+}
+TBC_INLINE int tbc_sb_append_i(tbc_sbuf *b, int64_t w) {
+    if ((size_t) b->n + 24 > (size_t) b->cap && !tbc_sb_grow(b, 24)) return 0;
+    b->n += tbc_fmt_i64(b->p + b->n, w);
+    return 1;
+}
+/* the text of any value that is made of ASCII characters; 0 for anything else, and for running out of memory */
+static int tbc_sb_append_obj(tbc_sbuf *b, Tcl_Obj *o) {
+    int len, i;
+    const char *s;
+    if (o->bytes) { s = o->bytes; len = o->length; } else s = Tcl_GetStringFromObj(o, &len);
+    if (len <= 8 && (size_t) b->n + 8 <= (size_t) b->cap) {
+        /* (short text, room for it: copied as it is checked) */
+        char *d = b->p + b->n;
+        for (i = 0; i < len; i++) { if ((unsigned char) (s[i] - 1) >= 127) return 0; d[i] = s[i]; }
+        b->n += len;
+        return 1;
+    }
+    for (i = 0; i < len; i++) if ((unsigned char) (s[i] - 1) >= 127) return 0;
+    return tbc_sb_append(b, s, len);
+}
+/* (the case of a character at a time is inline) */
+TBC_INLINE int tbc_sb_add_obj(tbc_sbuf *b, Tcl_Obj *o) {
+    if (o->bytes && o->length == 1 && b->n < b->cap && (unsigned char) (o->bytes[0] - 1) < 127) { b->p[b->n++] = o->bytes[0]; return 1; }
+    return tbc_sb_append_obj(b, o);
+}
+/* the string as an object that holds one reference; take != 0 releases the buffer */
+static Tcl_Obj *tbc_sb_obj(tbc_sbuf *b, int take) {
+    Tcl_Obj *o = Tcl_NewStringObj(b->p ? b->p : "", b->n);
+    Tcl_IncrRefCount(o);
+    if (take) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
+    return o;
+}
+/* the shared one-character string for a byte (ASCII), or the empty string for c < 0; carries a reference */
+TBC_INLINE Tcl_Obj *tbc_chr1_obj(int c) {
+    Tcl_Obj *r;
+    if (c < 0) r = tbcEmpty;
+    else {
+        r = tbc_chr1[c];
+        if (!r) { unsigned char ch = (unsigned char) c; r = tbc_chr1[c] = Tcl_NewStringObj((const char *) &ch, 1); Tcl_IncrRefCount(r); }
+    }
+    Tcl_IncrRefCount(r);
+    return r;
+}
+/* string index: the one-character string (shared) at i, or the empty string outside the string */
+static Tcl_Obj *tbc_sb_idx(const tbc_sbuf *b, int64_t i) {
+    Tcl_Obj *r;
+    if (i < 0 || i >= b->n) r = tbcEmpty;
+    else {
+        unsigned char c = (unsigned char) b->p[i];
+        r = tbc_chr1[c];
+        if (!r) { r = tbc_chr1[c] = Tcl_NewStringObj((const char *) &c, 1); Tcl_IncrRefCount(r); }
+    }
+    Tcl_IncrRefCount(r);
+    return r;
+}
+
 /* INST_STR_MATCH as the executor does it (tclExecute.c): the Unicode matcher when either operand is a string object, the byte matcher for a byte array, else the UTF-8
  * matcher.  The command (TclStringMatchObj) takes the Unicode path for a plain string too, which builds Unicode arrays of both operands. */
 static int tbc_s_match(Tcl_Obj *str, Tcl_Obj *pat, int nocase) {

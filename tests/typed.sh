@@ -161,3 +161,18 @@ TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/m.tcl" "$tmp/m.c" Maptest >"$tmp/
 if ! grep -q "tbc_imap_incr_i" "$tmp/m.c"; then echo "typed: FAILED, dict incr of integer keys is not on a native map"; exit 1; fi
 if grep -E '^DEADOP (dictIncrImm|storeScalar|add|incrScalar1) .*tm_count' "$tmp/m.log"; then echo "typed: FAILED, the counting loop hands over"; exit 1; fi
 echo "typed: a dict counted into by integer keys is a native map, without hand-over in the loop: ok"
+
+# a string that is begun empty, built by append and read by string index and string length is a native byte buffer (tbc_sb_*), and the loops do not hand over
+cat > "$tmp/z.tcl" <<'TCL'
+proc tz_build {n} {
+    set s ""
+    for {set i 0} {$i < $n} {incr i} { append s [string index abcdefghij [expr {$i % 10}]] }
+    set c 0
+    for {set i 0} {$i < $n} {incr i} { if {[string index $s $i] eq "e"} { incr c } }
+    return [list $c [string length $s]]
+}
+TCL
+TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/z.tcl" "$tmp/z.c" Strtest >"$tmp/z.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/z.log"; exit 1; }
+if ! grep -q "tbc_sb_add_obj" "$tmp/z.c" || ! grep -q "tbc_sb_idx" "$tmp/z.c"; then echo "typed: FAILED, append and string index do not use a native string buffer"; exit 1; fi
+if grep -E '^DEADOP (appendScalar|strindex|strlen|streq|add|incrScalar1) .*tz_build' "$tmp/z.log"; then echo "typed: FAILED, the string-building loops hand over"; exit 1; fi
+echo "typed: a string built by append and read by string index is a native buffer, without hand-over in the loops: ok"

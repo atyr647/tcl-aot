@@ -283,6 +283,13 @@ foreach s {{} a abc "\u00e9t\u00e9" "\u20ac\u20ac" "\U0001F600x" "a b"} { lappen
 lappend calls {sx_uni} {sx_neg}
 lappend calls {se_forms}
 foreach s {{} e abcdeabcde "\u00e9e\u00e9" "\u20ace" "e\U0001F600"} { lappend calls [list se_chars $s [string length $s]] [list se_chars $s [expr {[string length $s] + 2}]] }
+# string builder (kind Z)
+foreach n {0 1 5 40 1000} { lappend calls [list zb_basic $n] [list zb_uni $n] [list zb_reset $n] [list zb_loopwhole $n] [list zb_idxcalc $n] }
+lappend calls {zb_kinds} {zb_nul} {zb_begin} {zb_snap} {zb_big} {zb_empty} {zb_trace} {zb_unset} {zb_upv} {zb_err}
+foreach s {{} a abc "\u00e9t" "x\u20ac"} { foreach i {0 1 2 -1 99 end end-1} { lappend calls [list zb_index $s $i] } }
+foreach i {0 4 5 -1 end end-1 end-9 foo 1.5 {} 99999999999 -99999999999} { lappend calls [list zb_idxerr $i] }
+foreach x {0 1 2.5 -3 1e3 abc "\u00e9" 12345678901234567890} { lappend calls [list zb_double $x] }
+lappend calls {zb_cond 0} {zb_cond 1}
 # list literals made by the compiler
 foreach x [list {} a {a b c} {1 2 3 4 5 6 7 8 9 10} "x\ty" {\{} {a {b c} d} " lead" "trail "] { lappend calls [list ll_eval $x] [list ll_evalq $x] [list ll_cat $x] [list ll_cat2 $x] [list ll_eval2 $x] [list ll_commentlist $x] [list ll_evalbad $x] }
 lappend calls {ll_eval3} {ll_listlit} {ll_eval2} {ll_eval2 1 2 3}

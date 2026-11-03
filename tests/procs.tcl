@@ -1916,3 +1916,25 @@ proc se_forms {} {
     return $r
 }
 proc se_chars {s n} { set c 0; for {set i 0} {$i < $n} {incr i} { if {[string index $s $i] eq "e"} { incr c }; if {[string index $s $i] ne "e"} { incr c 10 } }; return $c }
+
+# a string built by append and read by string index / string length: kept as a byte buffer (kind Z) while it is ASCII
+proc zb_basic {n} { set s ""; for {set i 0} {$i < $n} {incr i} { append s [string index abcdefghij [expr {$i % 10}]] }; set c 0; for {set i 0} {$i < $n} {incr i} { if {[string index $s $i] eq "e"} { incr c } }; return [list $c [string length $s] $s] }
+proc zb_kinds {} { set s ""; append s 1 2.5 [expr {3 + 4}] [expr {1.5 * 2}] [list a {b c}] x; append s 0x10 1e3 -0; return [list $s [string length $s] [string index $s 3] [string index $s end] [string index $s end-2] [string index $s 99] [string index $s -1]] }
+proc zb_uni {n} { set s ""; for {set i 0} {$i < $n} {incr i} { append s a; if {$i == 3} { append s "é" }; if {$i == 5} { append s "€" } }; return [list $s [string length $s] [string index $s 4] [string index $s 5]] }
+proc zb_nul {} { set s ""; append s a; append s "\u0000"; append s b; return [list [string length $s] [string index $s 1] [string index $s 2] [string length [string range $s 0 1]]] }
+proc zb_reset {n} { set r {}; for {set i 0} {$i < $n} {incr i} { set s ""; append s x$i y; lappend r [string length $s] [string index $s 1] }; return $r }
+proc zb_begin {} { set s "abc"; append s def; return [list $s [string index $s 2] [string length $s]] }
+proc zb_snap {} { set s ""; append s ab; set t $s; append s cd; return [list $t $s [string length $t]] }
+proc zb_loopwhole {n} { set s ""; set r {}; for {set i 0} {$i < $n} {incr i} { append s $i; lappend r $s }; return $r }
+proc zb_index {s i} { set t ""; append t $s; return [list [string index $t $i] [string index $t end-1] [string length $t]] }
+proc zb_idxerr {i} { set t ""; append t hello; return [string index $t $i] }
+proc zb_idxcalc {n} { set s ""; for {set i 0} {$i < $n} {incr i} { append s [format %c [expr {97 + $i}]] }; set r {}; for {set i 0} {$i < $n + 2} {incr i} { lappend r [string index $s [expr {$n - 1 - $i}]] }; return $r }
+proc zb_big {} { set s ""; for {set i 0} {$i < 100000} {incr i} { append s ab }; return [list [string length $s] [string index $s 199999] [string index $s 200000]] }
+proc zb_empty {} { set s ""; return [list [string length $s] [string index $s 0] [string index $s end]] }
+proc zb_double {x} { set s ""; append s $x; append s [expr {$x * 2}]; return [list $s [string length $s]] }
+proc zb_trace {} { set s ""; append s a; set ::zb_log {}; trace add variable s write {apply {{args} { lappend ::zb_log w }}}; append s b; return [list $s $::zb_log [string length $s]] }
+proc zb_unset {} { set s ""; append s a; unset s; return [info exists s] }
+proc zb_cond {c} { set s ""; if {$c} { append s yes } else { append s no }; return [list $s [string length $s] [string index $s 1]] }
+proc zb_upv {} { set s ""; append s a; zb_upv2 s; return $s }
+proc zb_upv2 {name} { upvar 1 $name v; append v Z }
+proc zb_err {} { set s ""; append s a; return [string index $s notanindex] }

@@ -762,6 +762,8 @@ proc prepare {P} {
     set PI($P,reach) $reach
     set PI($P,vecok) [vecEligible $P]
     set PI($P,mapok) [mapEligible $P]
+    set PI($P,zview) {}
+    set PI($P,strok) [strEligible $P]
     # literal classes: canonical integers and doubles can be used as numbers; everything else stays a string
     set cls {}
     foreach s $PI($P,lits) {
@@ -964,6 +966,77 @@ proc mapStoreNotEmpty {P pc} {
     return 1
 }
 
+# A load of a variable that is only read by one `string index` or `string length`, in a straight line from the load: the value on the stack is then a view of the string
+# builder (kind Z), with no object made.  Returns the pc of the reading instruction, "" for any other load.
+proc zViewUser {P pc} {
+    global PI
+    if {[dict exists $PI($P,zview) $pc]} { return [dict get $PI($P,zview) $pc] }
+    set r ""
+    set q $PI($P,depth,$pc)
+    set v [operand [lindex $PI($P,ins,$pc) 1 0]]
+    # (the instructions that may stand between the load and the one that reads it: how many stack slots each works on; a slot below the loaded one is never touched)
+    set cur $PI($P,next,$pc)
+    while {[info exists PI($P,ins,$cur)] && $cur ni $PI($P,targets)} {
+        lassign $PI($P,ins,$cur) op a
+        set dd $PI($P,depth,$cur)
+        if {($op eq "strindex" && $dd - 2 == $q) || ($op eq "strlen" && $dd - 1 == $q)} { set r $cur; break }
+        switch -- $op {
+            nop - startCommand - push1 - push4 - loadScalar1 - loadScalar4 { set n 0 }
+            strlen - uminus - uplus - not - bitnot { set n 1 }
+            strindex - add - sub - mult - div - mod - lt - le - gt - ge - eq - neq - bitand - bitor - bitxor - lshift - rshift - streq - strneq - strcmp { set n 2 }
+            default { break }
+        }
+        if {$dd - $n <= $q} { break }
+        # (the string is read where it is used: nothing in between may change it)
+        if {$v in [lindex [usedef $op $a] 1]} { break }
+        set cur $PI($P,next,$cur)
+    }
+    dict set PI($P,zview) $pc $r
+    return $r
+}
+# The local variables that may be held as a native string builder (decision 49): strings that are begun with a literal (or by the first append), built by `append`, and read
+# by `string index` and `string length`, or as a whole outside loops (the value is then made, once, where it is used).  Anything else that touches the variable keeps it a
+# Tcl value.
+proc strEligible {P} {
+    global PI
+    set cand {}
+    foreach pc $PI($P,reach) {
+        lassign $PI($P,ins,$pc) op a
+        if {$op in {appendScalar1 appendScalar4}} { dict set cand [operand [lindex $a 0]] 1 }
+    }
+    if {![dict size $cand]} { return {} }
+    set cyc [cyclePcs $P]
+    set bad {}
+    foreach pc $PI($P,reach) {
+        lassign $PI($P,ins,$pc) op a
+        lassign [usedef $op $a] uses defs
+        set vs {}
+        foreach v [concat $uses $defs] { if {[dict exists $cand $v]} { lappend vs $v } }
+        if {![llength $vs]} continue
+        switch -- $op {
+            storeScalar1 - storeScalar4 { continue }
+            appendScalar1 - appendScalar4 {
+                # (the result of append is the string: it may only be dropped)
+                set v [operand [lindex $a 0]]
+                set users [slotUsers $P $pc [expr {$PI($P,depth,$pc) - 1}]]
+                if {$users eq ""} { dict set bad $v 1; continue }
+                foreach u $users { lassign $u uop pos upc; if {!($uop eq "pop" && $pos == 0)} { dict set bad $v 1; break } }
+            }
+            loadScalar1 - loadScalar4 {
+                if {[zViewUser $P $pc] ne ""} continue
+                # (a copy of the whole string at every pass of a loop would cost more than the builder saves)
+                if {[dict exists $cyc $pc]} { foreach v $vs { dict set bad $v 1 } }
+            }
+            default { foreach v $vs { dict set bad $v 1 } }
+        }
+    }
+    set r {}
+    foreach v [dict keys $cand] {
+        if {$v >= $PI($P,nargs) && ![dict exists $bad $v] && $v ni $PI($P,fvars) && $v ni $PI($P,rvars) && $v ni $PI($P,vecok) && $v ni $PI($P,mapok)} { lappend r $v }
+    }
+    return [lsort -integer $r]
+}
+
 set refusedProcs {}
 foreach p $procNames {
     set t0 [clock milliseconds]
@@ -1145,6 +1218,13 @@ proc boxe {P p e} {
         K { if {[lt $e] eq "2"} { return "tbc_newpair(ka$p, kj$p)" }; return "tbc_newkey(kb$p, kl$p)" }
         W { return "(sw$p ? tbc_newdbl(sd$p) : tbc_newint(si$p))" }
         N { return "tbc_ivec_list(&sv$p, 1)" }
+        Z {
+            # (as the vector's view: alias in a fall-back stub, where the local has just been made a string; a copy otherwise)
+            switch $::boxMode {
+                alias { return "tbc_ref(l[lt $e])" }
+                default { return "tbc_sb_obj(&zv[lt $e], 0)" }
+            }
+        }
         M {
             switch $::boxMode {
                 alias { return "tbc_ref(l[lt $e])" }
@@ -1175,12 +1255,12 @@ proc boxLocals {key live slots} {
     global VK
     set P [lindex [keysplit $key] 0]
     set vs $live
-    foreach e $slots { if {[kd $e] in {A M}} { lappend vs [lt $e] } }
+    foreach e $slots { if {[kd $e] in {A M Z}} { lappend vs [lt $e] } }
     set c ""
     foreach v [lsort -integer -unique $vs] {
         switch [kap $key $v] {
             W { append c " l$v = (wt$v ? tbc_newdbl(d$v) : tbc_newint(i$v));" }
-            I { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newint(i$v);" } D { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newdbl(d$v);" } A { append c " l$v = tbc_ivec_list(&av$v, 1);" } M { append c " l$v = tbc_imap_dict(&mv$v, 1);" }
+            I { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newint(i$v);" } D { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newdbl(d$v);" } A { append c " l$v = tbc_ivec_list(&av$v, 1);" } Z { append c " l$v = tbc_sb_obj(&zv$v, 1);" } M { append c " l$v = tbc_imap_dict(&mv$v, 1);" }
         }
     }
     return $c
@@ -1302,6 +1382,10 @@ proc stepT {key pc in} {
                 - { return [R fall [list {*}$in U] ""] }
                 A { return [R fall [list {*}$in A:$v] ""] }
                 M { return [R fall [list {*}$in M:$v] ""] }
+                Z {
+                    if {[zViewUser $P $pc] ne ""} { return [R fall [list {*}$in Z:$v] ""] }
+                    return [R fall [list {*}$in B] "s$d = tbc_sb_obj(&zv$v, 0);"]
+                }
                 default {
                     return [R fall [list {*}$in B] "if (TBC_UNLIKELY(!l$v)) goto D$pc; s$d = l$v; Tcl_IncrRefCount(s$d);"]
                 }
@@ -1325,6 +1409,16 @@ proc stepT {key pc in} {
             if {$k eq "L" && [lindex $PI($P,lits) [lt $e]] eq "" && $v in $PI($P,mapok) && [kap $key $v] in {M -} && "M:$v" ni [lrange $in 0 [expr {$top-1}]]} {
                 # `set d {}` of a dict that is counted in as a native map (decision 39): an empty map
                 return [R fall [lreplace $in $top $top M:$v] "tbc_imap_free(&mv$v); if (TBC_UNLIKELY(!tbc_imap_init(&mv$v))) goto D$pc;" stores [list [list $v M]]]
+            }
+            if {$v in $PI($P,strok) && [kap $key $v] in {Z -}} {
+                # a string kept in a builder: begun (or begun again) with a literal of ASCII characters; any other value makes the variable an ordinary one
+                set txt [expr {$k in {L I D} && [lt $e] ne "" ? [lindex $PI($P,lits) [lt $e]] : "\x80"}]
+                if {[regexp {^[\x01-\x7f]*$} $txt]} {
+                    set c "zv$v.n = 0;"
+                    if {$txt ne ""} { append c " if (TBC_UNLIKELY(!tbc_sb_append(&zv$v, [cstring $txt], [cbytes $txt]))) goto D$pc;" }
+                    return [R fall $in $c stores [list [list $v Z]]]
+                }
+                return [R dead {} "goto D$pc;" stores [list [list $v B]]]
             }
             if {$k in {A N M Q}} {
                 set kv [kap $key $v]
@@ -1498,6 +1592,8 @@ proc stepT {key pc in} {
         }
         strlen {
             set e [lindex $in $top]
+            if {[kd $e] eq "Z"} { return [R fall [lreplace $in $top $top I] "si$top = zv[lt $e].n;"] }
+            if {[kd $e] in {A N M Q}} { return $dead }
             set pre [boxc $P $top $e]
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
             return [R fall [lreplace $in $top $top I] "$pre si$top = Tcl_GetCharLength(s$top); Tcl_DecrRefCount(s$top);"]
@@ -1507,6 +1603,28 @@ proc stepT {key pc in} {
         appendScalar1 - appendScalar4 {
             set v [operand [lindex $a 0]]
             set e [lindex $in $top]; set k [kd $e]
+            if {$v in $PI($P,strok) && [kap $key $v] in {Z -}} {
+                # appended to the string builder; the result of the append is dropped (strEligible), so the slot only has to exist
+                if {$k eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v Z]]] }
+                set ok "if (TBC_UNLIKELY(!%s)) goto D$pc;"
+                switch $k {
+                    I - L - D {
+                        if {[lt $e] ne ""} {
+                            set txt [lindex $PI($P,lits) [lt $e]]
+                            if {![regexp {^[\x01-\x7f]*$} $txt]} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+                            set c [expr {$txt eq "" ? "" : [format $ok "tbc_sb_append(&zv$v, [cstring $txt], [cbytes $txt])"]}]
+                        } elseif {$k eq "I"} {
+                            set c [format $ok "tbc_sb_append_i(&zv$v, si$top)"]
+                        } elseif {$k eq "D"} {
+                            set c "\{ Tcl_Obj *t_ = tbc_newdbl(sd$top); int ok_ = tbc_sb_append_obj(&zv$v, t_); Tcl_DecrRefCount(t_); if (TBC_UNLIKELY(!ok_)) goto D$pc; \}"
+                        } else { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+                    }
+                    B { set c "[format $ok "tbc_sb_add_obj(&zv$v, s$top)"] Tcl_DecrRefCount(s$top);" }
+                    W { set c "\{ Tcl_Obj *t_ = (sw$top ? tbc_newdbl(sd$top) : tbc_newint(si$top)); int ok_ = tbc_sb_append_obj(&zv$v, t_); Tcl_DecrRefCount(t_); if (TBC_UNLIKELY(!ok_)) goto D$pc; \}" }
+                    default { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+                }
+                return [R fall [lreplace $in $top $top I] "$c si$top = 0;" stores [list [list $v Z]]]
+            }
             if {[kap $key $v] ni {B -}} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
             switch $k {
                 I { if {[lt $e] ne ""} { set c "tbc_append_bytes(&l$v, [cstring [lindex $PI($P,lits) [lt $e]]], [cbytes [lindex $PI($P,lits) [lt $e]]]);" } else { set c "tbc_append_i(&l$v, si$top);" } }
@@ -1691,6 +1809,7 @@ proc stepT {key pc in} {
         dictFirst - dictNext - unsetScalar { return $dead }
         listIn - listNotIn - strindex - strfind - strrfind - strrange - strreplace - strcaseUpper - strcaseLower - strcaseTitle - strtrim - strtrimLeft -
         strtrimRight - strmatch - regexp - strrangeImm - listRangeImm - lindexMulti {
+            if {$op eq "strindex" && [kd [lindex $in [expr {$d - 2}]]] eq "Z"} { return [stepZIndex $key $pc $in $d] }
             if {$op in {strfind strrfind strindex strrange strrangeImm strmatch regexp}} {
                 set r [stepStrFast $key $pc $in $d $op $a]
                 if {$r ne ""} { return $r }
@@ -1923,6 +2042,28 @@ proc stepT {key pc in} {
     }
 }
 
+# string index of a string builder (the view Z:<var>): one character, from the buffer
+proc stepZIndex {key pc in d} {
+    global PI
+    lassign [keysplit $key] P sig
+    set pl [expr {$d - 2}]; set pi [expr {$d - 1}]
+    set el [lindex $in $pl]; set ei [lindex $in $pi]
+    set zv [lt $el]
+    set below [lrange $in 0 [expr {$pl - 1}]]
+    switch [kd $ei] {
+        U { return [R fall [list {*}$below U] ""] }
+        I { return [R fall [list {*}$below B] "if (TBC_UNLIKELY(si$pi != (int32_t) si$pi)) goto D$pc; s$pl = tbc_sb_idx(&zv$zv, si$pi);"] }
+        B { return [R fall [list {*}$below B] "if (TBC_UNLIKELY(!(tbc_isint(s$pi) && tbc_wide(s$pi) == (int32_t) tbc_wide(s$pi)))) goto D$pc; s$pl = tbc_sb_idx(&zv$zv, tbc_wide(s$pi)); Tcl_DecrRefCount(s$pi);"] }
+        L {
+            # (end and end-N, the forms the command takes besides integers)
+            if {[lt $ei] ne "" && [regexp {^end(?:-([0-9]{1,9}))?$} [lindex $PI($P,lits) [lt $ei]] -> kk]} {
+                return [R fall [list {*}$below B] "s$pl = tbc_sb_idx(&zv$zv, (int64_t) zv$zv.n - 1 - [expr {$kk eq "" ? 0 : $kk}]);"]
+            }
+        }
+    }
+    return [R dead {} "goto D$pc;"]
+}
+
 # string first / last / index / range on one-byte characters, in place of the command (tbc_s_first and the others in tbc_runtime.h; they decline for any operand that
 # is not a plain ASCII string, and then the command is called as before).  "" when the operands are of a kind this does not handle.
 proc stepStrFast {key pc in d op a} {
@@ -1947,6 +2088,14 @@ proc stepStrFast {key pc in d op a} {
         set pre ""; set rel ""
         for {set k $q} {$k < $d} {incr k} { append pre [boxc $P $k [lindex $in $k]] " "; append rel " Tcl_DecrRefCount(s$k);" }
         return [R fall [list {*}$below I] "$pre\{ int m_ = tbc_s_match(s[expr {$q+1}], s$q, $nocase);$rel si$q = m_; \}"]
+    }
+    if {$op eq "strindex" && [kd [lindex $in $q]] eq "L" && [lt [lindex $in $q]] ne "" && [kd [lindex $in [expr {$q + 1}]]] eq "I"} {
+        # a literal string of ASCII characters: the character is read from the literal's own text
+        set txt [lindex $PI($P,lits) [lt [lindex $in $q]]]
+        if {$txt ne "" && [regexp {^[\x01-\x7f]*$} $txt]} {
+            set k [expr {$q + 1}]
+            return [R fall [list {*}$below B] "if (TBC_UNLIKELY(si$k != (int32_t) si$k)) goto D$pc; s$q = tbc_chr1_obj(si$k >= 0 && si$k < [cbytes $txt] ? ((const unsigned char *) [cstring $txt])\[si$k\] : -1);"]
+        }
     }
     # integer operands (indices): {ok value} for a number held unboxed or an object that is an integer; "" for anything else
     set ints {}
@@ -2649,7 +2798,7 @@ proc enterG {key gpc slots pre flush} {
     append c [boxLocals $key $flush $slots]
     foreach v $::PI($P,rvars) { append c " tbc_rflush(interp, loc_, $v, &rv$v);" }
     set vs $flush
-    foreach e $slots { if {[kd $e] in {A M}} { lappend vs [lt $e] } }
+    foreach e $slots { if {[kd $e] in {A M Z}} { lappend vs [lt $e] } }
     foreach v [lsort -integer -unique $vs] { append c " if (l$v) tbc_flushr(interp, loc_, $v, l$v);" }
     set ::boxMode alias
     set n [llength $slots]
@@ -3192,9 +3341,9 @@ proc analyze {key} {
         set kap $VK($key,kap)
         set nk $kap
         foreach s $stores { lassign $s v k; dict set nk $v [jk [dict get $nk $v] $k] }
-        foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M W}} { dict set nk $v B } }
-        foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M W}} { dict set nk $v B } }
-        if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M}} { dict set nk $v B } } }
+        foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M W Z}} { dict set nk $v B } }
+        foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M W Z}} { dict set nk $v B } }
+        if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M Z}} { dict set nk $v B } } }
         set ekap $VK($key,ekap)
         set nek $ekap
         foreach s $estores { lassign $s v k; dict set nek $v [jek [dict get $nek $v] $k] }
@@ -4070,7 +4219,7 @@ proc emitVariant {key recursive {resume 0}} {
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
-        switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
+        switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } Z { append fn " tbc_sbuf zv$v = {NULL, 0, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
         if {$v in [flaggedOf $P] && [dict get $kap $v] in {I D}} { append fn " int g$v = 0; (void) g$v;" }
         append fn "\n"
     }
@@ -4199,7 +4348,7 @@ proc emitVariant {key recursive {resume 0}} {
     append fn "    \{ int g_ = G_${cid}(interp, 0, NULL, 0);[expr {$PI($P,hasYield) ? " if (TBC_UNLIKELY(tbc_susp)) { tbc_st = 4; rc = TCL_OK; goto ret; }" : ""}] if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} \}\n"
     }
     append fn "ret:\n"
-    for {set v 0} {$v < $nv} {incr v} { append fn "    if (l$v) Tcl_DecrRefCount(l$v);[expr {[dict get $kap $v] eq "A" ? " free(av$v.p);" : [dict get $kap $v] eq "M" ? " tbc_imap_free(&mv$v);" : [dict get $kap $v] eq "R" ? " tbc_rfree(&rv$v);" : ""}]\n" }
+    for {set v 0} {$v < $nv} {incr v} { append fn "    if (l$v) Tcl_DecrRefCount(l$v);[expr {[dict get $kap $v] eq "A" ? " free(av$v.p);" : [dict get $kap $v] eq "Z" ? " free(zv$v.p);" : [dict get $kap $v] eq "M" ? " tbc_imap_free(&mv$v);" : [dict get $kap $v] eq "R" ? " tbc_rfree(&rv$v);" : ""}]\n" }
     append fn "early:\n    if (rc != TCL_OK) \{ tbc_st = 2; tbc_rc = rc; \}\n    return rv;\n\}\n"
     # scratch vectors and maps of the stack slots are declared only where used (they would cost a zeroed frame on every call otherwise)
     set decls ""
