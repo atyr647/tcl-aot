@@ -1329,7 +1329,7 @@ proc stepT {key pc in} {
     set r [stepT0 $key $pc $in]
     # (an instruction that can run a script: what follows is checked for a command it replaced, at the next startCommand)
     lassign [keysplit $key] P sig
-    if {[dict get $r flow] eq "fall" && [llength [epochChk $P]] && [reenters $P $pc]} { dict set r code "dirty_ = 1; [dict get $r code]" }
+    if {[dict get $r flow] eq "fall" && [llength [epochChk $P]] && [reenters $P $pc]} { global initName; dict set r code "[expr {[genUse $P] ? "if (!gset_) \{ gset_ = 1; gen_ = tbc_gen_${initName}(); \} " : ""}]dirty_ = 1; [dict get $r code]" }
     return $r
 }
 proc stepT0 {key pc in} {
@@ -2824,7 +2824,7 @@ proc enterG {key gpc slots pre flush} {
     for {set p 0} {$p < $n} {incr p} { append c " [boxc $P $p [lindex $slots $p]]" }
     set ::boxMode copy
     set arr {}; for {set p 0} {$p < $n} {incr p} { lappend arr s$p }
-    append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] };[epSave $P] int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
+    append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] };[epSaveT $P] int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
     if {$::PI($P,hasYield)} { append c " if (TBC_UNLIKELY(tbc_susp)) \{ tbc_st = 4; rc = TCL_OK; goto ret; \}" }
     append c " if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} goto ret; \}"
     return $c
@@ -3228,6 +3228,12 @@ proc reenters {P pc {vars 0}} {
 proc genUse {P} { return [expr {[llength [gdeps $P]] > 0}] }
 proc genChk {P} { global initName; return [expr {[genUse $P] ? " || tbc_gen_${initName}() != gen_" : ""}] }
 # the baselines of an activation: taken when typed code is entered, and handed from typed code to boxed code and back at a hand-over
+# typed code takes the generation baseline when the first instruction that can run a script is about to run (nothing can change before it); a hand-over takes it if that has not happened
+proc epSaveT {P} {
+    global initName
+    if {![hasEp $P]} { return "" }
+    return " [expr {[genUse $P] ? "if (!gset_) \{ gset_ = 1; gen_ = tbc_gen_${initName}(); \} " : ""}]tbc_epb = ep_; tbc_nseb = nse_; tbc_genb = gen_;"
+}
 proc epSave {P} { return [expr {[hasEp $P] ? " tbc_epb = ep_; tbc_nseb = nse_; tbc_genb = gen_;" : ""}] }
 # the startCommand instructions of P that follow, on some path, an instruction that can have run a script: where the epochs are compared
 proc epochChk {P} { return [epochChkX $P 0] }
@@ -4119,7 +4125,7 @@ proc emitG {P} {
     append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
     set osrPts [osrPointsOf $P]
     if {[llength $osrPts]} { append fn "    int osr_ = 1, noosr_ = tbc_noosr; tbc_noosr = 0;\n" }
-    if {[hasEp $P]} { append fn "    int ep_, nse_, gen_;\n    if (entryPc == 0) \{ ep_ = TBC_EPNOW(interp); nse_ = TBC_NSNOW(interp); gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}]; \} else \{ ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; \}\n" }
+    if {[hasEp $P]} { append fn "    int ep_, nse_, gen_;\n    if (entryPc == 0) \{ ep_ = TBC_EPNOW(interp); nse_ = TBC_NSNOW(interp); gen_ = [expr {[genUse $P] && [llength [osrPointsOf $P]] ? "tbc_gen_${initName}()" : "0"}]; \} else \{ ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; \}\n" }
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
     foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
     for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    Tcl_Obj *ex${it}_ = NULL;\n" }
@@ -4337,7 +4343,7 @@ proc emitVariant {key recursive {resume 0}} {
         set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
     }
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
-    if {[hasEp $P]} { global initName; append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0, gen_ = [expr {[genUse $P] ? "tbc_gen_${initName}()" : "0"}];\n"; if {[llength [epochChk $P]]} { append fn "    int dirty_ = 0; (void) dirty_;\n" } }
+    if {[hasEp $P]} { global initName; append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0, gen_ = 0, gset_ = 0; (void) gset_; (void) gen_;\n"; if {[llength [epochChk $P]]} { append fn "    int dirty_ = 0; (void) dirty_;\n" } }
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
         switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } Z { append fn " tbc_sbuf zv$v = {NULL, 0, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
@@ -4354,7 +4360,7 @@ proc emitVariant {key recursive {resume 0}} {
     set osrHere [expr {!$resume && (([dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key) || ([dict exists $::OSRKEYW $P] && [dict get $::OSRKEYW $P] eq $key))}]
     if {$osrHere} {
         append fn "    int resumed_ = 0, rpc = 0, rn = 0; Tcl_Obj **rstk = NULL; (void) rstk; (void) rn;\n"
-        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0;[expr {[hasEp $P] ? " ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb;" : ""}][expr {[llength [epochChk $P]] ? " dirty_ = 1;" : ""}] goto RESUME; \}\n"
+        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0;[expr {[hasEp $P] ? " ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; gset_ = 1;" : ""}][expr {[llength [epochChk $P]] ? " dirty_ = 1;" : ""}] goto RESUME; \}\n"
     }
     # arguments into locals
     for {set v 0} {$v < $PI($P,nargs) && !$resume} {incr v} {
