@@ -71,6 +71,11 @@ typedef struct TbcDef {
 } TbcDef;
 
 TBC_SHARED Tcl_HashTable tbc_by_body, tbc_by_name, tbc_recs, tbc_refused_by_key, tbc_defs_by_name, tbc_defs_by_proc;
+/* the lengths of the bodies the module has code for or refused (a bit for each length modulo 65536): a definition whose body has another length is not in the module, which is almost
+ * every definition in a program that loads libraries, and is found out without building the key of the definition (a copy of the whole body) and hashing it three times */
+TBC_SHARED unsigned char tbc_blen_seen[8192];
+#define TBC_BLEN_SET(n) (tbc_blen_seen[((unsigned) (n) & 0xFFFF) >> 3] |= (unsigned char) (1 << ((unsigned) (n) & 7)))
+#define TBC_BLEN_HAS(n) (tbc_blen_seen[((unsigned) (n) & 0xFFFF) >> 3] & (1 << ((unsigned) (n) & 7)))
 TBC_SHARED int tbc_reg_ready;
 
 /* A proc whose compiled body is attached at its first call is armed with entry points of ours in place of the interpreter's (objProc and nreProc of its command,
@@ -1553,6 +1558,7 @@ static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *co
 
 static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
     int isNew;
+    TBC_BLEN_SET(strlen(e->body));
     char *k = tbc_key(e->ns, e->args, e->body);
     Tcl_HashEntry *h;
     Tcl_Obj *cn = Tcl_ObjPrintf("::tbc::e%d", id);
@@ -1726,6 +1732,7 @@ static void tbc_register_refused(const TbcRefused *t, int n) {
     for (i = 0; i < n; i++) {
         char *k = tbc_key(t[i].ns, t[i].args, t[i].body);
         Tcl_HashEntry *h = Tcl_CreateHashEntry(&tbc_refused_by_key, k, &isNew);
+        TBC_BLEN_SET(strlen(t[i].body));
         if (isNew) Tcl_SetHashValue(h, (ClientData) &t[i]);
         ckfree(k);
     }
@@ -1928,6 +1935,16 @@ static void tbc_attach(Tcl_Interp *interp, Proc *p, struct Namespace *nsPtr, con
             Tcl_Obj *g = Tcl_ObjPrintf("::%s", sn + 1);
             tbc_invalidate_name(Tcl_GetString(g));
             Tcl_DecrRefCount(g);
+        }
+    }
+    {
+        int blen;
+        (void) Tcl_GetStringFromObj(p->bodyPtr, &blen);
+        if (!tbc_capture_on && !TBC_BLEN_HAS(blen)) {
+            /* (no body of the module, and none it refused, has this length) */
+            if (Tcl_FindHashEntry(&tbc_by_name, fullName)) tbc_note_def(p, fullName, TBC_DEF_CHANGED, "the module has code for another definition of this name (different body or arguments)");
+            else tbc_note_def(p, fullName, TBC_DEF_NOCODE, "not in the module");
+            return;
         }
     }
     ca = tbc_canon_args(p);
