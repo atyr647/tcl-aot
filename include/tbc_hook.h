@@ -1672,6 +1672,20 @@ static int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
     return 1;
 }
 
+/* one dependency of the guard (a built-in looked up from a namespace), checked alone: typed code calls it where it uses the built-in through its pinned command, after anything
+ * that could have run a script (as the interpreter looks the name up at every call).  A few compares while nothing has changed; otherwise the namespace is looked at again,
+ * and a dependency whose name no longer gives the built-in is withdrawn (for good, as at entry). */
+static int tbc_dep_ok(Tcl_Interp *interp, TbcGuard *g, int di) {
+    const TbcGDep *dp = &g->deps[di];
+    Namespace *ns = g->nsp[dp->ns];
+    Command *c = g->exp[dp->name];
+    if (TBC_LIKELY(!g->bad[di] && ns && c && ns->nsId == g->nsid[dp->ns] && ns->cmdRefEpoch == g->cre[dp->ns] && ns->resolverEpoch == g->rse[dp->ns]
+            && c->cmdEpoch == g->expEp[dp->name] && !(c->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES)))) return 1;
+    tbc_guard_verify(interp, g, dp->ns);
+    c = g->exp[dp->name];
+    return !g->bad[di] && !(c && (c->flags & CMD_HAS_EXEC_TRACES));
+}
+
 /* the pinned command of built-in number i of the module's guard (NULL: it is a proc of the program, or was not found) */
 static Command *tbc_guard_cmd(const TbcGuard *g, int i) { return g->exp[i]; }
 

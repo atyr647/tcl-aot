@@ -1329,7 +1329,7 @@ proc stepT {key pc in} {
     set r [stepT0 $key $pc $in]
     # (an instruction that can run a script: what follows is checked for a command it replaced, at the next startCommand)
     lassign [keysplit $key] P sig
-    if {[dict get $r flow] eq "fall" && [llength [epochChk $P]] && [reenters $P $pc]} { global initName; dict set r code "[expr {[genUse $P] ? "if (!gset_) \{ gset_ = 1; gen_ = tbc_gen_${initName}(); \} " : ""}]dirty_ = 1; [dict get $r code]" }
+    if {[dict get $r flow] eq "fall" && [needRv $P] && [reenters $P $pc]} { dict set r code "rv_++; [dict get $r code]" }
     return $r
 }
 proc stepT0 {key pc in} {
@@ -1350,7 +1350,7 @@ proc stepT0 {key pc in} {
     switch -- $op {
         nop { return [R fall $in ""] }
         startCommand {
-            if {$pc in [epochChk $P]} { return [R fall $in "if (TBC_UNLIKELY(dirty_)) { dirty_ = 0; if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_)[genChk $P])) goto D$pc; }"] }
+            if {$pc in [epochChk $P]} { return [R fall $in "if (TBC_UNLIKELY(ck_ != rv_)) { ck_ = rv_; if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_))) goto D$pc; }"] }
             return [R fall $in ""]
         }
         beginCatch4 { return [R fall $in ""] }
@@ -2824,7 +2824,7 @@ proc enterG {key gpc slots pre flush} {
     for {set p 0} {$p < $n} {incr p} { append c " [boxc $P $p [lindex $slots $p]]" }
     set ::boxMode copy
     set arr {}; for {set p 0} {$p < $n} {incr p} { lappend arr s$p }
-    append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] };[epSaveT $P] int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
+    append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] };[epSave $P] int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
     if {$::PI($P,hasYield)} { append c " if (TBC_UNLIKELY(tbc_susp)) \{ tbc_st = 4; rc = TCL_OK; goto ret; \}" }
     append c " if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} goto ret; \}"
     return $c
@@ -2986,6 +2986,7 @@ proc stepInvoke {key pc in d n} {
         if {$ei >= 0} { set ecid "tbc_ens_pin\[$ei\]" }
         # (an execution trace on the ensemble is run by the interpreter's dispatch of `binary format`, not by a call of ::tcl::binary::format by name: boxed code makes the call then)
         if {$ecid ne "NULL"} { append guard "if (TBC_UNLIKELY($ecid && ($ecid->flags & CMD_HAS_EXEC_TRACES))) goto D$pc; " }
+        append guard [depCheck $P $pc $nm0]
         set call "(tbc_direct(interp, tbc_$dcid, $ecid, $n, ov_) ? TCL_OK : $call)"
     }
     if {[regexp {^(?:::)?tcl::mathfunc::rand$} $nm0] && $n == 1} {
@@ -3225,16 +3226,31 @@ proc reenters {P pc {vars 0}} {
 }
 # what typed code compares besides the epochs after anything that could have run a script: the epochs of the namespaces the module's guard looks built-ins up in (a
 # built-in it calls through its pinned command, which the interpreter would look up by name again, may have been replaced)
-proc genUse {P} { return [expr {[llength [gdeps $P]] > 0}] }
-proc genChk {P} { global initName; return [expr {[genUse $P] ? " || tbc_gen_${initName}() != gen_" : ""}] }
+# what typed code does besides comparing the epochs: a counter (rv_) of the instructions that can run a script, and for each place that calls a built-in through its pinned
+# command a record (svd_<pc>) of the value the counter had when the built-in was last checked (tbc_dep_ok: does the name still give it?), so the check is made at the first
+# call after a script may have run, as the interpreter looks a name up at every call; and the epochs at entry.
+proc hasDeps {P} { return [expr {[llength [gdeps $P]] > 0}] }
+proc needRv {P} { return [expr {[hasEp $P] || [hasDeps $P]}] }
 # the baselines of an activation: taken when typed code is entered, and handed from typed code to boxed code and back at a hand-over
-# typed code takes the generation baseline when the first instruction that can run a script is about to run (nothing can change before it); a hand-over takes it if that has not happened
-proc epSaveT {P} {
-    global initName
-    if {![hasEp $P]} { return "" }
-    return " [expr {[genUse $P] ? "if (!gset_) \{ gset_ = 1; gen_ = tbc_gen_${initName}(); \} " : ""}]tbc_epb = ep_; tbc_nseb = nse_; tbc_genb = gen_;"
+proc epSave {P} { return [expr {[hasEp $P] ? " tbc_epb = ep_; tbc_nseb = nse_;" : ""}] }
+# the pairs {name namespace} of every dependency of the module: the numbering of the guard's table
+proc gallOf {} {
+    global translatable GALLC
+    if {[info exists GALLC]} { return $GALLC }
+    set r {}
+    foreach P $translatable { foreach d [gdeps $P] { if {$d ni $r} { lappend r $d } } }
+    set GALLC [lsort $r]
+    return $GALLC
 }
-proc epSave {P} { return [expr {[hasEp $P] ? " tbc_epb = ep_; tbc_nseb = nse_; tbc_genb = gen_;" : ""}] }
+# the check of the dependency of a call of built-in nm made by P, as text for the start of the call ("" if the guard does not hold it)
+proc depCheck {P pc nm} {
+    global initName
+    if {![needRv $P]} { return "" }
+    set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+    set di [lsearch -exact [gallOf] [list $nm $ns]]
+    if {$di < 0} { return "" }
+    return "if (TBC_UNLIKELY(rv_ != svd_$pc)) { if (TBC_UNLIKELY(!tbc_depok_${initName}(interp, $di))) goto D$pc; svd_$pc = rv_; } "
+}
 # the startCommand instructions of P that follow, on some path, an instruction that can have run a script: where the epochs are compared
 proc epochChk {P} { return [epochChkX $P 0] }
 proc epochChkG {P} { return [epochChkX $P 1] }
@@ -4111,7 +4127,7 @@ proc osrAttempt {P pc d} {
     else { set fin [osrFin $P $gk $pc $d]; set cond [expr {$PI($P,wadapt) ? "osr_ && !tbc_wp_$cid" : "osr_"}] }
     set cond "noosr_ != -1 && noosr_ != [expr {$pc + 1}] && $cond"
     # (typed code would only hand over again at once if a command was replaced since the proc was entered)
-    if {[hasEp $P]} { set cond "$cond && !(TBC_EPCHG(interp, ep_, nse_)[genChk $P])" }
+    if {[hasEp $P]} { global initName; set cond "$cond && !TBC_EPCHG(interp, ep_, nse_)[expr {[hasDeps $P] ? " && tbc_gok_[cident $P](interp)" : ""}]" }
     return "    if ($cond) \{ Tcl_Obj *rs_\[[expr {$d + 1}]\] = { [join [concat $slots NULL] {, }] }; osr_ = 0; tbc_rpc1 = $pc + 1; tbc_rstk = rs_; tbc_rn = $d;[epSave $P] $fin goto gexit; \}\n"
 }
 
@@ -4125,7 +4141,7 @@ proc emitG {P} {
     append fn "    Var *loc_ = ((Interp *) interp)->varFramePtr->compiledLocals;\n    int rcg_ = TCL_OK;\n    (void) stk; (void) nstk; (void) loc_;\n"
     set osrPts [osrPointsOf $P]
     if {[llength $osrPts]} { append fn "    int osr_ = 1, noosr_ = tbc_noosr; tbc_noosr = 0;\n" }
-    if {[hasEp $P]} { append fn "    int ep_, nse_, gen_;\n    if (entryPc == 0) \{ ep_ = TBC_EPNOW(interp); nse_ = TBC_NSNOW(interp); gen_ = [expr {[genUse $P] && [llength [osrPointsOf $P]] ? "tbc_gen_${initName}()" : "0"}]; \} else \{ ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; \}\n" }
+    if {[hasEp $P]} { append fn "    int ep_, nse_;\n    if (entryPc == 0) \{ ep_ = TBC_EPNOW(interp); nse_ = TBC_NSNOW(interp); \} else \{ ep_ = tbc_epb; nse_ = tbc_nseb; \}\n" }
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL;\n" }
     foreach it $PI($P,iters) { append fn "    Tcl_DictSearch ds$it; Tcl_Obj *dd$it = NULL;\n" }
     for {set it 0} {$it < $PI($P,exlevels)} {incr it} { append fn "    Tcl_Obj *ex${it}_ = NULL;\n" }
@@ -4343,7 +4359,8 @@ proc emitVariant {key recursive {resume 0}} {
         set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
     }
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
-    if {[hasEp $P]} { global initName; append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0, gen_ = 0, gset_ = 0; (void) gset_; (void) gen_;\n"; if {[llength [epochChk $P]]} { append fn "    int dirty_ = 0; (void) dirty_;\n" } }
+    if {[hasEp $P]} { append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0;\n" }
+    if {[needRv $P]} { append fn "    int rv_ = 0, ck_ = 0; (void) rv_; (void) ck_;\n" }
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
         switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } Z { append fn " tbc_sbuf zv$v = {NULL, 0, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
@@ -4360,7 +4377,7 @@ proc emitVariant {key recursive {resume 0}} {
     set osrHere [expr {!$resume && (([dict exists $::OSRKEY $P] && [dict get $::OSRKEY $P] eq $key) || ([dict exists $::OSRKEYW $P] && [dict get $::OSRKEYW $P] eq $key))}]
     if {$osrHere} {
         append fn "    int resumed_ = 0, rpc = 0, rn = 0; Tcl_Obj **rstk = NULL; (void) rstk; (void) rn;\n"
-        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0;[expr {[hasEp $P] ? " ep_ = tbc_epb; nse_ = tbc_nseb; gen_ = tbc_genb; gset_ = 1;" : ""}][expr {[llength [epochChk $P]] ? " dirty_ = 1;" : ""}] goto RESUME; \}\n"
+        append fn "    if (TBC_UNLIKELY(tbc_rpc1)) \{ resumed_ = tbc_rpc1; rpc = tbc_rpc1 - 1; rstk = tbc_rstk; rn = tbc_rn; tbc_rpc1 = 0;[expr {[hasEp $P] ? " ep_ = tbc_epb; nse_ = tbc_nseb;" : ""}][expr {[needRv $P] ? " rv_ = 1;" : ""}] goto RESUME; \}\n"
     }
     # arguments into locals
     for {set v 0} {$v < $PI($P,nargs) && !$resume} {incr v} {
@@ -4485,6 +4502,7 @@ proc emitVariant {key recursive {resume 0}} {
         if {[string first "kb$k" $fn] >= 0} { append decls "    char kb$k\[104\]; int kl$k = 0; (void) kl$k;\n" }
         if {[string first "ka$k" $fn] >= 0} { append decls "    int64_t ka$k = 0, kj$k = 0; (void) ka$k; (void) kj$k;\n" }
     }
+    foreach m [lsort -unique [regexp -all -inline {\msvd_\d+\M} $fn]] { append decls "    int $m = 0;\n" }
     set fn [string map [list @@VECDECLS@@ $decls] $fn]
     # a variant that was entered from the boxed code, and every hand-over from it, must not make the boxed code enter typed code again (see osrAttempt)
     # (not when the hand-over is at an instruction that is in no loop: control then only goes forward from it, and the boxed code may enter typed code at a later loop head - a proc
@@ -4627,7 +4645,7 @@ proc gproto {P} { return "int G_[cident $P](Tcl_Interp *, int, Tcl_Obj **, int);
 foreach key $variants { append out "static [vproto $key]" }
 set modGuard 0
 foreach P $translatable { if {[llength [gdeps $P]]} { set modGuard 1; break } }
-if {$modGuard} { append out "static int tbc_gen_${initName}(void);\n" }
+if {$modGuard} { append out "static int tbc_depok_${initName}(Tcl_Interp *, int);\n"; foreach P $translatable { if {[hasDeps $P]} { append out "static int tbc_gok_[cident $P](Tcl_Interp *);\n" } } }
 dict for {P gk} $REKEY { append out "static [rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
 foreach P $translatable { append out "static [gproto $P]" }
 append out "\n"
@@ -4717,7 +4735,7 @@ if {[llength $gall]} {
     append out "static const char *const tbc_gs_${initName}\[\] = { [join [lmap n $gnss {cstring $n}] {, }] };\n"
     append out "static const TbcGDep tbc_gd_${initName}\[\] = { [join [lmap d $gall {format "{%d, %d}" [lsearch -exact $gnames [lindex $d 0]] [lsearch -exact $gnss [lindex $d 1]]}] {, }] };\n"
     append out "static TbcGuard tbc_guard_${initName} = { tbc_gn_${initName}, [llength $gnames], tbc_gs_${initName}, [llength $gnss], tbc_gd_${initName}, [llength $gall] };\n"
-    append out "static int tbc_gen_${initName}(void) \{ const TbcGuard *g = &tbc_guard_${initName}; int k, s = 0; for (k = 0; k < g->nnss; k++) if (g->nsp\[k\]) s += g->nsp\[k\]->cmdRefEpoch + g->nsp\[k\]->resolverEpoch; for (k = 0; k < g->nnames; k++) if (g->exp\[k\]) s += g->exp\[k\]->cmdEpoch + ((g->exp\[k\]->flags \& CMD_IS_DELETED) ? 1 : 0); return s; \}\n"
+    append out "static int tbc_depok_${initName}(Tcl_Interp *interp, int di) \{ return tbc_dep_ok(interp, &tbc_guard_${initName}, di); \}\n"
 }
 foreach P $translatable {
     set cid [cident $P]
@@ -4727,6 +4745,7 @@ foreach P $translatable {
     if {[llength $gx]} { append out "static const unsigned short tbc_gx_$cid\[\] = { [join $gx {, }] };\n" }
     if {[llength [ydeps $P]]} { append out "static int *tbc_yd_$cid\[\] = { [join [lmap c [ydeps $P] {string cat &tbc_valid_[cident $c]}] {, }], NULL };\n" }
     append out "static TbcEntry tbc_e_$cid = \{ [cstring $P], [cstring $ns], [cstring [canonArgs $P]], [cstring $PI($P,infoBody)], UINT64_C(0x$fp), tbc_nat_$cid, &tbc_valid_$cid, 0, NULL, [expr {$P in $ysafeProcs ? 1 : 0}], [expr {[llength [ydeps $P]] ? "tbc_yd_$cid" : "NULL"}], [expr {[llength $gx] ? "tbc_gx_$cid" : "NULL"}], [llength $gx], [expr {[llength $gx] ? "&tbc_guard_$initName" : "NULL"}], [expr {$P in $yresProcs ? 1 : 0}], [ensMask $P] \};\n"
+    if {[hasDeps $P]} { append out "static int tbc_gok_${cid}(Tcl_Interp *interp) \{ return tbc_guard_ok(interp, &tbc_e_${cid}); \}\n" }
 }
 # the procs left to the interpreter, with the reason, so that tbc::report can say why a definition equal to one of them is not compiled
 if {[llength $refusedProcs]} {
@@ -4776,7 +4795,7 @@ if {$splitN > 0} {
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append hdr "extern Tcl_Obj *L_${cid}_$i;\n" }
     }
     append hdr $dcExtern
-    if {$modGuard} { append hdr "int tbc_gen_${initName}(void);\n" }
+    if {$modGuard} { append hdr "int tbc_depok_${initName}(Tcl_Interp *, int);\n"; foreach P $translatable { if {[hasDeps $P]} { append hdr "int tbc_gok_[cident $P](Tcl_Interp *);\n" } } }
     foreach key $variants { append hdr [vproto $key] }
     foreach P $translatable { append hdr [gproto $P] }
     dict for {P gk} $REKEY { append hdr "[rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
@@ -4818,7 +4837,7 @@ if {$splitN > 0} {
         if {$PI($P,wadapt)} { append init "int tbc_wp_$cid = 0;\n" }
         for {set i 0} {$i < [llength $PI($P,lits)]} {incr i} { append init "Tcl_Obj *L_${cid}_$i;\n" }
     }
-    append init $dcDef "\n" [string map [list "\nstatic int tbc_gen_" "\nint tbc_gen_"] [string range $out $outAfterG end]]
+    append init $dcDef "\n" [string map [list "\nstatic int tbc_depok_" "\nint tbc_depok_" "\nstatic int tbc_gok_" "\nint tbc_gok_"] [string range $out $outAfterG end]]
     set f [open $outFile w]; puts -nonewline $f $init; close $f
     puts "tcl-aot: split into [llength $files] code files + $base.h + $outFile"
 } else {

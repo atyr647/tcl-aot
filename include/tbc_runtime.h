@@ -734,7 +734,7 @@ TBC_SHARED int tbc_noosr, tbc_rpc1, tbc_rn;
  * command path or resolvers changed) since the bytecode was compiled: INST_START_CMD compares the interpreter's compile epoch, and the epoch of the namespace's
  * resolvers, with those of the bytecode, after anything that could have run a script.  Compiled code takes the two epochs when a proc is entered and does the same
  * comparison where the bytecode has that instruction (tbc_epb and tbc_nseb carry them from typed code to boxed code and back at a hand-over). */
-TBC_SHARED int tbc_epb, tbc_nseb, tbc_genb;
+TBC_SHARED int tbc_epb, tbc_nseb;
 #define TBC_EPNOW(interp) (((Interp *) (interp))->compileEpoch)
 #define TBC_NSNOW(interp) (((Interp *) (interp))->varFramePtr->nsPtr->resolverEpoch)
 #define TBC_EPCHG(interp, ep, nse) (((Interp *) (interp))->compileEpoch != (ep) || ((Interp *) (interp))->varFramePtr->nsPtr->resolverEpoch != (nse))
@@ -975,7 +975,19 @@ static int tbc_s_range(Tcl_Obj *s, int64_t first, int64_t last, Tcl_Obj **out) {
 TBC_INLINE int tbc_fmt_i64(char *buf, int64_t w);
 TBC_INLINE Tcl_Obj *tbc_newpair(int64_t i, int64_t j) { char kb[48]; int n, k; n = k = 0; { char t[24]; int a = 0; uint64_t u = i < 0 ? (uint64_t) 0 - (uint64_t) i : (uint64_t) i; do { t[a++] = (char) ('0' + u % 10); u /= 10; } while (u); if (i < 0) kb[n++] = '-'; while (a) kb[n++] = t[--a]; } kb[n++] = ','; { char t[24]; int a = 0; uint64_t u = j < 0 ? (uint64_t) 0 - (uint64_t) j : (uint64_t) j; do { t[a++] = (char) ('0' + u % 10); u /= 10; } while (u); if (j < 0) kb[n++] = '-'; while (a) kb[n++] = t[--a]; } (void) k; { Tcl_Obj *o = Tcl_NewStringObj(kb, n); Tcl_IncrRefCount(o); return o; } }
 TBC_INLINE Tcl_Obj *tbc_newkey(const char *s, int n) { Tcl_Obj *o = Tcl_NewStringObj(s, n); Tcl_IncrRefCount(o); return o; }
-TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) { Tcl_Obj *o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); return o; }
+/* The integers from -256 to 1023 are boxed once (one reference of the table's own, so an object handed out is always shared and nothing changes one in place): the positions,
+ * indices and counters that typed code passes to commands and puts in lists were an allocation and a release each time, where the interpreter passes the object its variable holds. */
+TBC_SHARED Tcl_Obj *tbcSmall[1280];
+TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) {
+    Tcl_Obj *o;
+    if ((uint64_t) (w + 256) < 1280) {
+        o = tbcSmall[w + 256];
+        if (TBC_UNLIKELY(!o)) { o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); tbcSmall[w + 256] = o; }
+        Tcl_IncrRefCount(o);
+        return o;
+    }
+    o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); return o;
+}
 /* `binary scan $data <t>[u]* var` for t one of c s S i I: the list tclBinary.c's BinaryScanCmd builds (ScanNumber's byte order and sign extension; a
  * number is read from its bytes, trailing bytes that do not make a whole number are ignored; no data gives the empty object).  Refcount 0.  Equal values share one
  * object in Tcl's own scan (a cache); here for c only, the one format whose values are always few. */
