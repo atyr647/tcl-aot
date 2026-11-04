@@ -2074,3 +2074,11 @@ proc sl_arg {x} { return [string length $x] }
 proc sl_loop {x} { set t 0; for {set i 0} {$i < 5} {incr i} { incr t [string length $x] }; return $t }
 proc sl_calc {n} { return [list [string length [expr {$n + 1}]] [string length [expr {-$n}]] [string length [expr {$n * 10}]] [string length $n]] }
 proc sl_count {n} { set t 0; for {set i -3} {$i < $n} {incr i} { incr t [string length $i] }; return $t }
+
+# procs that yield and run compiled inside a coroutine that is started from interpreted code (tests/report.tcl drives them, and checks that they ran compiled): a command replaced while the
+# coroutine is suspended is seen when it goes on, as the interpreter sees it at the next command start of its bytecode, and so are the commands after that (the next yield is one of them)
+proc cr_yd2 {} { set r {}; for {set i 0} {$i < 4} {incr i} { yield $i; lappend r [string length abc$i] }; return $r }
+proc cr_yd5 {} { set s 0; for {set i 0} {$i < 4} {incr i} { yield $i; incr s [string length abc$i] }; return $s }
+proc cr_yd6 {} { set r {}; for {set i 0} {$i < 3} {incr i} { yield $i; lappend r [catch {string length abc$i} v] $v }; return $r }
+proc cr_yd7 {} { yield 1; set a [string length abc]; yield $a; return [string length abcdef] }
+proc cr_yd8 {} { set n 0; for {set i 0} {$i < 5} {incr i} { incr n [string length [yield $i]] }; return $n }

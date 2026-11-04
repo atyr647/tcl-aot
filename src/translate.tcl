@@ -3281,7 +3281,6 @@ proc epochChkX {P vars} {
     global PI
     if {[info exists PI($P,chk$vars)]} { return $PI($P,chk$vars) }
     set PI($P,chk$vars) {}
-    if {$PI($P,hasYield)} { return {} }
     set re {}
     foreach pc $PI($P,reach) { if {[reenters $P $pc $vars]} { dict set re $pc 1 } }
     if {[info exists ::env(TBC_DBGEPOCH)]} { puts stderr "EPOCH $P reenters: [lmap pc [dict keys $re] {string cat $pc:[lindex $PI($P,ins,$pc) 0]}]" }
@@ -3640,6 +3639,11 @@ proc genG {key pc d} {
             set tgt [operand [lindex $a 0]]
             # (a command that ends the code - a `return` - never completes: its result is a return code)
             set jmp [expr {$tgt in $PI($P,reach) ? "goto G$tgt;" : "rcg_ = TCL_ERROR; Tcl_SetObjResult(interp, Tcl_NewStringObj(\"tbc: internal error: no instruction after a command evaluated from its source\", -1)); goto @X@;"}]
+            if {$PI($P,hasYield)} {
+                # (the command may be, or may call, what yields: the interpreter's trampoline evaluates it, and the boxed code goes on in the resume callback)
+                set below {}; for {set k 0} {$k < $d} {incr k} { lappend below s$k }
+                return [string map [concat $X [list @TXT@ [cstring $text] @LEN@ [cbytes $text] @TGT@ $tgt @BELOW@ [join [concat $below NULL] {, }] @EPC@ [expr {-$pc-1}]]] {if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_))) { Tcl_Obj *sc_ = Tcl_NewStringObj(@TXT@, @LEN@); Tcl_IncrRefCount(sc_); tbc_setpc(interp, @PC@); { Tcl_Obj *bl_[] = { @BELOW@ }; tbc_do_eval(interp, tbc_yres_@P@, @TGT@, @D@, bl_, TclCompileObj(interp, sc_, NULL, 0), ep_, nse_, @EPC@); } Tcl_DecrRefCount(sc_); rcg_ = TCL_OK; goto gexit; }}]
+            }
             return [string map [concat $X [list @TXT@ [cstring $text] @LEN@ [cbytes $text] @JMP@ [string map $X $jmp]]] {if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_))) { Tcl_Obj *sc_ = Tcl_NewStringObj(@TXT@, @LEN@); Tcl_IncrRefCount(sc_); tbc_setpc(interp, @PC@); { NRE_callback *root_ = TOP_CB(interp); ByteCode *bc_ = TclCompileObj(interp, sc_, NULL, 0); rcg_ = TclNRRunCallbacks(interp, TclNRExecuteByteCode(interp, bc_), root_); } Tcl_DecrRefCount(sc_); ((Interp *) interp)->flags |= ERR_ALREADY_LOGGED; if (rcg_ != TCL_OK) goto @X@; @sn@ = tbc_takeres(interp); @JMP@ }}]
         }
         endCatch { return "Tcl_ResetResult(interp); rcg_ = TCL_OK;" }
@@ -3834,7 +3838,7 @@ proc genG {key pc d} {
                 set what "yieldto"; set typ "INT2PTR(1)"
                 set setup "if (((Namespace *) TclGetCurrentNamespace(interp))->flags & NS_DYING) { Tcl_SetObjResult(interp, Tcl_NewStringObj(\"yieldto called in deleted namespace\", -1)); Tcl_SetErrorCode(interp, \"TCL\", \"COROUTINE\", \"YIELDTO_IN_DELETED\", NULL); goto @E@; } Tcl_IncrRefCount(@s1@); ((Interp *) interp)->execEnvPtr = cp_->callerEEPtr; TclSetTailcall(interp, @s1@); ((Interp *) interp)->execEnvPtr = cp_->eePtr; Tcl_DecrRefCount(@s1@);"
             }
-            return [string map [concat $X [list @PC@ $pc]] "\{ CoroutineData *cp_ = ((Interp *) interp)->execEnvPtr->corPtr; if (!cp_) \{ Tcl_SetObjResult(interp, Tcl_NewStringObj(\"$what can only be called in a coroutine\", -1)); Tcl_SetErrorCode(interp, \"TCL\", \"COROUTINE\", \"ILLEGAL_YIELD\", NULL); goto @E@; \} $setup \{ Tcl_Obj *bl_\[\] = { [join [concat $below NULL] {, }] }; tbc_setpc(interp, @PC@); tbc_do_yield(interp, tbc_yres_[cident $P], $nx, [expr {$d - 1}], bl_, $typ); \} rcg_ = TCL_OK; goto gexit; \}"]
+            return [string map [concat $X [list @PC@ $pc]] "\{ CoroutineData *cp_ = ((Interp *) interp)->execEnvPtr->corPtr; if (!cp_) \{ Tcl_SetObjResult(interp, Tcl_NewStringObj(\"$what can only be called in a coroutine\", -1)); Tcl_SetErrorCode(interp, \"TCL\", \"COROUTINE\", \"ILLEGAL_YIELD\", NULL); goto @E@; \} $setup \{ Tcl_Obj *bl_\[\] = { [join [concat $below NULL] {, }] }; tbc_setpc(interp, @PC@); tbc_do_yield(interp, tbc_yres_[cident $P], $nx, [expr {$d - 1}], bl_, $typ, [expr {[hasEp $P] ? "ep_, nse_" : "0, 0"}], [expr {-$pc-1}]); \} rcg_ = TCL_OK; goto gexit; \}"]
         }
         tailcall {
             set n [lindex $a 0]
@@ -4103,6 +4107,12 @@ proc entryCalled {cid pc} {
         foreach P $translatable {
             if {!$PI($P,hasYield)} continue
             foreach ypc $PI($P,reach) { if {[lindex $PI($P,ins,$ypc) 0] in {yield yieldToInvoke}} { set ENT([cident $P],$PI($P,next,$ypc)) 1; set ENT([cident $P],[expr {-$ypc-1}]) 1 } }
+            # (and after a command that is evaluated from its source, at the instruction it goes on at, and at the command start with its error)
+            foreach scpc [epochChkG $P] {
+                set tg [operand [lindex [lindex $PI($P,ins,$scpc) 1] 0]]
+                set ENT([cident $P],[expr {-$scpc-1}]) 1
+                if {$tg in $PI($P,reach)} { set ENT([cident $P],$tg) 1 }
+            }
         }
         # (a re-entry that gives up goes on in the boxed code at the loop head it was entered from)
         global OSRKEY OSRKEYW
@@ -4119,10 +4129,13 @@ proc emitResume {P} {
     set cid [cident $P]
     set maxd2 [expr {$PI($P,maxd) + 2}]
     set fn "static int tbc_yres_${cid}(ClientData data\[\], Tcl_Interp *interp, int result)\n\{\n"
-    append fn "    Interp *iPtr = (Interp *) interp;\n    TbcYieldRec *rec = (TbcYieldRec *) data\[0\];\n    Tcl_Obj *stk\[$maxd2\];\n    int i, n = rec->n, pc = rec->pc, code = TCL_ERROR;\n"
+    append fn "    Interp *iPtr = (Interp *) interp;\n    TbcYieldRec *rec = (TbcYieldRec *) data\[0\];\n    Tcl_Obj *stk\[$maxd2\];\n    int i, n = rec->n, pc = rec->pc, code = TCL_ERROR, ep = rec->ep, nse = rec->nse, epc = rec->epc, errtop = rec->errtop;\n    (void) ep; (void) nse; (void) epc; (void) errtop;\n"
     append fn "    for (i = 0; i < n; i++) stk\[i\] = rec->o\[i\];\n    ckfree((char *) rec);\n"
     append fn "    if (iPtr->execEnvPtr->rewind) \{ for (i = 0; i < n; i++) Tcl_DecrRefCount(stk\[i\]); return TCL_ERROR; \}\n"
     append fn "    stk\[n\] = Tcl_GetObjResult(interp); Tcl_IncrRefCount(stk\[n\]);\n    iPtr->numLevels--; tbc_nest++; tbc_maxdepth = Tcl_SetRecursionLimit(interp, 0);\n"
+    # (the baselines of the activation, as they were when it yielded: the boxed code and the typed code that go on read them, and compare them at the first command start, as the interpreter does for the code it resumes)
+    if {[hasEp $P]} { append fn "    tbc_epb = ep; tbc_nseb = nse;\n" }
+    append fn ""
     set ok ""; set bad ""
     global REKEY VK
     set re [expr {[dict exists $REKEY $P] ? [dict get $REKEY $P] : ""}]
@@ -4135,14 +4148,24 @@ proc emitResume {P} {
             default { set fin "Tcl_Obj *r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, r_); Tcl_DecrRefCount(r_); code = TCL_OK; \}" }
         }
     }
+    array unset have
     foreach pc $PI($P,reach) {
         if {[lindex $PI($P,ins,$pc) 0] ni {yield yieldToInvoke}} continue
         set nx $PI($P,next,$pc)
+        if {[info exists have($nx)]} continue
+        set have($nx) 1
         if {$nx in $pts} { append ok "        case $nx: \{ $fin \} break;\n" } else {
         append ok "        case $nx: code = G_${cid}(interp, $nx, stk, n + 1); break;\n" }
-        append bad "        case $nx: code = G_${cid}(interp, [expr {-$pc-1}], stk, n + 1); break;\n"
     }
-    append fn "    if (result == TCL_OK) \{\n        switch (pc) \{\n$ok        default: break;\n        \}\n    \} else \{\n        tbc_rc = result;\n        switch (pc) \{\n$bad        default: break;\n        \}\n    \}\n"
+    # (the instructions a command that was evaluated from its source goes on at: the same state as after a yield, the result on the stack)
+    foreach scpc [epochChkG $P] {
+        set tg [operand [lindex [lindex $PI($P,ins,$scpc) 1] 0]]
+        if {$tg ni $PI($P,reach) || [info exists have($tg)]} continue
+        set have($tg) 1
+        append ok "        case $tg: code = G_${cid}(interp, $tg, stk, n + 1); break;\n"
+    }
+    # (an error or another result code goes on at the entry the record names: that of the yield, or of the command start; the result of an evaluated command is not on the stack there)
+    append fn "    if (result == TCL_OK) \{\n        switch (pc) \{\n$ok        default: break;\n        \}\n    \} else \{\n        tbc_rc = result;\n        if (errtop) \{ Tcl_DecrRefCount(stk\[n\]); iPtr->flags |= ERR_ALREADY_LOGGED; \}\n        code = G_${cid}(interp, epc, stk, errtop ? n : n + 1);\n    \}\n"
     append fn "    tbc_nest--; iPtr->numLevels++;\n    if (tbc_susp) \{ tbc_susp = 0; return TCL_OK; \}\n    if (code == TCL_ERROR) iPtr->flags |= ERR_ALREADY_LOGGED;\n    return code;\n\}\n"
     return $fn
 }
@@ -4210,7 +4233,7 @@ proc emitG {P} {
             for {set i 0} {$i < $d} {incr i} { append fn "s$i = stk\[$i\]; " }
             append fn "goto G$pc;\n"
         }
-        if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4 yield yieldToInvoke} && [entryCalled $cid [expr {-$pc-1}]]} {
+        if {[lindex $PI($P,ins,$pc) 0] in {invokeStk1 invokeStk4 yield yieldToInvoke startCommand} && [entryCalled $cid [expr {-$pc-1}]]} {
             append fn "    case [expr {-$pc-1}]: "
             for {set i 0} {$i < $d} {incr i} { append fn "s$i = stk\[$i\]; " }
             append fn "rcg_ = tbc_rc; goto X$pc;\n"
@@ -4416,8 +4439,8 @@ proc emitVariant {key recursive {resume 0}} {
         set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
     }
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
-    if {[hasEp $P]} { append fn "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0;\n" }
-    if {[needRv $P]} { append fn "    int rv_ = 0, ck_ = 0; (void) rv_; (void) ck_;\n" }
+    if {[hasEp $P]} { append fn [expr {$resume ? "    int ep_ = tbc_epb, nse_ = tbc_nseb;\n" : "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0;\n"}] }
+    if {[needRv $P]} { append fn "    int rv_ = $resume, ck_ = 0; (void) rv_; (void) ck_;\n" }
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
         switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } Z { append fn " tbc_sbuf zv$v = {NULL, 0, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }

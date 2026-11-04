@@ -2073,15 +2073,28 @@ static int tbc_ysafe_now(const TbcEntry *e) {
 }
 /* a yield instruction of boxed code: keep the operand stack below the yielded value in a record, put the resume callback and the interpreter's activation
  * callback on the non-recursive stack (as the bytecode executor does) and tell the frames above to return.  `type` is NULL for yield, 1 for yieldto. */
-typedef struct { int pc, n; Tcl_Obj *o[1]; } TbcYieldRec;
-static void tbc_do_yield(Tcl_Interp *interp, Tcl_NRPostProc *resume, int nextpc, int n, Tcl_Obj *const *below, void *type) {
+typedef struct { int pc, n, ep, nse, epc, errtop; Tcl_Obj *o[1]; } TbcYieldRec;
+static void tbc_do_yield(Tcl_Interp *interp, Tcl_NRPostProc *resume, int nextpc, int n, Tcl_Obj *const *below, void *type, int ep, int nse, int epc) {
     CoroutineData *corPtr = ((Interp *) interp)->execEnvPtr->corPtr;
     TbcYieldRec *rec = (TbcYieldRec *) ckalloc(sizeof(TbcYieldRec) + (size_t) n * sizeof(Tcl_Obj *));
     int i;
-    rec->pc = nextpc; rec->n = n;
+    rec->pc = nextpc; rec->n = n; rec->ep = ep; rec->nse = nse; rec->epc = epc; rec->errtop = 0;
     for (i = 0; i < n; i++) rec->o[i] = below[i];
     TclNRAddCallback(interp, resume, rec, NULL, NULL, NULL);
     TclNRAddCallback(interp, TclNRCoroutineActivateCallback, corPtr, type, NULL, NULL);
+    tbc_susp = 1;
+}
+/* a command of a proc that yields, evaluated from its source because a command was replaced since the proc was entered (as the interpreter does at the next command start of its stale bytecode):
+ * not by a recursive evaluation from the C frame of the boxed code, in which what it evaluates could not yield (the next `yield` of the proc is such a command), but by the interpreter's
+ * trampoline, with the resume callback behind it.  The record is that of a yield: the stack below the command's result, where the boxed code goes on (nextpc) and where it goes if the
+ * command ends with another code than TCL_OK (epc, with the result code in tbc_rc; errtop: the result is not part of the stack there). */
+static void tbc_do_eval(Tcl_Interp *interp, Tcl_NRPostProc *resume, int nextpc, int n, Tcl_Obj *const *below, ByteCode *bc, int ep, int nse, int epc) {
+    TbcYieldRec *rec = (TbcYieldRec *) ckalloc(sizeof(TbcYieldRec) + (size_t) n * sizeof(Tcl_Obj *));
+    int i;
+    rec->pc = nextpc; rec->n = n; rec->ep = ep; rec->nse = nse; rec->epc = epc; rec->errtop = 1;
+    for (i = 0; i < n; i++) rec->o[i] = below[i];
+    TclNRAddCallback(interp, resume, rec, NULL, NULL, NULL);
+    (void) TclNRExecuteByteCode(interp, bc);
     tbc_susp = 1;
 }
 static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {

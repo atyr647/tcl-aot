@@ -153,5 +153,55 @@ set r5 [tbc::report]
 tb_fmt {a b c}; tb_fmt {d e}; tb_spl x,y,z
 set r6 [tbc::report]
 check "built-ins with look-alikes in Tcl's own namespaces: procs stay compiled" [expr {[dict get $r6 compiled_calls] - [dict get $r5 compiled_calls]}] 3
+# a command replaced while a coroutine that yields is suspended: the compiled code that goes on after the resumption sees it, as the interpreter does at the next command start of its bytecode
+# (the baselines of the activation go through the yield), also for the command after it, which may be the next yield (evaluated from its source by the interpreter's own trampoline, not from the C
+# frame of the compiled code, where a yield cannot suspend), and for the code the replaced command returns (an error, another code)
+set yscript {
+    # the coroutine of proc p, run to its first yield; body replaces string; the coroutine is resumed until it ends (restoring string after `restoreAfter` resumptions, -1: at the end)
+    proc yscenario {p body restoreAfter {feed x}} {
+        set out {}
+        coroutine yc $p
+        lappend out [yc]
+        cr_swap string $body
+        set k 0
+        while 1 {
+            if {$k == $restoreAfter} { cr_restore string }
+            if {[catch {yc $feed} v o]} { lappend out ERR:$v; break }
+            lappend out $v
+            incr k
+        }
+        cr_restore string
+        catch {rename yc {}}
+        return $out
+    }
+}
+set yref [interp create]
+interp eval $yref [list source [file join [file dirname [info script]] procs.tcl]]
+interp eval $yref $yscript
+eval $yscript
+foreach {p body after} {
+    cr_yd2 {return NEW} -1
+    cr_yd2 {return -code error BOOM} -1
+    cr_yd2 {error "oops"} -1
+    cr_yd2 {return [expr {[::cr_orig_string {*}$args] + 100}]} -1
+    cr_yd2 {return NEW} 1
+    cr_yd5 {return 7} -1
+    cr_yd5 {return 7} 2
+    cr_yd6 {return NEW} -1
+    cr_yd6 {error oops} -1
+    cr_yd6 {return NEW} 1
+    cr_yd7 {return NEW} -1
+    cr_yd7 {return -code break} -1
+    cr_yd8 {return 3} -1
+} {
+    set want [interp eval $yref [list yscenario $p $body $after]]
+    catch {$p}
+    set r7 [tbc::report]
+    set got [yscenario $p $body $after]
+    set r8 [tbc::report]
+    check "yield, $p, string replaced by {$body} (restored after $after): the result" $got $want
+    check "yield, $p, string replaced by {$body} (restored after $after): ran compiled in the coroutine" [list [expr {[dict get $r8 compiled_calls] - [dict get $r7 compiled_calls] >= 1}] [expr {[dict get $r8 coroutine_calls] - [dict get $r7 coroutine_calls]}]] {1 0}
+}
+interp delete $yref
 puts [expr {$fails ? "$fails FAILED" : "all report checks passed"}]
 exit [expr {$fails ? 1 : 0}]
