@@ -2063,3 +2063,7 @@ proc cr_ydrun {} {
     try { while 1 { lappend out [cr_c1] } } on error {e} { } finally { cr_restore string; cr_restore join }
     return $out
 }
+
+# integers at the edges of the table of shared small integers (from -256 to 1023) and of the 64-bit range, boxed by typed code
+proc sm_edge {n} { return [list [expr {$n + 0}] [expr {$n - 1}] [expr {$n * 1}]] }
+proc sm_list {n} { set r {}; foreach d {-257 -256 -255 -1 0 1 1022 1023 1024} { lappend r [expr {$n + $d}] }; return $r }

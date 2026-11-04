@@ -980,9 +980,10 @@ TBC_INLINE Tcl_Obj *tbc_newkey(const char *s, int n) { Tcl_Obj *o = Tcl_NewStrin
 TBC_SHARED Tcl_Obj *tbcSmall[1280];
 TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) {
     Tcl_Obj *o;
-    if ((uint64_t) (w + 256) < 1280) {
-        o = tbcSmall[w + 256];
-        if (TBC_UNLIKELY(!o)) { o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); tbcSmall[w + 256] = o; }
+    /* (the sum is taken unsigned: 9223372036854775807 + 256 must not overflow, which the compiler may take for impossible) */
+    if ((uint64_t) w + 256 < 1280) {
+        o = tbcSmall[(uint64_t) w + 256];
+        if (TBC_UNLIKELY(!o)) { o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); tbcSmall[(uint64_t) w + 256] = o; }
 #ifdef TBC_SMALLCHK
         { /* (debug build: the object may have another internal form, as any shared object may, but it must stay the number) */
             char b_[32]; const char *t_;

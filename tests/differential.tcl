@@ -294,6 +294,8 @@ lappend calls {zb_cond 0} {zb_cond 1}
 foreach n {0 1 2 3 5} { lappend calls [list cr_string $n] [list cr_join $n] [list cr_first $n] [list cr_typed $n] }
 foreach m {none eof} { lappend calls [list cr_reflect $m] }
 lappend calls {cr_ydrun} {cr_shadow} {cr_refl_vars} {cr_vtrace} {cr_ctrace} {cr_modify}
+foreach n {9223372036854775807 -9223372036854775807 -9223372036854775808 255 256 -256 -257 1023 1024 0 -1} { lappend calls [list sm_edge $n] }
+foreach n {0 100 9223372036854774783 -9223372036854775000} { lappend calls [list sm_list $n] }
 # list literals made by the compiler
 foreach x [list {} a {a b c} {1 2 3 4 5 6 7 8 9 10} "x\ty" {\{} {a {b c} d} " lead" "trail "] { lappend calls [list ll_eval $x] [list ll_evalq $x] [list ll_cat $x] [list ll_cat2 $x] [list ll_eval2 $x] [list ll_commentlist $x] [list ll_evalbad $x] }
 lappend calls {ll_eval3} {ll_listlit} {ll_eval2} {ll_eval2 1 2 3}
