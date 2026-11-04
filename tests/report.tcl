@@ -193,6 +193,9 @@ foreach {p body after} {
     cr_yd7 {return NEW} -1
     cr_yd7 {return -code break} -1
     cr_yd8 {return 3} -1
+    cr_yd2 {yield S; return NEW} -1
+    cr_yd5 {yield S; return 7} -1
+    cr_yd7 {yield S; return NEW} 1
 } {
     set want [interp eval $yref [list yscenario $p $body $after]]
     catch {$p}
