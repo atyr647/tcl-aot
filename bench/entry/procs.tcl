@@ -56,3 +56,17 @@ proc m_sw {method args} {
 proc m_hn0 {l} { set s 0; foreach x $l { if {[llength [info proc nonesuch]]} { incr s } }; return $s }
 proc m_hn2 {l} { set s 0; foreach x $l { set s [expr {$s + $x * 3 + $x * 5}]; if {[llength [info proc nonesuch]]} { incr s } }; return $s }
 proc m_hn6 {l} { set s 0; foreach x $l { set s [expr {$s + $x * 3 + $x * 5 + $x * 7 + $x * 9 + $x * 11 + $x * 13}]; if {[llength [info proc nonesuch]]} { incr s } }; return $s }
+# the helpers of tclbench's md5 (a rotate left, a byte of a word): small bit-twiddling procs called from interpreted code; their one argument is the word
+proc m_rot {v} {
+    set n 7
+    return [expr {((($v << $n)  | (($v >> (32 - $n))  & (0x7FFFFFFF >> (31 - $n)))))  & 0xFFFFFFFF}]
+}
+proc m_byte {v} { set n 2; expr {((0xFF << (8 * $n)) & $v) >> (8 * $n)} }
+proc m_p2 {v} { return [expr {(($v + 3) * 7)}] }
+proc m_p3 {v} { return [expr {((($v + 3) * 7) - 5)}] }
+proc m_p4 {v} { return [expr {(((($v + 3) * 7) - 5) & 255)}] }
+proc m_p5 {v} { return [expr {((((($v + 3) * 7) - 5) & 255) | 9)}] }
+proc m_p6 {v} { return [expr {(((((($v + 3) * 7) - 5) & 255) | 9) ^ 11)}] }
+proc m_p7 {v} { return [expr {((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2)}] }
+proc m_p8 {v} { return [expr {(((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1)}] }
+proc m_p9 {v} { return [expr {((((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1) + 3)}] }
