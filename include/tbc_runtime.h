@@ -879,8 +879,8 @@ static int tbc_sb_grow(tbc_sbuf *b, size_t need) {
 /* s is ASCII (the caller knows) */
 TBC_INLINE int tbc_sb_append(tbc_sbuf *b, const char *s, int len) {
     if ((size_t) b->n + (size_t) len > (size_t) b->cap && !tbc_sb_grow(b, (size_t) len)) return 0;
-    memcpy(b->p + b->n, s, (size_t) len);
-    b->n += len;
+    /* (an empty text into a buffer that has not been allocated yet: its pointer is NULL, which memcpy must not be given even for no bytes) */
+    if (len > 0) { memcpy(b->p + b->n, s, (size_t) len); b->n += len; }
     return 1;
 }
 TBC_INLINE int tbc_sb_append_i(tbc_sbuf *b, int64_t w) {
