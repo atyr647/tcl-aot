@@ -983,6 +983,16 @@ TBC_INLINE Tcl_Obj *tbc_newint(int64_t w) {
     if ((uint64_t) (w + 256) < 1280) {
         o = tbcSmall[w + 256];
         if (TBC_UNLIKELY(!o)) { o = Tcl_NewWideIntObj(w); Tcl_IncrRefCount(o); tbcSmall[w + 256] = o; }
+#ifdef TBC_SMALLCHK
+        { /* (debug build: the object may have another internal form, as any shared object may, but it must stay the number) */
+            char b_[32]; const char *t_;
+            if (o->refCount < 1) { fprintf(stderr, "tbcSmall[%ld] freed\n", (long) w); abort(); }
+            snprintf(b_, sizeof b_, "%ld", (long) w);
+            t_ = Tcl_GetString(o);
+            if (strcmp(t_, b_)) { fprintf(stderr, "tbcSmall[%ld] changed: text \"%s\" refCount %d type %p\n", (long) w, t_, (int) o->refCount, (void *) o->typePtr); abort(); }
+            if (o->typePtr == tbcInt && tbc_wide(o) != w) { fprintf(stderr, "tbcSmall[%ld] changed: int value %ld\n", (long) w, (long) tbc_wide(o)); abort(); }
+        }
+#endif
         Tcl_IncrRefCount(o);
         return o;
     }
