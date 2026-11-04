@@ -16,7 +16,6 @@ m_if 2
 m_foreach 12345
 m_format 42
 m_regexp hello_world
-m_switch b
 m_split a,b,c,d
 m_join abc
 m_eval 5
@@ -26,3 +25,11 @@ m_lp 10
 m_lu 10
 m_e4 123456789
 m_e4c 123456789
+m_look test
+m_sw test
+m_hn0 1
+m_hn0 1 2 3 4 5 6 7 8
+m_hn2 1
+m_hn2 1 2 3 4 5 6 7 8
+m_hn6 1
+m_hn6 1 2 3 4 5 6 7 8

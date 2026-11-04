@@ -34,3 +34,25 @@ proc m_e4 {val} {
     return [binary format ccccc [expr { ( $val / 52200625) + 33 }] [expr { (($val % 52200625) / 614125) + 33 }] [expr { (($val % 614125) / 7225) + 33 }] [expr { (($val % 7225) / 85) + 33 }] [expr { ( $val % 85) + 33 }]]
 }
 proc m_e4c {val} { m_e4 $val }
+# the lookup and the switch of tclbench's methods program: a loop over a list, `info proc` (typed code hands over there), a script built with linsert and evaluated
+namespace eval ::dad { proc test {{x 5} args} { set x } }
+set ::b [list ::dad ::none]
+proc m_look {method args} {
+    foreach anc $::b {
+        if {[llength [info proc ${anc}::$method]]} {
+            return [eval [linsert $args 0 ${anc}::$method]]
+        }
+    }
+}
+proc m_sw {method args} {
+    switch $method {
+        a {}
+        b {}
+        test {return [eval [linsert $args 0 ::dad::test]]}
+    }
+}
+# a loop that hands over to boxed code in every round (info proc), with 0, 2 and 6 rounds of arithmetic as typed work before it (the weights of liteWeight: 150, 1150, 3150; the entry
+# stub pays for itself above about 950, decision 51)
+proc m_hn0 {l} { set s 0; foreach x $l { if {[llength [info proc nonesuch]]} { incr s } }; return $s }
+proc m_hn2 {l} { set s 0; foreach x $l { set s [expr {$s + $x * 3 + $x * 5}]; if {[llength [info proc nonesuch]]} { incr s } }; return $s }
+proc m_hn6 {l} { set s 0; foreach x $l { set s [expr {$s + $x * 3 + $x * 5 + $x * 7 + $x * 9 + $x * 11 + $x * 13}]; if {[llength [info proc nonesuch]]} { incr s } }; return $s }
