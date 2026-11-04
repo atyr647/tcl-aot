@@ -3268,10 +3268,11 @@ proc liteProc {P} {
     if {![info exists ::LITEW($gk)]} { return 0 }
     # (recursive: some typed variant of it reaches itself)
     foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
-    # (the entry costs about 750 instructions, and typed code about 320 more a call, for taking its arguments and making its result: an expression-only proc breaks even at 9 operations, a weight of
-    # 1108, m_p2 to m_p9 of bench/entry.sh; the estimates are good to a sixth: the entry is left out unless the body clearly saves more)
+    # (the entry costs about 750 instructions, and typed code about 320 more a call, for taking its arguments and making its result: an expression-only proc breaks even at 9 operations, a weight
+    # of 1108, m_p2 to m_p9 of bench/entry.sh.  The weight is the heaviest path, and a call may take a lighter one (m_ifs: the first arm of each of its three ifs saves 800 of the 1310, and
+    # loses 0.4% with the entry; the weight is also an estimate, good to a sixth): the entry is left out unless the body clearly saves more, 40% above the break-even)
     # (a proc that needs a frame is called by compiled code through the interpreter, which makes the entry cost 900 more still)
-    return [expr {$::LITEW($gk) <= ($P in $::pureProcs ? 1300 : 2200)}]
+    return [expr {$::LITEW($gk) <= ($P in $::pureProcs ? 1500 : 2400)}]
 }
 proc epochChk {P} { return [epochChkX $P 0] }
 proc epochChkG {P} { return [epochChkX $P 1] }
@@ -3415,13 +3416,26 @@ proc variantReport {key P tpcs usedD dsiteVar} {
     global PI VK
     upvar $dsiteVar DS
     set uns {}; set guarded 0; set lw 0
+    array unset wt
     foreach pc $tpcs {
         lassign $DS($key,$pc) kind op detail
-        if {$kind ne "unsupported"} { incr lw [liteWeight $op] }
+        if {$kind ne "unsupported"} { set wt($pc) [liteWeight $op]; incr lw $wt($pc) }
         if {$kind eq "unsupported"} { lappend uns [expr {$detail ne "" ? "$op $detail" : $op}]@$pc } elseif {[dict exists $usedD $pc]} { incr guarded }
     }
     set kinds {}
     dict for {v k} $VK($key,kap) { set vn [lindex $PI($P,vnames) $v]; if {$vn eq ""} { set vn "#$v" }; lappend kinds "$vn=$k" }
+    # a proc without a loop runs one path from its first instruction to its end, and what typed code saves is the weight of that path, not of all the arms of its conditionals (the three
+    # if/elseif/else of tclbench's if-1.1 add up to three times what a call does): the heaviest path, which is what some call saves.  (The mean over the arms was tried and leaves ascii85's
+    # encode4bytes, which returns early for 0 and does 2056 of work otherwise, to the interpreter: ascii85 1.25x to 1.02x; the lightest path would do the same.)
+    if {![llength $PI($P,loopheads)]} {
+        array unset lp
+        foreach pc [lsort -integer -decreasing $PI($P,reach)] {
+            set m 0
+            foreach t $PI($P,succ,$pc) { if {[info exists lp($t)] && $lp($t) > $m} { set m $lp($t) } }
+            set lp($pc) [expr {$m + ([info exists wt($pc)] ? $wt($pc) : 0)}]
+        }
+        if {[info exists lp(0)]} { set lw $lp(0) }
+    }
     set ::LITEW($key) $lw
     return [list [llength $PI($P,reach)] [expr {[llength $tpcs] - [llength $uns]}] $guarded $uns $kinds $VK($key,ret)]
 }

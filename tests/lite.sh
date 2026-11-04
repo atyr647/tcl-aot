@@ -17,13 +17,27 @@ proc lt_cmp {a b} { expr {$a - $b} }
 # an expression of nine operations breaks even with the entry (m_p9 of bench/entry: 1.00 with it, 0.93 to 0.99 for fewer), so the interpreter keeps it; one of fourteen, the size of ascii85's
 # encode4bytes, gains from typed code
 proc lt_nine {v} { return [expr {(((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1) + 1}] }
+# three if/elseif/else chains one after another, as tclbench's if-1.1: a call runs one arm of each, so the weight of a call is a third of the weight of all the arms (counted together the proc
+# would keep the entry and lose by it, conditional 1.06x to 0.97x); the same conditionals with a heavy arm keep it
+proc lt_ifs {v} {
+    if {$v == 1} { set i 0 } elseif {$v == 2} { set i 0 } else { set i 0 }
+    if {$v == 1} { set i 0 } elseif {$v == 2} { set i 0 } else { set i 0 }
+    if {$v == 1} { set i 0 } elseif {$v == 2} { set i 0 } else { set i 0 }
+}
+proc lt_ifheavy {v} {
+    if {$v == 1} {
+        set i [expr {(((((((((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1) + 1) * 5) - 3) ^ 6) | 17) & 1023) + 2}]
+        set j [expr {(((((((((((((($i + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1) + 1) * 5) - 3) ^ 6) | 17) & 1023) + 2}]
+    } else { set i 0; set j 0 }
+    return [list $i $j]
+}
 proc lt_fourteen {v} { return [expr {(((((((((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1) + 1) * 5) - 3) ^ 6) | 17) & 1023) + 2}] }
 TCL
 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/p.c" Liteprocs >"$tmp/tr.log" 2>&1 || { echo "lite: translation failed"; tail -3 "$tmp/tr.log"; exit 1; }
 # the entry of a proc ends with its yres, ens and lite fields
 lite() { local n=${1//_/_5f}; grep -E "^static TbcEntry tbc_e__3a_3a$n " "$tmp/p.c" | sed -E 's/.*, ([01]) \};$/\1/'; }
-for p in lt_tiny lt_str lt_call lt_cmp lt_cb lt_nine; do [ "$(lite $p)" = 1 ] || { echo "lite: FAILED, $p is not left to the interpreter"; exit 1; }; done
-for p in lt_loop lt_rec lt_fourteen; do [ "$(lite $p)" = 0 ] || { echo "lite: FAILED, $p is a loop or a recursion and must get the entry"; exit 1; }; done
+for p in lt_tiny lt_str lt_call lt_cmp lt_cb lt_nine lt_ifs; do [ "$(lite $p)" = 1 ] || { echo "lite: FAILED, $p is not left to the interpreter"; exit 1; }; done
+for p in lt_loop lt_rec lt_fourteen lt_ifheavy; do [ "$(lite $p)" = 0 ] || { echo "lite: FAILED, $p is a loop or a recursion and must get the entry"; exit 1; }; done
 echo "lite: small loop-free procs are left to the interpreter, loops and recursions are not: ok"
 "$CC" -O1 -w -DMODULE=Liteprocs $TBC_INC tools/module-shell.c "$tmp/p.c" $TBC_LIBS -o "$tmp/shell" || { echo "lite: build failed"; exit 1; }
 cat > "$tmp/run.tcl" <<'TCL'
@@ -31,7 +45,7 @@ if {[info exists ::env(COMPILED)]} { load {} Liteprocs }
 source $::env(PROCS)
 set r {}
 foreach x {0 1 5 -3} { lappend r [lt_tiny $x] [lt_call $x] }
-lappend r [lt_str hello] [lt_loop 50] [lt_rec 12] [lt_cb {5 3 9 1}] [lt_nine 100] [lt_fourteen 100] [lt_nine -7] [lt_fourteen 9223372036854775807]
+lappend r [lt_str hello] [lt_loop 50] [lt_rec 12] [lt_cb {5 3 9 1}] [lt_nine 100] [lt_fourteen 100] [lt_nine -7] [lt_fourteen 9223372036854775807] [lt_ifs 1] [lt_ifs 2] [lt_ifs 3] [lt_ifheavy 1] [lt_ifheavy 2]
 puts $r
 puts [catch {lt_tiny} e]:$e
 puts [catch {lt_tiny 1 2} e]:$e

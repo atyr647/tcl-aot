@@ -74,3 +74,9 @@ proc m_p9 {v} { return [expr {((((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2)
 proc m_slen {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [string length $i] }; return $t }
 # the text length of an argument (a boxed value) taken in a loop
 proc m_slen2 {x} { set t 0; for {set i 0} {$i < 100} {incr i} { incr t [string length $x] }; return $t }
+# three if/elseif/else one after another (tclbench's if-1.1 of conditional.bench): a call runs one arm of each
+proc m_ifs {v} {
+    if {$v == 1} { set i 0 } elseif {$v == 2} { set i 0 } else { set i 0 }
+    if {$v == 1} { set i 0 } elseif {$v == 2} { set i 0 } else { set i 0 }
+    if {$v == 1} { set i 0 } elseif {$v == 2} { set i 0 } else { set i 0 }
+}

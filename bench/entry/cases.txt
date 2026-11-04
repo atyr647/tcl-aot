@@ -48,3 +48,5 @@ m_p9 123456
 m_slen 100
 m_slen2 123456
 m_slen2 hello
+m_ifs 1
+m_ifs 3
