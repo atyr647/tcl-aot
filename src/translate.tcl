@@ -3260,20 +3260,13 @@ proc depCheck {P pc nm} {
 proc liteProc {P} {
     global PI REC typedMode
     if {[info exists ::env(TBC_NOLITE)] || !$typedMode} { return 0 }
-    if {$PI($P,hasYield)} { return 0 }
+    if {[llength $PI($P,loopheads)] || $PI($P,hasYield)} { return 0 }
     set gk $P/[string repeat B $PI($P,nargs)]
     if {![info exists ::LITEW($gk)]} { return 0 }
-    # (a loop is allowed when typed code cannot go round it without handing over: litecut)
-    set cut [expr {[llength $PI($P,loopheads)] && [info exists ::LITECUT($gk)] && $::LITECUT($gk)}]
-    if {[llength $PI($P,loopheads)] && !$cut} { return 0 }
     # (recursive: some typed variant of it reaches itself)
     foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
     # (the entry costs about 750 instructions, bench/entry.sh; the estimates are good to a third: the entry is left out unless the body clearly saves more)
     # (a proc that needs a frame is called by compiled code through the interpreter, which makes the entry cost more still)
-    # (typed code of such a loop runs the part before the instruction it hands over at when the proc is entered, and once more when boxed code takes it up again at the loop head; with
-    # one round of the loop, what it saves is about 0.7 of its weight against what the entry and the hand-over cost: the two are equal at a weight of about 950, measured with m_look and
-    # m_hn* of bench/entry/procs.tcl at weights from 150 to 6150.  1100 is the figure of the loops-free rule, above that point, so that a body that keeps the entry always gains from it)
-    if {$cut} { return [expr {$::LITEW($gk) <= 1100}] }
     return [expr {$::LITEW($gk) <= ($P in $::pureProcs ? 1100 : 2000)}]
 }
 proc epochChk {P} { return [epochChkX $P 0] }
@@ -3426,21 +3419,6 @@ proc variantReport {key P tpcs usedD dsiteVar} {
     set kinds {}
     dict for {v k} $VK($key,kap) { set vn [lindex $PI($P,vnames) $v]; if {$vn eq ""} { set vn "#$v" }; lappend kinds "$vn=$k" }
     set ::LITEW($key) $lw
-    # litecut: whether every cycle of the proc passes through an instruction typed code hands over at every time (an edge back, from an instruction that is not one of them to
-    # another that is not, is a loop typed code can go round)
-    set unsPcs {}
-    foreach pc $tpcs { if {[lindex $DS($key,$pc) 0] eq "unsupported"} { lappend unsPcs $pc } }
-    # (a graph without the instructions typed code hands over at is acyclic when its nodes can all be taken off, one with no edge into it from the nodes left, after the other)
-    set rest {}; array unset indeg
-    foreach pc $PI($P,reach) { if {$pc ni $unsPcs} { lappend rest $pc; set indeg($pc) 0 } }
-    foreach pc $rest { foreach t $PI($P,succ,$pc) { if {[info exists indeg($t)]} { incr indeg($t) } } }
-    set todo [lmap pc $rest {expr {$indeg($pc) == 0 ? $pc : [continue]}}]; set taken 0
-    while {[llength $todo]} {
-        set pc [lindex $todo end]; set todo [lrange $todo 0 end-1]; incr taken
-        foreach t $PI($P,succ,$pc) { if {[info exists indeg($t)] && [incr indeg($t) -1] == 0} { lappend todo $t } }
-    }
-    set cut [expr {$taken == [llength $rest]}]
-    set ::LITECUT($key) $cut
     return [list [llength $PI($P,reach)] [expr {[llength $tpcs] - [llength $uns]}] $guarded $uns $kinds $VK($key,ret)]
 }
 # what an instruction that typed code does saves the interpreter's executor, in instructions (measured: 20 and 40 statements of one operation, and the encode4bytes of tclbench's ascii85): an
