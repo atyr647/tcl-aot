@@ -2067,3 +2067,10 @@ proc cr_ydrun {} {
 # integers at the edges of the table of shared small integers (from -256 to 1023) and of the 64-bit range, boxed by typed code
 proc sm_edge {n} { return [list [expr {$n + 0}] [expr {$n - 1}] [expr {$n * 1}]] }
 proc sm_list {n} { set r {}; foreach d {-257 -256 -255 -1 0 1 1022 1023 1024} { lappend r [expr {$n + $d}] }; return $r }
+
+# string length of integers (the digit count of typed code): the boundaries of the digit counts and of the 64-bit range, integers written other than canonically (their text is what is counted),
+# results of arithmetic and doubles
+proc sl_arg {x} { return [string length $x] }
+proc sl_loop {x} { set t 0; for {set i 0} {$i < 5} {incr i} { incr t [string length $x] }; return $t }
+proc sl_calc {n} { return [list [string length [expr {$n + 1}]] [string length [expr {-$n}]] [string length [expr {$n * 10}]] [string length $n]] }
+proc sl_count {n} { set t 0; for {set i -3} {$i < $n} {incr i} { incr t [string length $i] }; return $t }

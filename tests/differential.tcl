@@ -296,6 +296,10 @@ foreach m {none eof} { lappend calls [list cr_reflect $m] }
 lappend calls {cr_ydrun} {cr_shadow} {cr_refl_vars} {cr_vtrace} {cr_ctrace} {cr_modify}
 foreach n {9223372036854775807 -9223372036854775807 -9223372036854775808 255 256 -256 -257 1023 1024 0 -1} { lappend calls [list sm_edge $n] }
 foreach n {0 100 9223372036854774783 -9223372036854775000} { lappend calls [list sm_list $n] }
+# string length of integers
+foreach n {0 1 9 10 11 99 100 101 999 1000 9999 10000 99999 100000 999999999 1000000000 -1 -9 -10 -99 -100 9223372036854775807 -9223372036854775807 -9223372036854775808 9223372036854775808 -9223372036854775809 0x1F 0x7fffffffffffffff 010 007 +5 " 5" 5.0 -0 1e3 1.5 abc {} 12345678901234567890} { lappend calls [list sl_arg $n] [list sl_loop $n] }
+foreach n {0 5 9 99 999999999 -1 -10 4611686018427387904 9223372036854775806 -9223372036854775807 } { lappend calls [list sl_calc $n] }
+foreach n {0 1 5 8 12 105} { lappend calls [list sl_count $n] }
 # list literals made by the compiler
 foreach x [list {} a {a b c} {1 2 3 4 5 6 7 8 9 10} "x\ty" {\{} {a {b c} d} " lead" "trail "] { lappend calls [list ll_eval $x] [list ll_evalq $x] [list ll_cat $x] [list ll_cat2 $x] [list ll_eval2 $x] [list ll_commentlist $x] [list ll_evalbad $x] }
 lappend calls {ll_eval3} {ll_listlit} {ll_eval2} {ll_eval2 1 2 3}

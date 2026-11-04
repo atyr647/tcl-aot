@@ -70,3 +70,7 @@ proc m_p6 {v} { return [expr {(((((($v + 3) * 7) - 5) & 255) | 9) ^ 11)}] }
 proc m_p7 {v} { return [expr {((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2)}] }
 proc m_p8 {v} { return [expr {(((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1)}] }
 proc m_p9 {v} { return [expr {((((((((($v + 3) * 7) - 5) & 255) | 9) ^ 11) << 2) >> 1) + 3)}] }
+# the text length of an integer a typed loop counts with: typed code holds no string for it
+proc m_slen {n} { set t 0; for {set i 0} {$i < $n} {incr i} { incr t [string length $i] }; return $t }
+# the text length of an argument (a boxed value) taken in a loop
+proc m_slen2 {x} { set t 0; for {set i 0} {$i < 100} {incr i} { incr t [string length $x] }; return $t }

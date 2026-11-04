@@ -176,3 +176,16 @@ TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/z.tcl" "$tmp/z.c" Strtest >"$tmp/
 if ! grep -q "tbc_sb_add_obj" "$tmp/z.c" || ! grep -q "tbc_sb_idx" "$tmp/z.c"; then echo "typed: FAILED, append and string index do not use a native string buffer"; exit 1; fi
 if grep -E '^DEADOP (appendScalar|strindex|strlen|streq|add|incrScalar1) .*tz_build' "$tmp/z.log"; then echo "typed: FAILED, the string-building loops hand over"; exit 1; fi
 echo "typed: a string built by append and read by string index is a native buffer, without hand-over in the loops: ok"
+
+# `string length` of an integer is the digit count of its canonical text (tbc_ilen), not an object made of it, its text and a string of that: the loop below took 1130 instructions a round typed
+# against 914 in the interpreter
+cat > "$tmp/l.tcl" <<'TCL'
+proc tl_len {x} {
+    set t 0
+    for {set i 0} {$i < 100} {incr i} { incr t [string length $x] }
+    return $t
+}
+TCL
+TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/l.tcl" "$tmp/l.c" Lentest >"$tmp/l.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/l.log"; exit 1; }
+if ! grep -q "tbc_ilen" "$tmp/l.c"; then echo "typed: FAILED, string length of an integer boxes it and counts the characters of its text"; exit 1; fi
+echo "typed: string length of an integer is its digit count, without an object: ok"

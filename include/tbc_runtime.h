@@ -864,6 +864,14 @@ static int tbc_s_index(Tcl_Obj *s, int64_t i, Tcl_Obj **out) {
  * ASCII characters (1..127: a NUL is two bytes in a Tcl string, anything above 127 more than one character per byte, so neither is held).  A value that is not ASCII is
  * not appended (the append returns 0 and the caller hands over to the boxed code, which has the buffer made a string object first: tbc_sb_obj). */
 TBC_INLINE int tbc_fmt_i64(char *buf, int64_t w);
+/* the length of the text of an integer: its digits, and a sign when it is negative.  An integer in a typed variable always has its canonical text (tbc_arg_int), so
+ * `string length` of it needs no object and no text (unsigned: the negation of -9223372036854775808 must not overflow) */
+TBC_INLINE int64_t tbc_ilen(int64_t w) {
+    uint64_t u = w < 0 ? (uint64_t) 0 - (uint64_t) w : (uint64_t) w;
+    int n = 1;
+    while (u >= 10) { u /= 10; n++; }
+    return n + (w < 0);
+}
 typedef struct { char *p; int n, cap; } tbc_sbuf;
 #define TBC_SB_MAX (1 << 30)
 static int tbc_sb_grow(tbc_sbuf *b, size_t need) {

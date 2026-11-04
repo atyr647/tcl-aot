@@ -1613,6 +1613,9 @@ proc stepT0 {key pc in} {
             set e [lindex $in $top]
             if {[kd $e] eq "Z"} { return [R fall [lreplace $in $top $top I] "si$top = zv[lt $e].n;"] }
             if {[kd $e] in {A N M Q}} { return $dead }
+            # an integer: the digits of its canonical text (boxing it made an object, its text and a string to count the characters of: 260 instructions a round more than the interpreter, which
+            # reads the text of the argument it already has, m_slen2 of bench/entry)
+            if {[kd $e] eq "I"} { return [R fall [lreplace $in $top $top I] "si$top = tbc_ilen(si$top);"] }
             set pre [boxc $P $top $e]
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
             return [R fall [lreplace $in $top $top I] "$pre si$top = Tcl_GetCharLength(s$top); Tcl_DecrRefCount(s$top);"]
@@ -3265,9 +3268,10 @@ proc liteProc {P} {
     if {![info exists ::LITEW($gk)]} { return 0 }
     # (recursive: some typed variant of it reaches itself)
     foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
-    # (the entry costs about 750 instructions, bench/entry.sh; the estimates are good to a third: the entry is left out unless the body clearly saves more)
-    # (a proc that needs a frame is called by compiled code through the interpreter, which makes the entry cost more still)
-    return [expr {$::LITEW($gk) <= ($P in $::pureProcs ? 1100 : 2000)}]
+    # (the entry costs about 750 instructions, and typed code about 320 more a call, for taking its arguments and making its result: an expression-only proc breaks even at 9 operations, a weight of
+    # 1108, m_p2 to m_p9 of bench/entry.sh; the estimates are good to a sixth: the entry is left out unless the body clearly saves more)
+    # (a proc that needs a frame is called by compiled code through the interpreter, which makes the entry cost 900 more still)
+    return [expr {$::LITEW($gk) <= ($P in $::pureProcs ? 1300 : 2200)}]
 }
 proc epochChk {P} { return [epochChkX $P 0] }
 proc epochChkG {P} { return [epochChkX $P 1] }
@@ -3421,15 +3425,23 @@ proc variantReport {key P tpcs usedD dsiteVar} {
     set ::LITEW($key) $lw
     return [list [llength $PI($P,reach)] [expr {[llength $tpcs] - [llength $uns]}] $guarded $uns $kinds $VK($key,ret)]
 }
-# what an instruction that typed code does saves the interpreter's executor, in instructions (measured: 20 and 40 statements of one operation, and the encode4bytes of tclbench's ascii85): an
-# arithmetic operation about 250 (operands taken from their objects, the result made into one and released), a comparison about 150, an `incr` 50, an operation on a string or a list about
-# 100, a push, a store, a jump nothing
+# what an instruction that typed code does saves the interpreter's executor, in instructions, measured one kind at a time (20 and 40 statements of it, instructions per statement, interpreted
+# against compiled, which comes to nothing: `set y $x` is a load and a store, 92; `set y 5` a push and a store, 75; `incr y` 96; `if {$x < 3} {..}` 252, the comparison and the jump 102 of it;
+# `string length $x` 184 more than the load and the store; `lindex $x 0` 78) and in a chain of operations, where the intermediate results are taken over by the next operation (expression-only
+# procs of 2 to 9 operations, m_p2 to m_p9 of bench/entry: 118 an operation with its literal, so 89 and a push of 29).  A statement that makes a new result of a variable costs 100 more than
+# these add up to, which is left out: a weight that is too small leaves a proc to the interpreter that would have gained a little, one that is too large keeps the entry for a proc that loses by it.
 proc liteWeight {op} {
     switch -- $op {
-        add - sub - mult - div - mod - bitand - bitor - bitxor - lshift - rshift - expon - uminus - uplus - bitnot { return 250 }
-        lt - le - gt - ge - eq - neq - not { return 150 }
-        incrScalar1Imm - incrScalar1 { return 50 }
-        strlen - strindex - strrange - strrangeImm - strfind - strrfind - strmatch - strcaseUpper - strcaseLower - strtrim - listIndex - listIndexImm - listLength - strcat { return 100 }
+        add - sub - mult - div - mod - bitand - bitor - bitxor - lshift - rshift - expon - uminus - uplus - bitnot { return 89 }
+        lt - le - gt - ge - eq - neq - not { return 61 }
+        jumpTrue1 - jumpTrue4 - jumpFalse1 - jumpFalse4 { return 40 }
+        jump1 - jump4 { return 20 }
+        push1 - push4 { return 29 }
+        loadScalar1 - loadScalar4 - storeScalar1 - storeScalar4 { return 46 }
+        incrScalar1Imm - incrScalar1 { return 96 }
+        strlen { return 184 }
+        listIndex - listIndexImm { return 78 }
+        strindex - strrange - strrangeImm - strfind - strrfind - strmatch - strcaseUpper - strcaseLower - strtrim - listLength - strcat { return 100 }
     }
     return 0
 }

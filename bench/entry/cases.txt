@@ -45,3 +45,6 @@ m_p6 123456
 m_p7 123456
 m_p8 123456
 m_p9 123456
+m_slen 100
+m_slen2 123456
+m_slen2 hello
