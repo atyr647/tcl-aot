@@ -59,7 +59,7 @@ proc gen_pattern {} {
     return $p
 }
 # ---- the subjects
-set chars {a b c x y 0 1 2 " " - _ . "\n" "\t" A Z , : "\"" "\\" e E + ! ; é €     \U0001F600 ٠}
+set chars {a b c x y 0 1 2 " " - _ . "\n" "\t" A Z , : "\"" "\\" e E + ! ; é €     \U0001F600 ٠ \u00A0 \u2003 \u0416 \u03A9 \u03C9 \u00B2 \u0663 \u2028}
 proc gen_subject {} {
     global chars
     set n [expr {int(rand() * 13)}]
@@ -97,5 +97,60 @@ for {set k 0} {$k < $cases} {incr k} {
         }
     }
 }
+# ---- the whole command: switches, -all, -inline, -start, match variables (tbc_regexp_fast against regexp, results and variables)
+proc gen_subject2 {} {
+    global chars
+    if {[chance 0.6]} {
+        set alpha {a b c 0 1 " " - "\n" a b}
+        set n [expr {int(rand() * 9)}]
+        set s ""
+        for {set i 0} {$i < $n} {incr i} { append s [pick $alpha] }
+        return $s
+    }
+    return [gen_subject]
+}
+proc via {cmd opts pat s nv} {
+    set names [lrange {v1 v2 v3 v4} 0 [expr {$nv - 1}]]
+    foreach n {v1 v2 v3 v4} { catch {unset $n} }
+    set r [catch {$cmd {*}$opts -- $pat $s {*}$names} res]
+    set vars {}
+    foreach n $names { lappend vars [expr {[info exists $n] ? [set $n] : "<unset>"}] }
+    return [list $r $res $vars]
+}
+proc viaTcl {opts pat s nv} {
+    set names [lrange {v1 v2 v3 v4} 0 [expr {$nv - 1}]]
+    foreach n {v1 v2 v3 v4} { catch {unset $n} }
+    set r [catch {regexp {*}$opts -- $pat $s {*}$names} res]
+    set vars {}
+    foreach n $names { lappend vars [expr {[info exists $n] ? [set $n] : "<unset>"}] }
+    return [list $r $res $vars]
+}
+set total2 0; set native2 0; set bad2 0; set kinds {}
+for {set k 0} {$k < $cases / 4} {incr k} {
+    set pat [gen_pattern]
+    for {set j 0} {$j < 4} {incr j} {
+        set s [gen_subject2]
+        set len [string length $s]
+        set opts {}
+        set inline [chance 0.2]
+        if {[chance 0.35]} { lappend opts {-all} }
+        if {$inline} { lappend opts {-inline} }
+        if {[chance 0.4]} { lappend opts {-indices} }
+        if {[chance 0.3]} { lappend opts [list -start [expr {[chance 0.1] ? $len + 1 + int(rand() * 2) : int(rand() * ($len + 1))}]] }
+        set opts [concat {*}[lsort -command {apply {{a b} {expr {rand() < 0.5 ? -1 : 1}}}} $opts]]
+        set nv [expr {$inline ? 0 : int(rand() * 4)}]
+        incr total2
+        set want [viaTcl $opts $pat $s $nv]
+        set got [via tbc::refast $opts $pat $s $nv]
+        if {[lindex $got 1] eq "TBC-PASS"} continue
+        incr native2
+        if {$got ne $want} {
+            incr bad2
+            if {$bad2 <= 25} { puts "MISMATCH(command) [list $pat] subject=[list $s] opts=[list $opts] nv=$nv tcl={$want} native={$got}" }
+        }
+    }
+}
+puts "refuzz commands: $total2 cases, $native2 native, $bad2 mismatches"
+incr bad $bad2
 puts "refuzz seed $seed: $total cases, $native native ($passed passed to Tcl; $matched matched, $empties of them empty), $bad mismatches"
 exit [expr {$bad ? 1 : 0}]

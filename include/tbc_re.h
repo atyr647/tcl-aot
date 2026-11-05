@@ -13,9 +13,9 @@
  * capturing groups, back references, lookahead, non-greedy quantifiers, embedded options, other escapes (\b \m \y \u \x ...), non-ASCII characters in the pattern, collating
  * elements, anchors elsewhere, an empty branch.  A pattern outside it is left to Tcl, and so is any call with another option than -indices, -start, --.
  *
- * Characters: the subject is a sequence of characters (Tcl's, so a character above U+007F is one symbol, OTHER).  An expression whose classes treat all of them alike
- * (a plain bracket expression, `.`, a negation) is matched on any subject; one with a class of Unicode (\d \s \w, [:alpha:] ...) only on a subject of ASCII characters
- * (needascii), since what those classes hold above U+007F is Tcl's table, not ours.
+ * Characters: the subject is a sequence of characters (Tcl's, so a character above U+007F is one symbol).  An expression whose atoms treat all of them alike (a plain bracket
+ * expression, `.`, a negation) sees them all as OTHER.  One with a class of Unicode (\d \s \w, [:alpha:] ...) asks Tcl's matcher about each distinct character of the subject above
+ * U+007F, once (tbc_re_xclass), and gives the characters that its classes treat alike a symbol of their own: what Tcl's tables hold there is never copied or assumed.
  *
  * Not thread safe, like the rest of the hook.  Memory is bounded: an expression of more than TBC_RE_MAXNODES nodes or TBC_RE_MAXDFA states is left to Tcl. */
 #ifndef TBC_RE_H
@@ -28,6 +28,9 @@
 #define TBC_RE_MAXSETS 300
 #define TBC_RE_MAXDFA 300
 #define TBC_RE_MAXREP 64
+#define TBC_RE_NX 8		/* classes of the characters above U+007F that an expression with a class of Unicode keeps apart, at most */
+#define TBC_RE_MAXU 16		/* the classes of Unicode (distinct atoms) in one expression, at most */
+#define TBC_RE_NSYMX (TBC_RE_NSYM + TBC_RE_NX)
 
 typedef struct { uint64_t w[3]; } tbc_reset;
 TBC_INLINE int tbc_re_has(const tbc_reset *s, int c) { return (int) ((s->w[c >> 6] >> (c & 63)) & 1); }
@@ -39,14 +42,20 @@ typedef struct { unsigned char kind; int o1, o2, set; } tbc_renode;	/* 0 one cha
 typedef struct tbc_re {
     int anchor_start;		/* 0 none, 1 \A, 2 ^ */
     int anchor_end;		/* 1: the match must end at the end of the subject */
-    int needascii;		/* subjects of ASCII characters only */
+    int needascii;		/* the expression holds classes of Unicode */
     int nn, nodes_start;
     tbc_renode *nodes;
     int nsets;
     tbc_reset *sets;
     int ncls;
     unsigned char cls[TBC_RE_NSYM];
-    unsigned char rep[TBC_RE_NSYM];	/* a symbol of each class */
+    unsigned char rep[TBC_RE_NSYMX];	/* a symbol of each class */
+    int ncls_ascii, stride;		/* the classes of the ASCII symbols and OTHER; the width of a row of the table (room for the classes of the characters above U+007F) */
+    int nup;				/* the atoms that hold a class of Unicode: what such an atom matches above U+007F is asked of Tcl's matcher, for each character of the subject */
+    Tcl_Obj *upat[TBC_RE_MAXU];	/* (their patterns, owned by the atom table) */
+    unsigned char *suid;		/* of each set: 0, or the atom (1 + index in upat) it came from */
+    int nx; unsigned xsig[TBC_RE_NX];	/* the classes made so far: which of the atoms hold the characters of the class */
+    unsigned uc_ch[256]; unsigned char uc_cls[256];	/* the class of the characters seen last (direct mapped, 0 empty) */
     /* the DFA, made as it is needed */
     int nd, dcap, bad;
     int32_t *next;		/* nd * ncls: -1 not made yet, 0 the dead state, else a state */
@@ -60,12 +69,12 @@ typedef struct tbc_re {
 } tbc_re;
 
 /* ---- the atoms: asked of Tcl's own matcher, once for each character, and kept ---- */
-typedef struct { tbc_reset set; int uniform; } tbc_reatom;
+typedef struct { tbc_reset set; int uniform; Tcl_Obj *pat; } tbc_reatom;
 static Tcl_HashTable tbc_re_atoms;
 static int tbc_re_atoms_init;
 /* the set of the characters (0..127, and OTHER for the characters above that) that one atom matches: 1, or 0 when the atom is not one of one character.  *uniform tells whether the
  * characters above U+007F that were tried agree (then OTHER is what they say); a class of Unicode does not, and is for subjects of ASCII characters only */
-static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform) {
+static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform, Tcl_Obj **patOut) {
     static const int others[] = { 0x80, 0xA0, 0xE9, 0x100, 0x2003, 0x20AC, 0x3042, 0xD83D, 0xFFFF };
     Tcl_Obj *pat; Tcl_RegExp re; int c, first = 1, ov = 0, i, isnew, uni = 1, ok = 1;
     Tcl_HashEntry *h;
@@ -80,7 +89,7 @@ static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *unifor
     if (!isnew) {
         ra = (tbc_reatom *) Tcl_GetHashValue(h);
         if (!ra) return 0;
-        *out = ra->set; *uniform = ra->uniform;
+        *out = ra->set; *uniform = ra->uniform; *patOut = ra->pat;
         return 1;
     }
     Tcl_SetHashValue(h, NULL);
@@ -119,14 +128,13 @@ static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *unifor
         if (Tcl_RegExpExecObj(NULL, re, s, 0, 0, 0) != 0) ok = 0;
         Tcl_DecrRefCount(s);
     }
-    Tcl_DecrRefCount(pat);
-    if (!ok) return 0;
+    if (!ok) { Tcl_DecrRefCount(pat); return 0; }
     if (uni && ov) tbc_re_put(out, TBC_RE_OTHER);
     ra = (tbc_reatom *) malloc(sizeof *ra);
-    if (!ra) return 0;
-    ra->set = *out; ra->uniform = uni;
+    if (!ra) { Tcl_DecrRefCount(pat); return 0; }
+    ra->set = *out; ra->uniform = uni; ra->pat = pat;   /* (the entry keeps the pattern) */
     Tcl_SetHashValue(h, ra);
-    *uniform = uni;
+    *uniform = uni; *patOut = pat;
     return 1;
 }
 
@@ -135,6 +143,8 @@ typedef struct {
     const char *p; int n, i, fail;
     tbc_rean *an; int nan, can;
     tbc_reset *sets; int ns;
+    unsigned char suid[TBC_RE_MAXSETS];
+    Tcl_Obj *upat[TBC_RE_MAXU]; int nup;
     int needascii, nodes;
 } tbc_reparse;
 
@@ -148,18 +158,23 @@ static int tbc_re_node(tbc_reparse *ps, int kind, int a, int b, int mn, int mx) 
     ps->an[ps->nan].kind = kind; ps->an[ps->nan].a = a; ps->an[ps->nan].b = b; ps->an[ps->nan].min = mn; ps->an[ps->nan].max = mx;
     return ps->nan++;
 }
-static int tbc_re_setindex(tbc_reparse *ps, const tbc_reset *s) {
+static int tbc_re_setindex(tbc_reparse *ps, const tbc_reset *s, int uid) {
     int i;
-    for (i = 0; i < ps->ns; i++) if (!memcmp(&ps->sets[i], s, sizeof *s)) return i;
+    for (i = 0; i < ps->ns; i++) if (ps->suid[i] == uid && !memcmp(&ps->sets[i], s, sizeof *s)) return i;
     if (ps->ns >= TBC_RE_MAXSETS) { ps->fail = 1; return 0; }
-    ps->sets[ps->ns] = *s;
+    ps->sets[ps->ns] = *s; ps->suid[ps->ns] = (unsigned char) uid;
     return ps->ns++;
 }
 /* uniclass: the atom is, or holds, a class of Unicode (the caller saw it): the characters above U+007F need not agree, and the pattern is for subjects of ASCII characters only */
 static int tbc_re_atomnode(tbc_reparse *ps, const char *atom, int len, int uniclass) {
-    tbc_reset s; int uniform = 1;
-    if (!tbc_re_atomset(atom, len, &s, &uniform) || (!uniform && !uniclass)) { ps->fail = 1; return 0; }
-    return tbc_re_node(ps, 0, tbc_re_setindex(ps, &s), 0, 0, 0);
+    tbc_reset s; int uniform = 1, uid = 0; Tcl_Obj *pat = NULL;
+    if (!tbc_re_atomset(atom, len, &s, &uniform, &pat) || (!uniform && !uniclass)) { ps->fail = 1; return 0; }
+    if (uniclass || !uniform) {		/* (even when the characters tried agree: what Tcl's tables hold above U+007F is for Tcl to say, character by character) */
+        for (uid = 0; uid < ps->nup; uid++) if (ps->upat[uid] == pat) break;
+        if (uid == ps->nup) { if (ps->nup >= TBC_RE_MAXU) { ps->fail = 1; return 0; } ps->upat[ps->nup++] = pat; }
+        uid++;
+    }
+    return tbc_re_node(ps, 0, tbc_re_setindex(ps, &s, uid), 0, 0, 0);
 }
 static int tbc_re_alt(tbc_reparse *ps, int depth);
 /* one atom followed by its quantifier */
@@ -220,7 +235,7 @@ static int tbc_re_piece(tbc_reparse *ps, int depth) {
     } else {
         tbc_reset s;
         memset(&s, 0, sizeof s); tbc_re_put(&s, c);
-        a = tbc_re_node(ps, 0, tbc_re_setindex(ps, &s), 0, 0, 0);
+        a = tbc_re_node(ps, 0, tbc_re_setindex(ps, &s, 0), 0, 0, 0);
         ps->i = i + 1;
     }
     if (ps->fail) return 0;
@@ -327,7 +342,7 @@ static int tbc_re_emit(tbc_renfa *nf, const tbc_rean *an, int ix, int next) {
 static void tbc_re_free(tbc_re *re) {
     int i;
     if (!re) return;
-    free(re->nodes); free(re->sets); free(re->next); free(re->acc); free(re->dcount); free(re->dtab); free(re->mark); free(re->stackbuf); free(re->tmpbuf);
+    free(re->nodes); free(re->sets); free(re->suid); free(re->next); free(re->acc); free(re->dcount); free(re->dtab); free(re->mark); free(re->stackbuf); free(re->tmpbuf);
     for (i = 0; i < re->nd; i++) free(re->dnodes ? re->dnodes[i] : NULL);
     free(re->dnodes);
     free(re);
@@ -365,14 +380,14 @@ static int tbc_re_dfind(tbc_re *re, const int *set, int n) {
     if (re->nd >= TBC_RE_MAXDFA) return -1;
     if (re->nd == re->dcap) {
         int nc = re->dcap ? re->dcap * 2 : 16, k;
-        int32_t *nx = (int32_t *) realloc(re->next, (size_t) nc * (size_t) re->ncls * sizeof *nx);
+        int32_t *nx = (int32_t *) realloc(re->next, (size_t) nc * (size_t) re->stride * sizeof *nx);
         unsigned char *na = (unsigned char *) realloc(re->acc, (size_t) nc);
         int **nd = (int **) realloc(re->dnodes, (size_t) nc * sizeof *nd);
         int *ncn = (int *) realloc(re->dcount, (size_t) nc * sizeof *ncn);
         if (nx) re->next = nx; if (na) re->acc = na; if (nd) re->dnodes = nd; if (ncn) re->dcount = ncn;
         if (!nx || !na || !nd || !ncn) return -1;
         re->dcap = nc;
-        for (k = re->nd * re->ncls; k < nc * re->ncls; k++) re->next[k] = -1;
+        for (k = re->nd * re->stride; k < nc * re->stride; k++) re->next[k] = -1;
     }
     {
         int d = re->nd, acc = 0, k;
@@ -381,7 +396,7 @@ static int tbc_re_dfind(tbc_re *re, const int *set, int n) {
         memcpy(copy, set, (size_t) n * sizeof(int));
         for (k = 0; k < n; k++) if (re->nodes[set[k]].kind == 2) acc = 1;
         re->dnodes[d] = copy; re->dcount[d] = n; re->acc[d] = (unsigned char) acc;
-        for (k = 0; k < re->ncls; k++) re->next[d * re->ncls + k] = -1;
+        for (k = 0; k < re->stride; k++) re->next[d * re->stride + k] = -1;
         re->nd++;
         re->dtab[pos] = d + 1;
         return d;
@@ -403,7 +418,7 @@ static int tbc_re_step(tbc_re *re, int d, int k) {
         if (r >= 0 && m) r += 1;      /* (state 0 is the dead state: the table's states are shifted by one) */
     }
     if (r < 0) return -1;
-    re->next[d * re->ncls + k] = r;
+    re->next[d * re->stride + k] = r;
     return r;
 }
 
@@ -450,11 +465,15 @@ static tbc_re *tbc_re_compile(const char *pat, int len) {
     if (nf.fail) { free(nf.nodes); free(ps.an); free(ps.sets); return NULL; }
     re = (tbc_re *) calloc(1, sizeof *re);
     if (!re) { free(nf.nodes); free(ps.an); free(ps.sets); return NULL; }
-    re->anchor_start = anchor_start; re->anchor_end = anchor_end; re->needascii = ps.needascii;
+    re->anchor_start = anchor_start; re->anchor_end = anchor_end; re->needascii = ps.nup > 0;
+    re->nup = ps.nup; memcpy(re->upat, ps.upat, sizeof re->upat);
+    re->suid = (unsigned char *) malloc((size_t) (ps.ns ? ps.ns : 1)); if (!re->suid) { free(nf.nodes); free(ps.an); free(ps.sets); free(re); return NULL; }
+    memcpy(re->suid, ps.suid, (size_t) ps.ns);
     re->nodes = nf.nodes; re->nn = nf.nn; re->nodes_start = startnode;
     re->sets = ps.sets; re->nsets = ps.ns;
     free(ps.an);
     tbc_re_classes(re);
+    re->ncls_ascii = re->ncls; re->stride = re->ncls + (re->nup ? TBC_RE_NX : 0);
     re->mark = (unsigned *) calloc((size_t) re->nn, sizeof(unsigned));
     re->stackbuf = (int *) malloc((size_t) re->nn * sizeof(int) + 8);
     re->tmpbuf = (int *) malloc(2 * (size_t) re->nn * sizeof(int) + 8);
@@ -471,11 +490,43 @@ static tbc_re *tbc_re_compile(const char *pat, int len) {
     return re;
 }
 
+/* the class (column of the table) of a character above U+007F, for an expression with classes of Unicode: Tcl's matcher says, for each of those atoms, whether the character is one of
+ * its characters (once for each distinct character, then kept in a small direct-mapped table); the characters that the atoms treat alike are one class, a new symbol above OTHER whose
+ * place in each set is made here.  -1 when there are more classes than the table has room for (the call is left to Tcl) */
+static int tbc_re_xclass(tbc_re *re, unsigned c) {
+    unsigned slot = c & 255, sig = 0; int i, j, k;
+    if (re->uc_ch[slot] == c) return re->uc_cls[slot];
+    for (i = 0; i < re->nup; i++) {
+        Tcl_UniChar u = (Tcl_UniChar) c;
+        Tcl_Obj *o = Tcl_NewUnicodeObj(&u, 1);
+        Tcl_RegExp rx = Tcl_GetRegExpFromObj(NULL, re->upat[i], TCL_REG_ADVANCED);
+        int m;
+        Tcl_IncrRefCount(o);
+        m = rx ? Tcl_RegExpExecObj(NULL, rx, o, 0, 0, 0) : -1;
+        Tcl_DecrRefCount(o);
+        if (m < 0) return -1;
+        if (m == 1) sig |= 1u << i;
+    }
+    for (j = 0; j < re->nx; j++) if (re->xsig[j] == sig) break;
+    if (j == re->nx) {
+        int sym = TBC_RE_NSYM + j;
+        if (re->nx >= TBC_RE_NX) return -1;
+        for (k = 0; k < re->nsets; k++) {
+            int in = re->suid[k] ? (int) ((sig >> (re->suid[k] - 1)) & 1) : tbc_re_has(&re->sets[k], TBC_RE_OTHER);
+            if (in) tbc_re_put(&re->sets[k], sym);
+        }
+        re->xsig[j] = sig; re->rep[re->ncls_ascii + j] = (unsigned char) sym; re->nx++;
+    }
+    k = re->ncls_ascii + j;
+    re->uc_ch[slot] = c; re->uc_cls[slot] = (unsigned char) k;
+    return k;
+}
+
 /* ---- matching: the leftmost longest match at or after `from`.  1 and [*ms, *me), 0 no match, -1 gave up (state limit or memory; the caller asks Tcl) ---- */
 #define TBC_RE_EXEC(NAME, CHAR) \
 static int NAME(tbc_re *re, const CHAR *s, int n, int from, int caretok, int *ms, int *me) { \
     int st, p; \
-    int ncls = re->ncls; \
+    int stride = re->stride; \
     if (re->bad) return -1; \
     for (st = from; st <= n; st++) { \
         int d, last = -1; \
@@ -485,8 +536,10 @@ static int NAME(tbc_re *re, const CHAR *s, int n, int from, int caretok, int *ms
         if (re->acc[d] && (!re->anchor_end || st == n)) last = st; \
         for (p = st; p < n; p++) { \
             unsigned c = (unsigned) s[p]; \
-            int k = re->cls[c < 128 ? c : TBC_RE_OTHER]; \
-            int v = re->next[d * ncls + k]; \
+            int k = c < 128 ? re->cls[c] : re->nup ? tbc_re_xclass(re, c) : re->cls[TBC_RE_OTHER]; \
+            int v; \
+            if (TBC_UNLIKELY(k < 0)) return -1; \
+            v = re->next[d * stride + k]; \
             if (v < 0) { v = tbc_re_step(re, d, k); if (v < 0) { re->bad = 1; return -1; } } \
             if (v == 0) break; \
             d = v - 1; \
@@ -526,7 +579,6 @@ static int tbc_re_subject(const tbc_re *re, Tcl_Obj *subj, tbc_resubj *sj) {
     sj->len = 0; sj->s16 = NULL;
     sj->s8 = tbc_ascii(subj, &sj->len);
     if (!sj->s8) {
-        if (re->needascii) return 0;
         sj->s16 = Tcl_GetUnicodeFromObj(subj, &sj->len);
         if (!sj->s16 && sj->len) return 0;
     }
@@ -571,7 +623,7 @@ static int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj 
         else return TBC_RE_PASS;
     }
     rest = objc - i;
-    if (rest < 2 || rest > 3 || (doinline && rest != 2)) return TBC_RE_PASS;
+    if (rest < 2 || (doinline && rest != 2)) return TBC_RE_PASS;
     pat = Tcl_GetStringFromObj(objv[i], &plen);
     re = tbc_re_get(pat, plen);
     if (!re || !tbc_re_subject(re, objv[i + 1], &sj)) return TBC_RE_PASS;
@@ -601,8 +653,15 @@ static int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj 
             else v = Tcl_NewObj();
             if (doinline) {
                 if (Tcl_ListObjAppendElement(interp, resultPtr, v) != TCL_OK) { Tcl_DecrRefCount(v); Tcl_DecrRefCount(resultPtr); return TCL_ERROR; }
-            } else if (rest == 3) {
+            } else if (rest >= 3) {
+                int q;      /* (the first variable gets the match, the others the groups that this expression does not have: no range, or an empty string) */
                 if (Tcl_ObjSetVar2(interp, objv[i + 2], NULL, v, TCL_LEAVE_ERR_MSG) == NULL) return TCL_ERROR;
+                for (q = 3; q < rest; q++) {
+                    Tcl_Obj *g;
+                    if (indices) { Tcl_Obj *none[2]; none[0] = Tcl_NewIntObj(-1); none[1] = Tcl_NewIntObj(-1); g = Tcl_NewListObj(2, none); }
+                    else g = Tcl_NewObj();
+                    if (Tcl_ObjSetVar2(interp, objv[i + q], NULL, g, TCL_LEAVE_ERR_MSG) == NULL) return TCL_ERROR;
+                }
             } else Tcl_DecrRefCount(v);
         }
         if (all == 0) break;
@@ -617,6 +676,13 @@ static int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj 
     if (doinline) Tcl_SetObjResult(interp, resultPtr);
     else Tcl_SetObjResult(interp, Tcl_NewIntObj(all ? all - 1 : 1));
     return TCL_OK;
+}
+/* tbc::refast ?switches? exp string ?matchVar ...? -- tbc_regexp_fast itself, for the tests: what `regexp` gives (with the variables set in the caller's frame), or "TBC-PASS" when the
+ * matcher leaves the call to Tcl (nothing has been set then) */
+static int tbc_refast_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+    int rc = tbc_regexp_fast(cd, interp, objc, objv);
+    if (rc == TBC_RE_PASS) { Tcl_SetObjResult(interp, Tcl_NewStringObj("TBC-PASS", -1)); return TCL_OK; }
+    return rc;
 }
 /* tbc::re pattern string ?start? -- what the native matcher says: "pass", 0, or {1 first last} (for the tests, which compare it with `regexp -indices`) */
 static int tbc_re_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {

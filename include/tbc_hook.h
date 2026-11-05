@@ -2544,6 +2544,7 @@ static void tbc_install(Tcl_Interp *interp) {
     done = 1;
     Tcl_CreateObjCommand(interp, "::tbc::invalidate", tbc_inval_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::re", tbc_re_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::tbc::refast", tbc_refast_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::fingerprint", tbc_fp_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::attached", tbc_attached_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::report", tbc_report_cmd, NULL, NULL);

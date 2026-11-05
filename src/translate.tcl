@@ -3266,6 +3266,9 @@ proc liteProc {P} {
     if {[llength $PI($P,loopheads)] || $PI($P,hasYield)} { return 0 }
     set gk $P/[string repeat B $PI($P,nargs)]
     if {![info exists ::LITEW($gk)]} { return 0 }
+    # (a call of regexp: the native matcher (include/tbc_re.h) does the matching in compiled code only, and a match costs the interpreter's regexec some thousands of instructions to
+    # millions (the json tokenizer's one `regexp -all -inline` of a document is 1.5M), far more than the entry costs)
+    foreach pc $PI($P,reach) { if {[info exists PI($P,cmdAt,$pc)] && [regexp {^(?:::)?regexp$} $PI($P,cmdAt,$pc)]} { return 0 } }
     # (recursive: some typed variant of it reaches itself)
     foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
     # (the entry costs about 750 instructions, and typed code about 320 more a call, for taking its arguments and making its result: an expression-only proc breaks even at 9 operations, a weight
