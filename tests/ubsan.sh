@@ -40,6 +40,15 @@ for mode in plain forced; do
     fi
   done
   unset TBC_EAGER
+  # the native matcher (include/tbc_re.h) too: its tables, class sets and bit operations run under the sanitizer on the fuzz of tests/refuzz.tcl
+  out=$("$tmp/shell_$mode" tests/refuzz.tcl 5 1500 2>&1)
+  if [ $? -eq 0 ] && ! echo "$out" | grep -q -E 'runtime error|MISMATCH'; then
+    echo "ubsan: $mode, native matcher: $(echo "$out" | grep -E '^refuzz seed' | head -1)"
+  else
+    echo "$out" | grep -E -A6 'runtime error|MISMATCH' | head -30
+    echo "ubsan: FAILED ($mode, native matcher)"
+    fail=1
+  fi
 done
 [ $fail = 0 ] || exit 1
 echo "ubsan: the test module built with -fsanitize=undefined runs the differential test, plain and with forced hand-over, without a report: ok"

@@ -1408,6 +1408,7 @@ static int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_O
     if (c && !TBC_UNLIKELY((c->flags & CMD_IS_DELETED) || c->cmdEpoch != pin->epoch)) {
         Tcl_ResetResult(interp);
         rc = pin->fast ? pin->fast(c->objClientData, interp, n + 1, ov) : TBC_RE_PASS;
+        if (pin->fast) { if (rc == TBC_RE_PASS) tbc_re_npass++; else tbc_re_nnative++; }
         if (rc == TBC_RE_PASS) rc = c->objProc(c->objClientData, interp, n + 1, ov);
     } else {
         rc = Tcl_EvalObjv(interp, n + 1, ov, TCL_EVAL_NOERR);
@@ -2545,6 +2546,7 @@ static void tbc_install(Tcl_Interp *interp) {
     Tcl_CreateObjCommand(interp, "::tbc::invalidate", tbc_inval_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::re", tbc_re_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::refast", tbc_refast_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::tbc::restats", tbc_restats_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::fingerprint", tbc_fp_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::attached", tbc_attached_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::report", tbc_report_cmd, NULL, NULL);

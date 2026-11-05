@@ -205,6 +205,16 @@ foreach {p body after} {
     check "yield, $p, string replaced by {$body} (restored after $after): the result" $got $want
     check "yield, $p, string replaced by {$body} (restored after $after): ran compiled in the coroutine" [list [expr {[dict get $r8 compiled_calls] - [dict get $r7 compiled_calls] >= 1}] [expr {[dict get $r8 coroutine_calls] - [dict get $r7 coroutine_calls]}]] {1 0}
 }
+# the native matcher answers the regexp calls of compiled code (and only compiled code): the counters of tbc::restats
+foreach p {rn_tokens rn_split} { catch {$p {}} }
+set st0 [tbc::restats]
+rn_tokens {foo = bar(1.5, "x");}
+rn_split "a b\tc"
+rn_forms {a+} abab
+rn_forms {(a)(b)} abab
+set st1 [tbc::restats]
+check "native regexp: compiled calls of patterns in the subset are answered by the matcher" [expr {[lindex $st1 0] - [lindex $st0 0] > 20}] 1
+check "native regexp: patterns outside the subset (a group) go to Tcl" [expr {[lindex $st1 1] - [lindex $st0 1] >= 6}] 1
 interp delete $yref
 puts [expr {$fails ? "$fails FAILED" : "all report checks passed"}]
 exit [expr {$fails ? 1 : 0}]

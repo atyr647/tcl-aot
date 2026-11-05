@@ -2082,3 +2082,52 @@ proc cr_yd5 {} { set s 0; for {set i 0} {$i < 4} {incr i} { yield $i; incr s [st
 proc cr_yd6 {} { set r {}; for {set i 0} {$i < 3} {incr i} { yield $i; lappend r [catch {string length abc$i} v] $v }; return $r }
 proc cr_yd7 {} { yield 1; set a [string length abc]; yield $a; return [string length abcdef] }
 proc cr_yd8 {} { set n 0; for {set i 0} {$i < 5} {incr i} { incr n [string length [yield $i]] }; return $n }
+
+# the native matcher of include/tbc_re.h: every form of the command it takes, results and variables, patterns of its subset and outside it, subjects of ASCII and other characters
+proc rn_tv {} { regexp {b+} abbc ::rn_v }
+proc rn_ro {} { set x 1; trace add variable x write {error nope}; set r [catch {regexp b+ abb x} m]; list $r $m }
+proc rn_forms {p s} {
+    set r {}
+    foreach v {m a b c} { catch {unset $v} }
+    lappend r [catch {regexp $p $s} x] $x
+    lappend r [catch {regexp -indices $p $s m} x] $x [expr {[info exists m] ? $m : "-"}]
+    lappend r [catch {regexp -all $p $s} x] $x
+    lappend r [catch {regexp -all -inline $p $s} x] $x
+    lappend r [catch {regexp -inline $p $s} x] $x
+    lappend r [catch {regexp -all -indices -inline $p $s} x] $x
+    lappend r [catch {regexp -start 2 $p $s m a b} x] $x [expr {[info exists m] ? $m : "-"}] [expr {[info exists a] ? $a : "-"}] [expr {[info exists b] ? $b : "-"}]
+    lappend r [catch {regexp -all -start 1 -indices $p $s m a c} x] $x [expr {[info exists m] ? $m : "-"}] [expr {[info exists a] ? $a : "-"}] [expr {[info exists c] ? $c : "-"}]
+    lappend r [catch {regexp -start -3 -- $p $s m} x] $x
+    lappend r [catch {regexp -start 99 -- $p $s m} x] $x
+    lappend r [catch {regexp -start x -- $p $s m} x] $x
+    lappend r [catch {regexp -inline $p $s m} x] $x
+    return $r
+}
+proc rn_vars {p s} { set m keep; set a keep2; set r [regexp $p $s m a]; list $r $m $a }
+proc rn_tokens {text} {
+    set out {}; set pos 0; set n [string length $text]
+    while {$pos < $n} {
+        if {[regexp -indices -start $pos {[ \t\n]+} $text w] && [lindex $w 0] == $pos} { set pos [expr {[lindex $w 1] + 1}] }
+        if {$pos >= $n} break
+        if {![regexp -indices -start $pos {[A-Za-z_][A-Za-z_0-9]*|[0-9]+(?:\.[0-9]*)?|"(?:[^"\\]|\\.)*"|[-+*/(){};,=<>!&|]+} $text m]} break
+        if {[lindex $m 0] != $pos} break
+        lappend out [string range $text {*}$m]
+        set pos [expr {[lindex $m 1] + 1}]
+    }
+    return [list $out $pos]
+}
+proc rn_split {text} {
+    set out {}; set pos 0; set n [string length $text]
+    while {$pos < $n} {
+        if {[regexp -indices -start $pos {[ \t\n]+} $text m]} {
+            lappend out [string range $text $pos [expr {[lindex $m 0] - 1}]]
+            set pos [expr {[lindex $m 1] + 1}]
+        } else { lappend out [string range $text $pos end]; break }
+    }
+    return $out
+}
+proc rn_class {s} { list [regexp {^\d+$} $s] [regexp {\s} $s] [regexp -all {\w+} $s] [regexp -inline -all {[[:alpha:]]+} $s] [regexp -inline {[[:upper:]]+} $s] [regexp -inline {\S+} $s] [regexp -all -inline {[^\w]} $s] [regexp -inline -all {[[:digit:]]*} $s] }
+proc rn_all {s} { set n 0; set i 0; while {$i < 4} { incr n [regexp -all {a*} $s]; incr i }; return $n }
+proc rn_dyn {p s} { regexp -inline -all -indices -- $p $s }
+namespace eval rnns { proc go {s} { regexp -inline -all {b+} $s } }
+proc rn_ns {s} { rnns::go $s }

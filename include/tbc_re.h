@@ -70,8 +70,8 @@ typedef struct tbc_re {
 
 /* ---- the atoms: asked of Tcl's own matcher, once for each character, and kept ---- */
 typedef struct { tbc_reset set; int uniform; Tcl_Obj *pat; } tbc_reatom;
-static Tcl_HashTable tbc_re_atoms;
-static int tbc_re_atoms_init;
+TBC_SHARED Tcl_HashTable tbc_re_atoms;
+TBC_SHARED int tbc_re_atoms_init;
 /* the set of the characters (0..127, and OTHER for the characters above that) that one atom matches: 1, or 0 when the atom is not one of one character.  *uniform tells whether the
  * characters above U+007F that were tried agree (then OTHER is what they say); a class of Unicode does not, and is for subjects of ASCII characters only */
 static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform, Tcl_Obj **patOut) {
@@ -553,8 +553,8 @@ TBC_RE_EXEC(tbc_re_exec8, unsigned char)
 TBC_RE_EXEC(tbc_re_exec16, Tcl_UniChar)
 
 /* ---- the expressions that were made, by pattern text; a pattern outside the subset is remembered too (a NULL) ---- */
-static Tcl_HashTable tbc_re_cache;
-static int tbc_re_cache_init;
+TBC_SHARED Tcl_HashTable tbc_re_cache;
+TBC_SHARED int tbc_re_cache_init;
 static tbc_re *tbc_re_get(const char *pat, int len) {
     Tcl_HashEntry *h; int isnew; char *key; tbc_re *re;
     if (!tbc_re_cache_init) { Tcl_InitHashTable(&tbc_re_cache, TCL_STRING_KEYS); tbc_re_cache_init = 1; }
@@ -677,6 +677,8 @@ static int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj 
     else Tcl_SetObjResult(interp, Tcl_NewIntObj(all ? all - 1 : 1));
     return TCL_OK;
 }
+/* tbc::restats -- the calls of regexp made by compiled code: {answered by the native matcher, left to Tcl}; the tests use it to see that the matcher was used */
+static int tbc_restats_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 /* tbc::refast ?switches? exp string ?matchVar ...? -- tbc_regexp_fast itself, for the tests: what `regexp` gives (with the variables set in the caller's frame), or "TBC-PASS" when the
  * matcher leaves the call to Tcl (nothing has been set then) */
 static int tbc_refast_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
@@ -698,6 +700,7 @@ static int tbc_re_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *cons
 /* A call of `regexp` from compiled code, as Tcl_EvalObjv would make it: the command is looked up by the function the dispatch uses (Tcl_GetCommandFromObj: the namespace rules, cached in the
  * literal), and if it is Tcl's own `regexp`, with nothing the dispatch would act on (a trace on the command or the interpreter, a limit, a cancel, an async handler, the nesting
  * depth), the native matcher answers, and Tcl's own procedure for what it does not take; the command is counted as the dispatch counts it.  Anything else is the dispatch itself. */
+TBC_SHARED unsigned long tbc_re_nnative, tbc_re_npass;   /* the calls of regexp by compiled code that the matcher answered, and those it left to Tcl (tbc::restats) */
 static int tbc_evre(Tcl_Interp *interp, int objc, Tcl_Obj **ov, int flags) {
     Interp *iPtr = (Interp *) interp;
     Command *c = (Command *) Tcl_GetCommandFromObj(interp, ov[0]);
@@ -708,9 +711,17 @@ static int tbc_evre(Tcl_Interp *interp, int objc, Tcl_Obj **ov, int flags) {
         Tcl_ResetResult(interp);
         iPtr->cmdCount++;
         rc = tbc_regexp_fast(NULL, interp, objc, ov);
-        if (rc == TBC_RE_PASS) rc = Tcl_RegexpObjCmd(NULL, interp, objc, ov);
+        if (rc == TBC_RE_PASS) { tbc_re_npass++; rc = Tcl_RegexpObjCmd(NULL, interp, objc, ov); } else tbc_re_nnative++;
         return rc;
     }
     return Tcl_EvalObjv(interp, objc, ov, flags);
 }
+static int tbc_restats_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+    Tcl_Obj *two[2];
+    (void) cd; (void) objc; (void) objv;
+    two[0] = Tcl_NewWideIntObj((Tcl_WideInt) tbc_re_nnative); two[1] = Tcl_NewWideIntObj((Tcl_WideInt) tbc_re_npass);
+    Tcl_SetObjResult(interp, Tcl_NewListObj(2, two));
+    return TCL_OK;
+}
+
 #endif

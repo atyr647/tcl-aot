@@ -337,6 +337,23 @@ foreach s $smv { lappend calls [list sm_loop [list $s $s]] }
 # regexp as an instruction
 foreach p {a b+ {^a} {[0-9]} {(} {a{2}} {\d} {*a} {} {.} {\u00e9}} { foreach s {abc {} 12345 ABC "\u00e9a" {a b} aabbcc 1.5} { lappend calls [list rx_test $p $s] } }
 foreach l {{} {a b} {abc Bcd {} bbb} {a A b B}} { lappend calls [list rx_loop $l] }
+# the native matcher (include/tbc_re.h): every form of the command, patterns in its subset and outside it, subjects of ASCII and other characters
+set rn_pats {{a+} {[ab]+} {^a} {b$} {\Aab} {a|b} {(?:ab)+c?} {\d+} {\s*} {\w+} {[[:alpha:]]+} {[^\n]*} {.} {x*} {a{2}} {[a-c]{1,3}} {(a)(b)} {(} {a*?} {\y} {é} {é} {(?i)a} {[[:digit:]]+} {\D+} {\S+} {\W} {^\s*$} {[\d.]+} {a|} {(?:a|b)*$}}
+set rn_subs [list {} a ab aab abab "aabbcc 12" "ab\nab" "éaé" "x٠١y" "a b c" "ЖΩz 9" 12345 "  a  b " "\U0001F600a" "AbC dE"]
+foreach p $rn_pats { foreach s $rn_subs { lappend calls [list rn_forms $p $s] [list rn_vars $p $s] [list rn_dyn $p $s] } }
+foreach s $rn_subs { lappend calls [list rn_class $s] [list rn_all $s] [list rn_ns $s] }
+foreach t {{} {x = 1;} {if (a < 10) { b = "q\"x"; }} "a\tb\nc d" {  } "é = 3" {foo(1.5, bar)}} { lappend calls [list rn_tokens $t] [list rn_split $t] }
+# replaced, traced, limited: the call must go the way of any other command
+foreach w {enter leave enterstep leavestep} { lappend calls "set ::trj {}; trace add execution regexp $w {lappend ::trj}; set r \[rn_forms {a+} abab\]; trace remove execution regexp $w {lappend ::trj}; list \$r \[llength \$::trj\]" }
+lappend calls {set ::trj {}; trace add execution ::regexp enter {lappend ::trj}; set r [rn_tokens {a = 1;}]; trace remove execution ::regexp enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {rename regexp rn_orig; proc regexp {args} { uplevel 1 {set m REPL}; return REPL }; set a [list [rn_forms a abc] [rn_vars a abc] [rn_ns abb]]; rename regexp {}; rename rn_orig regexp; set a}
+lappend calls {rn_forms a+ aab} {rn_vars a+ aab}
+lappend calls {namespace eval rnns { proc regexp {args} { return NSHADOW } }; set a [list [rn_ns abb] [rn_forms b abb]]; namespace eval rnns { rename regexp {} }; set b [rn_ns abb]; list $a $b}
+lappend calls {rn_ns abb}
+lappend calls {rename regexp rn_orig2; interp alias {} regexp {} rn_orig2 -all; set a [list [rn_forms a+ aab]]; interp alias {} regexp {}; rename rn_orig2 regexp; set a}
+lappend calls {rn_forms a+ aab}
+lappend calls {interp limit {} command -value 100000000; set r [list [rn_forms {a+} aab] [rn_all abab]]; interp limit {} command -value {}; set r}
+lappend calls {set ::rn_t {}; trace add variable ::rn_v write {lappend ::rn_t}; rn_tv; trace remove variable ::rn_v write {lappend ::rn_t}; list $::rn_v $::rn_t} {rn_ro}
 # numbers that are integers or doubles at run time
 set wfl [list {} {1 2 3} {1.5 2.5} {1 2.5 3} {0.1 0.2 0.3} {7.90 8} {0x10 1.5} {1e3 2} abc {1 abc 2} {9223372036854775807 1} {9223372036854775807 1.0} {-5 5} {inf 1} {nan 1} {" 5" 2} {100000000000000000000 1} {0 0.0} {5} {5.0} {-0.0 1}]
 foreach l $wfl { lappend calls [list wf_sum $l] [list wf_mean $l] [list wf_pass $l] [list wf_cond $l] [list wf_neg $l] }

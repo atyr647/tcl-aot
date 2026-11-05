@@ -75,6 +75,10 @@ echo "== fuzz"
 for seed in 1 2; do fuzz/run.sh typed $seed || fail "fuzz typed $seed"; done
 for seed in 1 2; do fuzz/run.sh boxed $seed || fail "fuzz boxed $seed"; done
 TBC_FORCE_RATE=13 TBC_FORCE_SEED=1 fuzz/run.sh typed 3 || fail "fuzz typed 3 with forced hand-over"
+# the native matcher against Tcl's: random patterns of its subset (and some outside it), random subjects, and the whole command with its switches and variables
+for seed in 1 2 3; do
+  out=$("$tmp/suite" tests/refuzz.tcl $seed 8000 2>&1) && echo "refuzz seed $seed: $(echo "$out" | grep -E '^refuzz seed' | head -1)" || { echo "$out" | grep -E 'MISMATCH|refuzz' | head -10; fail "refuzz seed $seed"; }
+done
 
 if command -v valgrind >/dev/null; then
   echo "== valgrind (small calls only)"
@@ -82,6 +86,11 @@ if command -v valgrind >/dev/null; then
     echo "valgrind: $(grep compared "$tmp/valgrind.out")"
   else
     tail -20 "$tmp/valgrind.out"; fail "valgrind"
+  fi
+  if valgrind -q --error-exitcode=9 "$tmp/suite" tests/refuzz.tcl 4 150 >"$tmp/valgrind_re.out" 2>&1; then
+    echo "valgrind, native matcher: $(grep -E '^refuzz seed' "$tmp/valgrind_re.out")"
+  else
+    tail -20 "$tmp/valgrind_re.out"; fail "valgrind, native matcher"
   fi
 fi
 exit $status
