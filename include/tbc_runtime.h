@@ -770,6 +770,7 @@ TBC_INLINE const char *tbc_ascii(Tcl_Obj *o, int *len) {
     if (o->bytes) { s = o->bytes; *len = o->length; } else s = Tcl_GetStringFromObj(o, len);
     return tbc_numchars(o) == *len ? s : NULL;
 }
+#include "tbc_re.h"
 static int tbc_s_first(Tcl_Obj *needle, Tcl_Obj *hay, int64_t *out) {
     int nl, hl;
     const char *n = tbc_ascii(needle, &nl), *h = n ? tbc_ascii(hay, &hl) : NULL;
@@ -963,7 +964,13 @@ static int tbc_s_match(Tcl_Obj *str, Tcl_Obj *pat, int nocase) {
 }
 /* INST_REGEXP as the executor does it: the compiled expression of the pattern (cached in the pattern object), then one match; 0 on success (the match is 0 or 1) */
 static int tbc_s_regexp(Tcl_Interp *interp, Tcl_Obj *str, Tcl_Obj *pat, int cflags, int *match) {
-    Tcl_RegExp re = Tcl_GetRegExpFromObj(interp, pat, cflags);
+    Tcl_RegExp re;
+    if (cflags == TCL_REG_ADVANCED) {
+        /* (the native matcher takes it when the pattern is in its subset: the same answer, without the construction of the states of Tcl's matcher at every match) */
+        int ms, me, off, r = tbc_re_search(pat, str, 0, NULL, &ms, &me, &off);
+        if (r != TBC_RE_PASS) { *match = r; return 0; }
+    }
+    re = Tcl_GetRegExpFromObj(interp, pat, cflags);
     if (!re) return 1;
     *match = Tcl_RegExpExecObj(interp, re, str, 0, 0, 0);
     return *match < 0;

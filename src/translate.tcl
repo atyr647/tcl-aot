@@ -3041,7 +3041,7 @@ proc varWriteCall {key P pc in d n q nm0} {
         append flush " if (l$vi && l$vi != loc_\[$vi\].value.objPtr) tbc_flushr(interp, loc_, $vi, l$vi);"
         append reload " \{ Tcl_Obj *o_ = loc_\[$vi\].value.objPtr; if (o_ != l$vi) \{ if (o_) Tcl_IncrRefCount(o_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = o_; \} \}"
     }
-    set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc);$flush r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp);$reload \}"
+    set c "$guard$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc);$flush r_ = [expr {$cmd eq "regexp" ? "tbc_evre" : "Tcl_EvalObjv"}](interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = r_; goto [fl $key $st]; \}$rel s$q = tbc_takeres(interp);$reload \}"
     set stores {}
     foreach vi [lsort -integer -unique $vis] { lappend stores [list $vi B] }
     return [R fall [list {*}$below B] $c stores $stores]
@@ -3680,7 +3680,9 @@ proc genG {key pc d} {
         invokeStk1 - invokeStk4 {
             set n [lindex $a 0]; set slots {}; set rel ""
             for {set k 0} {$k < $n} {incr k} { lappend slots s[expr {$d-$n+$k}]; append rel " Tcl_DecrRefCount(s[expr {$d-$n+$k}]);" }
-            return "\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); rcg_ = r_; if (r_ != TCL_OK) \{ goto [xLabel $P $pc $d]; \}$rel s[expr {$d-$n}] = tbc_takeres(interp); \}"
+            # (`regexp` is called through the guarded call of the native matcher, tbc_evre)
+            set evf [expr {[info exists PI($P,cmdAt,$pc)] && [regexp {^(?:::)?regexp$} $PI($P,cmdAt,$pc)] ? "tbc_evre" : "Tcl_EvalObjv"}]
+            return "\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = ${evf}(interp, $n, ov_, TBC_EV); rcg_ = r_; if (r_ != TCL_OK) \{ goto [xLabel $P $pc $d]; \}$rel s[expr {$d-$n}] = tbc_takeres(interp); \}"
         }
         strcat {
             set n [lindex $a 0]; set slots {}; set rel ""

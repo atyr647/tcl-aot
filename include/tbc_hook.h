@@ -1388,13 +1388,14 @@ static int tbc_tebc(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, Tcl_Obj 
  * A call site pins the built-in the first time it runs (the global command of that name, its C procedure) and calls the procedure itself while the command is
  * still that one: not deleted, not renamed or imported over (its epoch), not a Tcl proc, not an NR command.  Anything else, and every error, is the dispatch through
  * Tcl_EvalObjv by name, as before. */
-typedef struct { Command *c; int epoch; int state; } TbcPin;
+typedef struct { Command *c; int epoch; int state; Tcl_ObjCmdProc *fast; } TbcPin;
 static void tbc_pin_resolve(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm) {
     Command *c = (Command *) Tcl_FindCommand(interp, Tcl_GetString(nm), NULL, TCL_GLOBAL_ONLY);
     pin->state = 1;
     if (!c || c->nreProc || !c->objProc || TBC_IS_PROC_OBJPROC(c->objProc)) return;
     c->refCount++;						/* (kept alive, as Tcl does for the commands it caches) */
     pin->c = c; pin->epoch = c->cmdEpoch;
+    if (c->objProc == Tcl_RegexpObjCmd) pin->fast = tbc_regexp_fast;	/* (stock regexp: the native matcher first, Tcl's command for what it does not take) */
 }
 static int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_Obj **args, int nanchk, Tcl_Obj **out) {
     Tcl_Obj *ov[10], *r;
@@ -1406,7 +1407,8 @@ static int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_O
     c = pin->c;
     if (c && !TBC_UNLIKELY((c->flags & CMD_IS_DELETED) || c->cmdEpoch != pin->epoch)) {
         Tcl_ResetResult(interp);
-        rc = c->objProc(c->objClientData, interp, n + 1, ov);
+        rc = pin->fast ? pin->fast(c->objClientData, interp, n + 1, ov) : TBC_RE_PASS;
+        if (rc == TBC_RE_PASS) rc = c->objProc(c->objClientData, interp, n + 1, ov);
     } else {
         rc = Tcl_EvalObjv(interp, n + 1, ov, TCL_EVAL_NOERR);
     }
@@ -2541,6 +2543,7 @@ static void tbc_install(Tcl_Interp *interp) {
     if (done) return;
     done = 1;
     Tcl_CreateObjCommand(interp, "::tbc::invalidate", tbc_inval_cmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::tbc::re", tbc_re_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::fingerprint", tbc_fp_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::attached", tbc_attached_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::report", tbc_report_cmd, NULL, NULL);
