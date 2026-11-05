@@ -255,12 +255,12 @@ static int tbc_re_atomprobe(const char *atom, int len, tbc_reset *out, int *unif
     if (len == 1 && atom[0] == '.') {
         memset(hit, 1, sizeof hit); r = 1;
     } else {
-        if (len >= 2 && len < 62 && atom[0] == '[' && atom[1] == '^') { fl[0] = '['; memcpy(fl + 1, atom + 2, (size_t) len - 2); flip = 1; }
+        if (len >= 3 && len < 62 && atom[0] == '[' && atom[1] == '^' && atom[2] != '^') {   /* ([^^x] is not the others of [^x]: its caret is a member) */ fl[0] = '['; memcpy(fl + 1, atom + 2, (size_t) len - 2); flip = 1; }
         else if (len == 2 && atom[0] == '\\' && strchr("DSW", atom[1]) != NULL) { fl[0] = '\\'; fl[1] = (char) tolower((unsigned char) atom[1]); flip = 1; }
         r = flip ? tbc_re_scan(fl, len - (atom[0] == '[' ? 1 : 0), 0, 60, hit) : tbc_re_scan(atom, len, 0, 60, hit);
         if (r == 1 && flip) for (i = 0; i < TBC_RE_NPROBE; i++) hit[i] = (unsigned char) !hit[i];
     }
-    if (r == -2 || (len >= 62 && atom[0] == '[' && atom[1] == '^')) return tbc_re_atomset_slow(atom, len, out, uniform);
+    if (r == -2 || (atom[0] == '[' && atom[1] == '^' && !flip)) return tbc_re_atomset_slow(atom, len, out, uniform);
     if (r != 1) return 0;
     memset(out, 0, sizeof *out);
     for (i = 0; i < 128; i++) if (hit[i]) tbc_re_put(out, i);

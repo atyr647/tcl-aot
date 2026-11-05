@@ -121,6 +121,8 @@ for {set k 0} {$k < 6000} {incr k} {
     catch {tbc::re $a "a" 0}
     incr natoms
 }
+# (found by the random ones: a caret that is a member of a negated bracket expression is not the negation of the rest)
+foreach a {{[^^a]} {[^^[:cntrl:]\w.z]} {[^^]} {[^]^a]} {[^\^]}} { catch {tbc::re $a "a^" 0}; incr natoms }
 puts "refuzz atoms: $natoms atoms tried (with the sets cross-checked)"
 # ---- the whole command: switches, -all, -inline, -start, match variables (tbc_regexp_fast against regexp, results and variables)
 proc gen_subject2 {} {
