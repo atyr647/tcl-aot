@@ -55,6 +55,7 @@ typedef struct tbc_re {
     Tcl_Obj *upat[TBC_RE_MAXU];	/* (their patterns, owned by the atom table) */
     unsigned char *suid;		/* of each set: 0, or the atom (1 + index in upat) it came from */
     int nx; unsigned xsig[TBC_RE_NX];	/* the classes made so far: which of the atoms hold the characters of the class */
+    unsigned char start8[128];		/* of each ASCII character: 0 not known, 1 something leads on from it in the first state, 2 nothing does */
     unsigned uc_ch[256]; unsigned char uc_cls[256];	/* the class of the characters seen last (direct mapped, 0 empty) */
     /* the DFA, made as it is needed */
     int nd, dcap, bad;
@@ -74,12 +75,211 @@ TBC_SHARED Tcl_HashTable tbc_re_atoms;
 TBC_SHARED int tbc_re_atoms_init;
 /* the set of the characters (0..127, and OTHER for the characters above that) that one atom matches: 1, or 0 when the atom is not one of one character.  *uniform tells whether the
  * characters above U+007F that were tried agree (then OTHER is what they say); a class of Unicode does not, and is for subjects of ASCII characters only */
-static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform, Tcl_Obj **patOut) {
+/* the answer for one atom, found one character at a time (an execution of Tcl's matcher for each of the 128 + 9 characters): what tbc_re_atomprobe must agree with; run only
+ * when TBC_RE_VERIFY is set in the environment, which the fuzz test does */
+static int tbc_re_atomset_slow(const char *atom, int len, tbc_reset *out, int *uniform) {
     static const int others[] = { 0x80, 0xA0, 0xE9, 0x100, 0x2003, 0x20AC, 0x3042, 0xD83D, 0xFFFF };
-    Tcl_Obj *pat; Tcl_RegExp re; int c, first = 1, ov = 0, i, isnew, uni = 1, ok = 1;
+    Tcl_Obj *pat; Tcl_RegExp re; int c, first = 1, ov = 0, i, uni = 1;
+    char *buf = (char *) malloc((size_t) len + 12);
+    if (!buf) return 0;
+    memcpy(buf, "\\A(?:", 5); memcpy(buf + 5, atom, (size_t) len); memcpy(buf + 5 + len, ")\\Z", 3);
+    pat = Tcl_NewStringObj(buf, len + 8);
+    free(buf);
+    Tcl_IncrRefCount(pat);
+    re = Tcl_GetRegExpFromObj(NULL, pat, TCL_REG_ADVANCED);
+    if (!re) { Tcl_DecrRefCount(pat); return 0; }
+    memset(out, 0, sizeof *out);
+    for (c = 0; c < 128; c++) {
+        Tcl_UniChar u = (Tcl_UniChar) c;
+        Tcl_Obj *o = Tcl_NewUnicodeObj(&u, 1);
+        Tcl_IncrRefCount(o);
+        if (Tcl_RegExpExecObj(NULL, re, o, 0, 0, 0) == 1) tbc_re_put(out, c);
+        Tcl_DecrRefCount(o);
+    }
+    for (i = 0; i < (int) (sizeof others / sizeof others[0]); i++) {
+        Tcl_UniChar u = (Tcl_UniChar) others[i];
+        Tcl_Obj *o = Tcl_NewUnicodeObj(&u, 1);
+        int m;
+        Tcl_IncrRefCount(o);
+        m = Tcl_RegExpExecObj(NULL, re, o, 0, 0, 0) == 1;
+        Tcl_DecrRefCount(o);
+        if (first) { ov = m; first = 0; } else if (m != ov) uni = 0;
+    }
+    Tcl_DecrRefCount(pat);
+    if (uni && ov) tbc_re_put(out, TBC_RE_OTHER);
+    *uniform = uni;
+    return 1;
+}
+
+/* The characters that an atom matches, found with a few scans of one string of the probe characters (0 to 127, then nine above U+007F) instead of one execution for each: an
+ * atom is of one character, so the matches of the atom itself in the string are its members, and those of (?:(?!atom).) the others.  The scan of the smaller side is made (members
+ * first unless the atom is a negation or `.`, with the other as the fallback when more than 40 turn up); each match must be of one character.  hit[c] = 1 for the characters of the
+ * scan.  0 when the atom does not compile or does not match single characters; -2 when more than `cap` matches turned up (hit is not complete). */
+#define TBC_RE_NPROBE 137
+static int tbc_re_scan(const char *atom, int len, int complement, int cap, unsigned char *hit) {
+    static const int others[] = { 0x80, 0xA0, 0xE9, 0x100, 0x2003, 0x20AC, 0x3042, 0xD83D, 0xFFFF };
+    Tcl_UniChar u[TBC_RE_NPROBE];
+    Tcl_Obj *pat, *subj; Tcl_RegExp re; int i, off = 0, n = 0, rc = 1;
+    char *buf = (char *) malloc((size_t) len + 24), *b = buf;
+    if (!buf) return 0;
+    if (complement) { memcpy(b, "(?:(?!", 6); b += 6; }
+    memcpy(b, atom, (size_t) len); b += len;
+    if (complement) { memcpy(b, ").)", 3); b += 3; }
+    pat = Tcl_NewStringObj(buf, (int) (b - buf));
+    free(buf);
+    Tcl_IncrRefCount(pat);
+    re = Tcl_GetRegExpFromObj(NULL, pat, TCL_REG_ADVANCED);
+    if (!re) { Tcl_DecrRefCount(pat); return 0; }
+    for (i = 0; i < 128; i++) u[i] = (Tcl_UniChar) i;
+    for (i = 0; i < 9; i++) u[128 + i] = (Tcl_UniChar) others[i];
+    subj = Tcl_NewUnicodeObj(u, TBC_RE_NPROBE);
+    Tcl_IncrRefCount(subj);
+    memset(hit, 0, TBC_RE_NPROBE);
+    while (off < TBC_RE_NPROBE) {
+        Tcl_RegExpInfo info;
+        int m = Tcl_RegExpExecObj(NULL, re, subj, off, 1, 0);
+        if (m < 0) { rc = 0; break; }
+        if (m == 0) break;
+        Tcl_RegExpGetInfo(re, &info);
+        if (info.matches[0].end - info.matches[0].start != 1) { rc = 0; break; }
+        if (++n > cap) { rc = -2; break; }
+        hit[off + info.matches[0].start] = 1;
+        off += info.matches[0].start + 1;
+    }
+    Tcl_DecrRefCount(subj); Tcl_DecrRefCount(pat);
+    return rc;
+}
+/* The set of an atom of the common forms, worked out here without asking Tcl's matcher (an execution of it costs thousands of instructions, and an atom needs up to 137 of them
+ * or a scan of that many characters, which a program that uses its patterns a few times pays back too late): a literal character, an escaped one (\n \t \r \f \v or any ASCII
+ * punctuation), the classes \d \s \w \D \S \W, and a bracket expression of literals, escapes, ranges, the classes above and [:alpha:] [:digit:] [:alnum:] [:upper:] [:lower:]
+ * [:space:] [:xdigit:] [:blank:], with ^ at the start.  Anything else (collating elements, other classes, a range that is wrong, a backslash before a letter that is not one of
+ * these) is not understood and goes to the probe of Tcl's matcher, which also says what is an error.  The result is the same as the probe's, and the fuzz test checks that
+ * for every atom it generates (TBC_RE_VERIFY).  *unicls: the atom holds a class of Unicode, which Tcl's tables decide above U+007F (the set then has no OTHER). */
+static int tbc_re_own_class(const char *name, int n, tbc_reset *s, int *uni) {
+    int c, lo = 0, hi = -1, ok = 1;
+    if (n == 5 && !strncmp(name, "alpha", 5)) { for (c = 0; c < 128; c++) if (isalpha(c)) tbc_re_put(s, c); *uni = 1; }
+    else if (n == 5 && !strncmp(name, "digit", 5)) { for (c = '0'; c <= '9'; c++) tbc_re_put(s, c); *uni = 1; }
+    else if (n == 5 && !strncmp(name, "alnum", 5)) { for (c = 0; c < 128; c++) if (isalnum(c)) tbc_re_put(s, c); *uni = 1; }
+    else if (n == 5 && !strncmp(name, "upper", 5)) { for (c = 'A'; c <= 'Z'; c++) tbc_re_put(s, c); *uni = 1; }
+    else if (n == 5 && !strncmp(name, "lower", 5)) { for (c = 'a'; c <= 'z'; c++) tbc_re_put(s, c); *uni = 1; }
+    else if (n == 5 && !strncmp(name, "space", 5)) { for (c = 9; c <= 13; c++) tbc_re_put(s, c); tbc_re_put(s, ' '); *uni = 1; }
+    else if (n == 6 && !strncmp(name, "xdigit", 6)) { for (c = 0; c < 128; c++) if (isxdigit(c)) tbc_re_put(s, c); }
+    else if (n == 5 && !strncmp(name, "blank", 5)) { tbc_re_put(s, ' '); tbc_re_put(s, '\t'); }
+    else ok = 0;
+    (void) lo; (void) hi;
+    return ok;
+}
+/* one character of a bracket expression or an atom: a literal, an escape of one character, or a class escape; *cls: 1 class (put into *s, negated or not), else *ch is the character */
+static int tbc_re_own_item(const char *p, int n, int *i, int *ch, tbc_reset *s, int *uni, int inbracket) {
+    unsigned char c;
+    if (*i >= n) return 0;
+    c = (unsigned char) p[*i];
+    if (c == 0 || c >= 128) return 0;
+    if (c == '\\') {
+        unsigned char e;
+        if (*i + 1 >= n) return 0;
+        e = (unsigned char) p[*i + 1];
+        if (e == 0 || e >= 128) return 0;
+        if (strchr("dswDSW", e)) {
+            tbc_reset t;
+            if (inbracket && isupper(e)) return 0;   /* (Tcl 8.6 reads [\D] as something else than the complement of [\d]: left to its matcher, as the fuzz found) */ int d, u = 0; int neg = isupper(e) != 0;
+            memset(&t, 0, sizeof t);
+            if (tolower(e) == 'd') tbc_re_own_class("digit", 5, &t, &u);
+            else if (tolower(e) == 's') tbc_re_own_class("space", 5, &t, &u);
+            else { tbc_re_own_class("alnum", 5, &t, &u); tbc_re_put(&t, '_'); }
+            for (d = 0; d < 128; d++) if (tbc_re_has(&t, d) != neg) tbc_re_put(s, d);
+            *uni = 1; *ch = -1; *i += 2; return 1;
+        }
+        if (e == 'n') *ch = '\n'; else if (e == 't') *ch = '\t'; else if (e == 'r') *ch = '\r'; else if (e == 'f') *ch = '\f'; else if (e == 'v') *ch = '\v';
+        else if (!isalnum(e)) *ch = e;
+        else return 0;
+        *i += 2; return 1;
+    }
+    *ch = c; *i += 1; return 1;
+}
+static int tbc_re_atomown(const char *atom, int len, tbc_reset *out, int *uniform, int *unicls) {
+    int i = 0, ch = -1, uni = 0, neg = 0;
+    tbc_reset s;
+    memset(&s, 0, sizeof s);
+    if (len >= 1 && atom[0] != '[') {
+        if (!tbc_re_own_item(atom, len, &i, &ch, &s, &uni, 0) || i != len) return 0;
+        if (atom[0] == '.' ) return 0;
+        if (ch >= 0) tbc_re_put(&s, ch);
+        *out = s; *unicls = uni; *uniform = !uni;
+        return 1;
+    }
+    if (len < 3) return 0;
+    i = 1;
+    if (atom[i] == '^') { neg = 1; i++; }
+    {
+        int first = 1;
+        for (;;) {
+            int lo;
+            if (i >= len) return 0;
+            if (atom[i] == ']' && !first) { i++; break; }
+            if (atom[i] == '[' && i + 1 < len && strchr(":.=", atom[i + 1])) {
+                int k = i + 2, st = i + 2;
+                if (atom[i + 1] != ':') return 0;
+                while (k + 1 < len && !(atom[k] == ':' && atom[k + 1] == ']')) k++;
+                if (k + 1 >= len || !tbc_re_own_class(atom + st, k - st, &s, &uni)) return 0;
+                i = k + 2; first = 0; continue;
+            }
+            if (atom[i] == '-' && !first && i + 1 < len && atom[i + 1] != ']') return 0;   /* (a dash that is neither first nor last, nor the middle of a range) */
+            if (!tbc_re_own_item(atom, len, &i, &lo, &s, &uni, 1)) return 0;
+            first = 0;
+            if (lo < 0) continue;                                    /* (a class) */
+            if (i + 1 < len && atom[i] == '-' && atom[i + 1] != ']') {
+                int hi; tbc_reset junk; int ju = 0;
+                memset(&junk, 0, sizeof junk);
+                i++;
+                if (atom[i] == '[' && i + 1 < len && strchr(":.=", atom[i + 1])) return 0;
+                if (!tbc_re_own_item(atom, len, &i, &hi, &junk, &ju, 1) || hi < 0 || hi < lo) return 0;
+                { int c; for (c = lo; c <= hi; c++) tbc_re_put(&s, c); }
+            } else tbc_re_put(&s, lo);
+        }
+        if (i != len) return 0;
+    }
+    if (neg) { tbc_reset t; int d; memset(&t, 0, sizeof t); for (d = 0; d < 128; d++) if (!tbc_re_has(&s, d)) tbc_re_put(&t, d); if (!uni) tbc_re_put(&t, TBC_RE_OTHER); s = t; }
+    *out = s; *unicls = uni; *uniform = !uni;
+    return 1;
+}
+
+/* the set and the uniformity of an atom: 1, or 0 when it is not one of one character.  The scan of its members when it has few (up to 60: most atoms); a negation ([^...], \D, \S,
+ * \W) is the others of the atom without the negation, which has few members; `.` matches every character (these three identities are checked against the character-at-a-time
+ * probe by the fuzz test); an atom with many members goes to the probe of one execution for each character (tbc_re_atomset_slow), 2400 instructions each */
+static int tbc_re_atomprobe(const char *atom, int len, tbc_reset *out, int *uniform) {
+    unsigned char hit[TBC_RE_NPROBE];
+    char fl[64];
+    int i, flip = 0, r, unicls = 0;
+    if (tbc_re_atomown(atom, len, out, uniform, &unicls)) return 1;
+    if (len == 1 && atom[0] == '.') {
+        memset(hit, 1, sizeof hit); r = 1;
+    } else {
+        if (len >= 2 && len < 62 && atom[0] == '[' && atom[1] == '^') { fl[0] = '['; memcpy(fl + 1, atom + 2, (size_t) len - 2); flip = 1; }
+        else if (len == 2 && atom[0] == '\\' && strchr("DSW", atom[1]) != NULL) { fl[0] = '\\'; fl[1] = (char) tolower((unsigned char) atom[1]); flip = 1; }
+        r = flip ? tbc_re_scan(fl, len - (atom[0] == '[' ? 1 : 0), 0, 60, hit) : tbc_re_scan(atom, len, 0, 60, hit);
+        if (r == 1 && flip) for (i = 0; i < TBC_RE_NPROBE; i++) hit[i] = (unsigned char) !hit[i];
+    }
+    if (r == -2 || (len >= 62 && atom[0] == '[' && atom[1] == '^')) return tbc_re_atomset_slow(atom, len, out, uniform);
+    if (r != 1) return 0;
+    memset(out, 0, sizeof *out);
+    for (i = 0; i < 128; i++) if (hit[i]) tbc_re_put(out, i);
+    {
+        int ov = hit[128], uni = 1;
+        for (i = 129; i < TBC_RE_NPROBE; i++) if (hit[i] != ov) uni = 0;
+        if (uni && ov) tbc_re_put(out, TBC_RE_OTHER);
+        *uniform = uni;
+    }
+    return 1;
+}
+/* the set of the characters (0..127, and OTHER for the characters above that) that one atom matches: 1, or 0 when the atom is not one of one character.  *uniform tells whether the
+ * characters above U+007F that were tried agree (then OTHER is what they say); a class of Unicode does not, and is asked about character by character (tbc_re_xclass).  *patOut:
+ * the atom as a pattern that matches that one character and no more, for those questions (compiled when first used; owned by the atom table) */
+static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform, Tcl_Obj **patOut) {
     Tcl_HashEntry *h;
     tbc_reatom *ra;
     char *key;
+    int isnew;
     if (!tbc_re_atoms_init) { Tcl_InitHashTable(&tbc_re_atoms, TCL_STRING_KEYS); tbc_re_atoms_init = 1; }
     key = (char *) malloc((size_t) len + 1);
     if (!key) return 0;
@@ -93,48 +293,29 @@ static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *unifor
         return 1;
     }
     Tcl_SetHashValue(h, NULL);
+    if (!tbc_re_atomprobe(atom, len, out, uniform)) return 0;
+    if (getenv("TBC_RE_VERIFY")) {
+        tbc_reset sl; int ul = 0;
+        if (!tbc_re_atomset_slow(atom, len, &sl, &ul) || sl.w[0] != out->w[0] || sl.w[1] != out->w[1] || (*uniform && (!ul || sl.w[2] != out->w[2]))) {   /* (an atom that holds a class of Unicode is not uniform, whatever the nine characters tried say) */
+            fprintf(stderr, "tbc_re: the scan and the per-character probe disagree on the atom %.*s (uniform %d / %d; sets %llx %llx %llx / %llx %llx %llx)\n", len, atom, *uniform, ul,
+                    (unsigned long long) out->w[0], (unsigned long long) out->w[1], (unsigned long long) out->w[2], (unsigned long long) sl.w[0], (unsigned long long) sl.w[1], (unsigned long long) sl.w[2]);
+            abort();
+        }
+    }
     {
+        Tcl_Obj *pat;
         char *buf = (char *) malloc((size_t) len + 12);
         if (!buf) return 0;
         memcpy(buf, "\\A(?:", 5); memcpy(buf + 5, atom, (size_t) len); memcpy(buf + 5 + len, ")\\Z", 3);
         pat = Tcl_NewStringObj(buf, len + 8);
         free(buf);
+        Tcl_IncrRefCount(pat);
+        ra = (tbc_reatom *) malloc(sizeof *ra);
+        if (!ra) { Tcl_DecrRefCount(pat); return 0; }
+        ra->set = *out; ra->uniform = *uniform; ra->pat = pat;
+        Tcl_SetHashValue(h, ra);
+        *patOut = pat;
     }
-    Tcl_IncrRefCount(pat);
-    re = Tcl_GetRegExpFromObj(NULL, pat, TCL_REG_ADVANCED);
-    if (!re) { Tcl_DecrRefCount(pat); return 0; }
-    memset(out, 0, sizeof *out);
-    for (c = 0; c < 128; c++) {
-        Tcl_UniChar u = (Tcl_UniChar) c;
-        Tcl_Obj *s = Tcl_NewUnicodeObj(&u, 1);
-        Tcl_IncrRefCount(s);
-        if (Tcl_RegExpExecObj(NULL, re, s, 0, 0, 0) == 1) tbc_re_put(out, c);
-        Tcl_DecrRefCount(s);
-    }
-    for (i = 0; i < (int) (sizeof others / sizeof others[0]); i++) {
-        Tcl_UniChar u = (Tcl_UniChar) others[i];
-        Tcl_Obj *s = Tcl_NewUnicodeObj(&u, 1);
-        int m;
-        Tcl_IncrRefCount(s);
-        m = Tcl_RegExpExecObj(NULL, re, s, 0, 0, 0) == 1;
-        Tcl_DecrRefCount(s);
-        if (first) { ov = m; first = 0; } else if (m != ov) uni = 0;
-    }
-    /* (a string of two characters must not match: the atom is of one character) */
-    {
-        Tcl_UniChar u2[2] = { 'a', 'a' };
-        Tcl_Obj *s = Tcl_NewUnicodeObj(u2, 2);
-        Tcl_IncrRefCount(s);
-        if (Tcl_RegExpExecObj(NULL, re, s, 0, 0, 0) != 0) ok = 0;
-        Tcl_DecrRefCount(s);
-    }
-    if (!ok) { Tcl_DecrRefCount(pat); return 0; }
-    if (uni && ov) tbc_re_put(out, TBC_RE_OTHER);
-    ra = (tbc_reatom *) malloc(sizeof *ra);
-    if (!ra) { Tcl_DecrRefCount(pat); return 0; }
-    ra->set = *out; ra->uniform = uni; ra->pat = pat;   /* (the entry keeps the pattern) */
-    Tcl_SetHashValue(h, ra);
-    *uniform = uni; *patOut = pat;
     return 1;
 }
 
@@ -530,6 +711,29 @@ static int NAME(tbc_re *re, const CHAR *s, int n, int from, int caretok, int *ms
     if (re->bad) return -1; \
     for (st = from; st <= n; st++) { \
         int d, last = -1; \
+        if (!re->anchor_start && !re->acc[re->s0]) {	/* (no match is empty: skip the positions where no character leads anywhere from the first state) */ \
+            for (;; st++) { \
+                unsigned c; int k, v; \
+                if (st >= n) return 0; \
+                c = (unsigned) s[st]; \
+                if (c < 128) { \
+                    int t = re->start8[c]; \
+                    if (TBC_LIKELY(t == 2)) continue; \
+                    if (t == 1) break; \
+                    k = re->cls[c]; \
+                    v = re->next[re->s0 * stride + k]; \
+                    if (v < 0) { v = tbc_re_step(re, re->s0, k); if (v < 0) { re->bad = 1; return -1; } } \
+                    re->start8[c] = (unsigned char) (v ? 1 : 2); \
+                    if (v) break; \
+                    continue; \
+                } \
+                k = re->nup ? tbc_re_xclass(re, c) : re->cls[TBC_RE_OTHER]; \
+                if (TBC_UNLIKELY(k < 0)) return -1; \
+                v = re->next[re->s0 * stride + k]; \
+                if (v < 0) { v = tbc_re_step(re, re->s0, k); if (v < 0) { re->bad = 1; return -1; } } \
+                if (v != 0) break; \
+            } \
+        } \
         if (re->anchor_start && st != from) break; \
         if (re->anchor_start == 2 && !caretok) break; \
         d = re->s0; \

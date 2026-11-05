@@ -3,6 +3,8 @@
 #   shell tests/refuzz.tcl ?seed? ?cases?
 # Environment: REFUZZ_VERBOSE=1 prints every case that is passed to Tcl.
 load {} Testprocs
+# the sets of the atoms found by a few scans are compared with the ones found a character at a time (the matcher aborts on a difference)
+set ::env(TBC_RE_VERIFY) 1
 set seed [expr {[llength $argv] > 0 ? [lindex $argv 0] : 1}]
 set cases [expr {[llength $argv] > 1 ? [lindex $argv 1] : 20000}]
 expr {srand($seed)}
@@ -97,6 +99,29 @@ for {set k 0} {$k < $cases} {incr k} {
         }
     }
 }
+# ---- every single character as an atom, bare, escaped and in a bracket expression, and on its own as the subject
+set natoms 0
+for {set c 1} {$c < 128} {incr c} {
+    set ch [format %c $c]
+    foreach a [list $ch \\$ch "\[$ch\]" "\[^$ch\]" "\[\\$ch\]" "\[a-$ch\]"] {
+        catch {tbc::re $a $ch 0}
+        catch {tbc::re $a "a$ch" 0}
+        incr natoms
+    }
+}
+# (and random bracket expressions: literals, escapes, ranges, classes, the dash and the bracket in their odd places)
+set bitems {a b z A Z 0 9 " " - ] [ \\ ^ . * + | $ ( ) \\n \\t \\r \\f \\v \\d \\s \\w \\D \\S \\W \\] \\[ \\- \\\\ \\. \\^ \\/ [:alpha:] [:digit:] [:alnum:] [:upper:] [:lower:] [:space:] [:xdigit:] [:blank:]
+    [:punct:] [:cntrl:] [:print:] [:graph:] [:ascii:] [:word:] a-z 0-9 A-F a-c x-z \\n-\\r !-/ [-a a-] \\d-z a-\\w z-a ~-~ ]-a --/ \\--/ [.a.] [=a=] [.hyphen.]}
+for {set k 0} {$k < 6000} {incr k} {
+    set a "\["
+    if {[chance 0.3]} { append a ^ }
+    set n [expr {1 + int(rand() * 5)}]
+    for {set j 0} {$j < $n} {incr j} { append a [pick $bitems] }
+    append a "\]"
+    catch {tbc::re $a "a" 0}
+    incr natoms
+}
+puts "refuzz atoms: $natoms atoms tried (with the sets cross-checked)"
 # ---- the whole command: switches, -all, -inline, -start, match variables (tbc_regexp_fast against regexp, results and variables)
 proc gen_subject2 {} {
     global chars
