@@ -1199,6 +1199,15 @@ proc jk {a b} {
     if {$b eq "S" && $a eq "I"} { return I }
     return B
 }
+# A value that the instruction at `s` pops at once (the result of an `if` used as a statement: the value of `lset` or `lappend` in one branch, an empty string in the
+# other) is dead.  When it is a view of a native vector, joining it with the other branch's value would box it, which copies the whole vector into a new list
+# on every run through that branch.  The slot becomes X (no value, no code: boxed as an empty object if a fall-back ever needs it).
+proc deadTop {P st s} {
+    global PI
+    if {[llength $st] == 0 || [kd [lindex $st end]] ni {A M Z}} { return $st }
+    if {[lindex $PI($P,ins,$s) 0] ne "pop"} { return $st }
+    return [lreplace $st end end X]
+}
 proc jstate {a b} { lmap x $a y $b { jd $x $y } }
 
 proc ctype {k} { switch $k { I {return int64_t} D {return double} default {return "Tcl_Obj *"} } }
@@ -1226,6 +1235,7 @@ proc boxe {P p e} {
         K { if {[lt $e] eq "2"} { return "tbc_newpair(ka$p, kj$p)" }; return "tbc_newkey(kb$p, kl$p)" }
         W { return "(sw$p ? tbc_newdbl(sd$p) : tbc_newint(si$p))" }
         N { return "tbc_ivec_list(&sv$p, 1)" }
+        X { return "({ Tcl_Obj *c_ = Tcl_NewObj(); Tcl_IncrRefCount(c_); c_; })" }
         Z {
             # (as the vector's view: alias in a fall-back stub, where the local has just been made a string; a copy otherwise)
             switch $::boxMode {
@@ -1250,7 +1260,8 @@ proc boxc {P p e} {
     return "s$p = [boxe $P $p $e];"
 }
 # conversion on an edge from state `from` to state `to`
-proc edgec {P from to} {
+proc edgec {P from to {s ""}} {
+    if {$s ne ""} { set from [deadTop $P $from $s] }
     set ::boxMode edge
     set c [edgec1 $P $from $to]
     set ::boxMode copy
@@ -2916,7 +2927,7 @@ proc stepInvoke {key pc in d n} {
             if {[info exists VK($key,in,$nextpc)]} {
                 set ostate [list {*}$below $outk]
                 set edge ""
-                if {[llength $VK($key,in,$nextpc)] == [llength $ostate]} { set edge [edgec $P $ostate $VK($key,in,$nextpc)] }
+                if {[llength $VK($key,in,$nextpc)] == [llength $ostate]} { set edge [edgec $P $ostate $VK($key,in,$nextpc) $nextpc] }
                 switch $outk {
                     I { set cont "\{ int64_t w_; if (tbc_arg_int(s$q, &w_)) \{ Tcl_DecrRefCount(s$q); si$q = w_; $edge goto T$nextpc; \} \}" }
                     D { set cont "\{ double dv_; if (tbc_arg_dbl(s$q, &dv_)) \{ Tcl_DecrRefCount(s$q); sd$q = dv_; $edge goto T$nextpc; \} \}" }
@@ -3512,6 +3523,7 @@ proc analyze {key} {
             foreach s $succs {
                 set outs $out
                 if {$::curWpol} { set outs [wnorm $P $out $s] }
+                set outs [deadTop $P $outs $s]
                 if {![info exists IN($s)]} {
                     set IN($s) $outs; lappend work $s
                 } else {
@@ -4518,22 +4530,22 @@ proc emitVariant {key recursive {resume 0}} {
         switch $flow {
             fall {
                 set nx $PI($P,next,$pc)
-                append fn "    $code [edgec $P $out $VK($key,in,$nx)]\n"
+                append fn "    $code [edgec $P $out $VK($key,in,$nx) $nx]\n"
             }
             jump {
                 set tg [dict get $r tgt]
-                append fn "    $code [edgec $P $out $VK($key,in,$tg)] goto T$tg;\n"
+                append fn "    $code [edgec $P $out $VK($key,in,$tg) $tg] goto T$tg;\n"
             }
             cond {
                 set tg [dict get $r tgt]; set nx $PI($P,next,$pc)
-                set code [string map [list @TAKEN@ [edgec $P $out $VK($key,in,$tg)]] $code]
-                append fn "    $code [edgec $P $out $VK($key,in,$nx)]\n"
+                set code [string map [list @TAKEN@ [edgec $P $out $VK($key,in,$tg) $tg]] $code]
+                append fn "    $code [edgec $P $out $VK($key,in,$nx) $nx]\n"
             }
             multi {
                 set nx $PI($P,next,$pc)
                 set edges {}
-                foreach tg [dict get $r tgts] { lappend edges @E${tg}@ [edgec $P $out $VK($key,in,$tg)] }
-                append fn "    [string map $edges $code] [edgec $P $out $VK($key,in,$nx)]\n"
+                foreach tg [dict get $r tgts] { lappend edges @E${tg}@ [edgec $P $out $VK($key,in,$tg) $tg] }
+                append fn "    [string map $edges $code] [edgec $P $out $VK($key,in,$nx) $nx]\n"
             }
             term { append fn "    $code\n" }
             dead { append fn "    $code\n" }

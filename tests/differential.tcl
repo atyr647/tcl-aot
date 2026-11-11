@@ -445,6 +445,8 @@ foreach n {0 1 2 10 100 1000} { lappend calls [list t_vec_sieve $n] }
 foreach {n i} {3 4294967295 3 4294967296 3 -4294967295 3 -4294967296 3 2147483648 3 -2147483648 3 9223372036854775807 3 0 3 2 3 3 3 -1 3 100 3 end 3 abc 3 1.5 3 end-1 0 0 1 0 5 4} { lappend calls [list t_vec_oob $n $i] [list t_vec_lset_oob $n $i] }
 foreach n {0 1 3} { lappend calls [list t_vec_escape $n] [list t_vec_use $n] [list t_vec_alias $n] }
 foreach n {3 5} { foreach x {7 abc 2.5 {} 9223372036854775807 0x10} { lappend calls [list t_vec_midlset $n $x] [list t_vec_midlset2 $n $x] } }
+foreach n {0 1 2 3 10 50 300} { lappend calls [list t_vec_ifstmt $n] [list t_vec_ifstmt2 $n] }
+foreach n {0 2 3 4 9} { foreach x {7 abc 2.5 {} 9223372036854775807} { lappend calls [list t_vec_ifstmt3 $n $x] } }
 foreach n {1 3 10 50} { lappend calls [list t_vec_realloc $n] [list t_vec_two $n] [list t_vec_redef $n] }
 lappend calls {t_vec_cond 1} {t_vec_cond 0} {t_vec_neg -1} {t_vec_neg 0} {t_vec_neg abc} {t_vec_neg 2.5} {t_vec_dbl 3} {t_vec_dbl 1}
 lappend calls {t_vec_big 5 abc} {t_vec_big 5 7} {t_vec_big 3 2.5}

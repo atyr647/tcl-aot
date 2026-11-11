@@ -66,7 +66,7 @@ for rate in 3 17 101; do
 done
 
 echo "== guard, nest cap, capture loop, unmodified Tcl, undefined behaviour"
-for t in guard typed osr hot cmdmap names nestcap capture pristine lite ubsan; do
+for t in guard typed osr hot cmdmap names nestcap capture pristine lite ubsan localvec; do
   out=$(tests/$t.sh 2>&1) || { echo "$out"; fail "tests/$t.sh"; continue; }
   echo "$out" | grep -E ': ok$'
 done

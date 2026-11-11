@@ -330,6 +330,31 @@ proc t_vec_cond {c} {
     if {$c} { set a [lrepeat 3 1] }
     return [lindex $a 0]
 }
+# the value of an `if` used as a statement is popped at once: a lset or lappend result in one branch (a view of the vector) must not be copied into a list at the join
+proc t_vec_ifstmt {n} {
+    set a [lrepeat $n 1]; set b [lrepeat $n 2]
+    for {set i 0} {$i < $n} {incr i} {
+        if {$i % 3 == 0} { lset a $i [expr {[lindex $b $i] + $i}] } else { lset b $i [expr {[lindex $a $i] * 2}] }
+    }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { set s [expr {$s * 31 + [lindex $a $i] * 7 + [lindex $b $i]}] }
+    return $s
+}
+proc t_vec_ifstmt2 {n} {
+    set a [lrepeat 2 1]; set b {}
+    for {set i 0} {$i < $n} {incr i} {
+        if {$i & 1} { lappend b $i } elseif {$i % 4 == 0} { lappend a $i; lset a 0 $i } else { set z $i }
+        if {$i > 5} { lset b 0 $i }
+    }
+    return [list [llength $a] [llength $b] [lindex $a 0] [lindex $b 0]]
+}
+proc t_vec_ifstmt3 {n x} {
+    set a [lrepeat 4 1]
+    for {set i 0} {$i < $n} {incr i} {
+        if {$i < 4} { lset a $i [expr {$i == 2 ? $x : $i}] } else { lappend a $i }
+    }
+    return [list $a [llength $a]]
+}
 proc t_vec_two {n} {
     set a [lrepeat $n 1]
     set b [lrepeat $n 2]
