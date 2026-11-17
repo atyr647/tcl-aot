@@ -12,7 +12,7 @@ set -euo pipefail
 [ $# -ge 2 ] || { echo "usage: $0 <module.c> <out.o> [-j N]" >&2; exit 2; }
 mod=$1
 out=$2
-jobs=$(nproc 2>/dev/null || echo 4)
+jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 [ "${3:-}" = "-j" ] && jobs=${4:?"-j needs a number"}
 
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
@@ -32,20 +32,30 @@ compile() {
   "$CC" $1 -w $TBC_INC -I"$(dirname "$mod")" -c "$2" -o "$tmp/$(basename "${2%.c}").o"
 }
 
+# bash 3.2 (macOS) has no `wait -n`: poll instead
+pids=""
+waitslot() { while [ "$(jobs -rp | wc -l)" -ge "$1" ]; do sleep 0.05; done; }
 for f in "$base"_v*.c; do
   compile "$CFLAGS_V" "$f" &
-  while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do wait -n; done
+  pids="$pids $!"
+  waitslot "$jobs"
 done
 for f in "$base"_g*.c "$mod"; do
   flags=$CFLAGS_G; [ "$f" = "$mod" ] && flags=$CFLAGS_I
   compile "$flags" "$f" &
-  while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do wait -n; done
+  pids="$pids $!"
+  waitslot "$jobs"
 done
-while [ "$(jobs -rp | wc -l)" -gt 0 ]; do wait -n; done
+for p in $pids; do wait "$p" || { echo "$0: a compile failed" >&2; exit 1; }; done
 
 if [ "${MERGE:-1}" = 1 ]; then
-  ld -r -o "$tmp/all.o" "$tmp"/*.o
-  objcopy --keep-global-symbol="$init" "$tmp/all.o" "$out"
+  if [ "$(uname -s)" != Darwin ]; then ld -r -o "$tmp/all.o" "$tmp"/*.o; fi
+  if [ "$(uname -s)" = Darwin ]; then
+    # no objcopy on macOS: relink with only <Init>_Init exported (the Mach-O linker's own switch)
+    ld -r -exported_symbol "_$init" -o "$out" "$tmp"/*.o
+  else
+    objcopy --keep-global-symbol="$init" "$tmp/all.o" "$out"
+  fi
 else
   rm -f "${out%.o}.a"
   ar rcs "${out%.o}.a" "$tmp"/*.o
