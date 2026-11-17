@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # The project never changes Tcl or its libraries.  This checks that what it builds against and loads into is stock:
 #  1. the Tcl source tree whose headers and library script directory the generated code is compiled against and run with is byte-identical to the
 #     official 8.6.14 release (tests/tcl-8.6.14.sha256 holds the sha256 of every file of generic/, unix/, library/, libtommath/ and tools/ in the

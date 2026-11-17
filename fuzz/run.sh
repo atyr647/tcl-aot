@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Differential fuzzing: random procs and calls, run by the interpreter alone and with the compiled module; results, error codes and error info must be
 # equal.  Deterministic for a seed.
 #
@@ -38,7 +38,7 @@ esac
 
 # shellcheck disable=SC2086  # cflags and the Tcl flags hold several words
 "$CC" $cflags -w -DTBC_COV -DMODULE=$module $TBC_INC "$TBC_ROOT/tools/module-shell.c" module.c $TBC_LIBS -o shell 2>cc.log || { grep error cc.log | head; exit 1; }
-$TBC_TIMEOUT 1800 ./shell run.tcl >out.txt 2>&1
+tbc_timeout 1800 ./shell run.tcl >out.txt 2>&1
 status=$?
 echo "fuzz $kind seed $seed: $(grep -E 'compared' out.txt | tail -1)"
 grep -E '^coverage of' out.txt | sed 's/^/  /'

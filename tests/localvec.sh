@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Regression test for a slowdown found by measuring: a proc that keeps integer lists in locals (kept as native vectors) and does `lset` in one branch of an `if`
 # and something else in the other copied the vector into a Tcl list on every run through the branch, and ran 10 times SLOWER than the interpreter.  The value of the
 # `if` is popped at once, so it must cost nothing.  Instructions are counted (not time: the box may be busy); the compiled proc must give the same result

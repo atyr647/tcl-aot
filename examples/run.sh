@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Translate examples/collatz.tcl, link the result into a shell, and run examples/main.tcl with the interpreter alone and with the compiled procs.
 cd "$(dirname "$0")/.." || exit 1
 . tools/env.sh || exit 1

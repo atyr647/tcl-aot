@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Which typed variants the differential test enters, and where typed code gives up (D: deoptimisation points, C: post-call stubs, R: resumes after a
 # failure in a proc with frame variables).  Builds the test module with -DTBC_COV.
 #

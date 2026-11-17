@@ -5,7 +5,11 @@
 #   BUILD     where this repository puts what it builds
 # `make tcl` fetches and builds Tcl into the defaults below.
 
-TBC_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# POSIX sh cannot ask a sourced file where it lives: the caller sets TBC_ROOT (the scripts of this repository do), else the current directory is taken
+# to be the root of the repository (`. tools/env.sh` from there).
+if [ -z "${TBC_ROOT:-}" ]; then
+  if [ -f tools/env.sh ]; then TBC_ROOT=$(pwd); else echo "tcl-aot: source tools/env.sh from the root of the repository, or set TBC_ROOT" >&2; return 1 2>/dev/null || exit 1; fi
+fi
 BUILD=${BUILD:-$TBC_ROOT/build}
 TCL_SRC=${TCL_SRC:-$BUILD/tcl8.6.14}
 TCL_OBJ=${TCL_OBJ:-$BUILD/tcl-obj}
@@ -29,10 +33,15 @@ TBC_LIBS="$TCL_OBJ/libtcl8.6.a $TCL_LIBS"
 TCLSH=${TCLSH:-$BUILD/tcl-aot-sh}
 
 # Portability helpers: GNU `timeout` and `sha256sum` are not on a stock macOS (they come with coreutils), so fall back to what the system has.
-# TBC_TIMEOUT is a command prefix (empty when there is no timeout command: the run is then not limited); tbc_sha256_check is `sha256sum -c --quiet`.
+# `tbc_timeout <seconds> <command...>` runs the command with a time limit when the system has a timeout command (the run is not limited when it has none; to
+# set variables for the command, make it `env VAR=value cmd`); tbc_sha256_check is `sha256sum -c --quiet`.
 if command -v timeout >/dev/null 2>&1; then TBC_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then TBC_TIMEOUT=gtimeout
 else TBC_TIMEOUT=""; fi
+tbc_timeout() {
+  tbc_secs=$1; shift
+  if [ -n "$TBC_TIMEOUT" ]; then "$TBC_TIMEOUT" "$tbc_secs" "$@"; else "$@"; fi
+}
 tbc_sha256_check() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum -c --quiet "$@"; else shasum -a 256 -c --quiet "$@"; fi
 }

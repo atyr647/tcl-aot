@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Compiled Tcl against the interpreter and against C: the same kernels (bench/c/kernels.tcl, bench/c/kernels.c), wall time, best of three.  The goal is that
 # the ratio to C of compiled code is small for any kernel written in Tcl; the kernels that are far from it show where the work is.
 #
@@ -10,7 +10,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 "$TCLSH" src/translate.tcl bench/c/kernels.tcl "$tmp/m.c" Kernels >"$tmp/tr.log" 2>&1 || { tail -5 "$tmp/tr.log"; exit 1; }
 "$CC" -O2 -w -DMODULE=Kernels $TBC_INC tools/module-shell.c "$tmp/m.c" $TBC_LIBS -o "$tmp/shell" || exit 1
-gcc -O2 -o "$tmp/c" bench/c/kernels.c || exit 1
+"$CC" -O2 -o "$tmp/c" bench/c/kernels.c || exit 1
 cat > "$tmp/time.tcl" <<'T'
 if {[info exists ::env(COMPILED)]} { load {} Kernels }
 source bench/c/kernels.tcl

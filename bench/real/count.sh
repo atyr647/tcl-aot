@@ -1,11 +1,12 @@
-#!/bin/bash
+#!/bin/sh
 # The tclbench programs by instruction count (callgrind), interpreted and compiled, net of everything but the bodies: the difference between 30 runs of each body (its -iter if smaller) and one, so a program's figure is the cost of
 # its loops, the sum over its benchmarks.  Instruction counts do not vary from run to run, so they rank the work.   bench/real/count.sh [file.bench ...]
 cd "$(dirname "$0")/../.." || exit 1
 . tools/env.sh || exit 1
+abspath() { printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")"; }
 dir=build/tclbench/tclbench/tcl
-files=("$@"); [ ${#files[@]} -eq 0 ] && files=($dir/*.bench)
-H=$(realpath bench/real/harness.tcl); export H
+[ $# -eq 0 ] && set -- "$dir"/*.bench
+H=$(abspath bench/real/harness.tcl); export H
 tmp=${KEEP:-$(mktemp -d)}; [ -z "$KEEP" ] && trap "rm -rf $tmp" EXIT; mkdir -p $tmp
 cat > "$tmp/main.c" <<'C'
 #include <tcl.h>
@@ -31,11 +32,11 @@ tbc::capture write $env(CAPTURED)
 C
 VG="valgrind --tool=callgrind --callgrind-out-file=/dev/null"
 # cnt <bench file> <shell> <variable assignments...>: the instructions of one run of the harness on the file, with those variables set
-cnt() { local f=$1 sh=$2; shift 2; ( cd $(dirname $f); env "$@" $VG $sh $H $(basename $f) 2>&1 >/dev/null </dev/null | grep -o "Collected : [0-9]*" | cut -d' ' -f3 ); }
+cnt() { cf=$1; csh=$2; shift 2; ( cd $(dirname $cf); env "$@" $VG $csh $H $(basename $cf) 2>&1 >/dev/null </dev/null | grep -o "Collected : [0-9]*" | cut -d' ' -f3 ); }
 printf "%-12s %14s %14s %8s\n" file "interp Minstr" "compiled Minstr" ratio
-for f in "${files[@]}"; do
-  b=$(basename $f .bench); w="$tmp/$b"; mkdir -p $w; f=$(realpath $f)
-  BF=$f CAPTURED=$w/cap.tcl COUNT=30 timeout 600 "$tmp/shell0" "$tmp/cap.tcl" >/dev/null 2>&1 </dev/null
+for f in "$@"; do
+  b=$(basename $f .bench); w="$tmp/$b"; mkdir -p $w; f=$(abspath $f)
+  tbc_timeout 600 env BF=$f CAPTURED=$w/cap.tcl COUNT=30 "$tmp/shell0" "$tmp/cap.tcl" >/dev/null 2>&1 </dev/null
   [ -s $w/cap.tcl ] || : > $w/cap.tcl
   python3 - $w/cap.tcl <<'PY'
 import re, sys

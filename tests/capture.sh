@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # The capture loop: a program builds procs from text at run time, so a module built from its source holds no code for them.  Run it once with the
 # capture on, translate what was captured, build a module from that, and run the program again: its procs now run compiled, with the same results.
 cd "$(dirname "$0")/.." || exit 1

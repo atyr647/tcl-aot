@@ -8,4 +8,4 @@
   that shows its extent.
 * Claims about speed need a number that someone else can reproduce: `bench/run.sh count` counts instructions and does not depend on the load of the machine.
 * Tcl and its libraries are not modified, patched or vendored.  `tests/pristine.sh` checks the tree the code is built against.
-* Shell scripts are bash; C is C99 with GNU extensions (`__builtin_*`, `always_inline`); Tcl is 8.6.
+* Shell scripts are POSIX sh (`#!/bin/sh`: no arrays, `[[ ]]`, `local`, `${v//}`, `BASH_SOURCE`, `pipefail`, `wait -n`, `jobs -p`; `printf '%s\n'` for data, not `echo`), checked with `sh -n` and `dash` (decision 59).  Utilities are the ones every Linux, macOS, BSD and busybox has; python3 is used only in the optional valgrind benchmarks.  C is C99 with GNU extensions (`__builtin_*`, `always_inline`); Tcl is 8.6.

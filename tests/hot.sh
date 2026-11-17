@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # The reports that say how well compiled code does: TBC_REPORT=1 (at translation: how much of each proc is typed code, what it cannot do) and tbc::hot (at run
 # time, in a module built with -DTBC_COV: where typed code handed over, per proc and instruction).  Checked in a single-file build and in a split one (the counters
 # are shared state there), and a build without -DTBC_COV must have no tbc::hot.
@@ -71,10 +71,10 @@ check "bad option" {[catch {tbc::hot -nosuch}]}
 puts "checks failed: $bad"
 TCL
 rep=$(TBC_REPORT=1 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/one.c" Hot 2>&1 >/dev/null | grep '^REPORT')
-echo "$rep" | grep -q '^REPORT ::h_ok/B .*100%.*0 unsupported' || { echo "hot: FAILED, the report of h_ok:"; echo "$rep"; exit 1; }
-echo "$rep" | grep -q '^REPORT     unsupported: dictFirst@' || { echo "hot: FAILED, the report does not list dictFirst as unsupported:"; echo "$rep"; exit 1; }
-echo "$rep" | grep -q '^REPORT ::h_nan/.*locals.*NaN=' || { echo "hot: FAILED, the report of a proc with variables named NaN and Inf:"; echo "$rep" | grep h_nan; exit 1; }
-echo "$rep" | grep -q '^REPORT ::h_sum/Bw ' || { echo "hot: FAILED, the report has no line for the tagged variant of h_sum"; exit 1; }
+printf '%s\n' "$rep" | grep -q '^REPORT ::h_ok/B .*100%.*0 unsupported' || { echo "hot: FAILED, the report of h_ok:"; printf '%s\n' "$rep"; exit 1; }
+printf '%s\n' "$rep" | grep -q '^REPORT     unsupported: dictFirst@' || { echo "hot: FAILED, the report does not list dictFirst as unsupported:"; printf '%s\n' "$rep"; exit 1; }
+printf '%s\n' "$rep" | grep -q '^REPORT ::h_nan/.*locals.*NaN=' || { echo "hot: FAILED, the report of a proc with variables named NaN and Inf:"; printf '%s\n' "$rep" | grep h_nan; exit 1; }
+printf '%s\n' "$rep" | grep -q '^REPORT ::h_sum/Bw ' || { echo "hot: FAILED, the report has no line for the tagged variant of h_sum"; exit 1; }
 echo "hot: TBC_REPORT lists the typed share of every variant and the unsupported instructions: ok"
 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/split.c" Hot -split 2 >/dev/null 2>&1 || { echo "hot: split translation failed"; exit 1; }
 tools/build-module.sh "$tmp/split.c" "$tmp/split.o" -j 2 >/dev/null 2>&1 || { echo "hot: plain split build failed"; exit 1; }
@@ -85,10 +85,10 @@ for mode in single split; do
   fi
   "$CC" -O1 -w -DTBC_COV -DMODULE=Hot $TBC_INC tools/module-shell.c "$src" $TBC_LIBS -o "$tmp/shell_$mode" 2>"$tmp/cc.log" || { echo "hot: linking the $mode counter shell failed"; tail -5 "$tmp/cc.log"; exit 1; }
   out=$(HOT_PROCS="$tmp/p.tcl" "$tmp/shell_$mode" "$tmp/run.tcl" 2>&1)
-  echo "$out" | grep -q '^checks failed: 0$' || { echo "hot: FAILED, tbc::hot in the $mode build:"; echo "$out" | head; exit 1; }
+  printf '%s\n' "$out" | grep -q '^checks failed: 0$' || { echo "hot: FAILED, tbc::hot in the $mode build:"; printf '%s\n' "$out" | head; exit 1; }
 done
 echo "hot: tbc::hot reports entries, resumes and hand-over sites per proc, in a single-file and in a split build: ok"
 "$CC" -O1 -w -DMODULE=Hot $TBC_INC tools/module-shell.c "$tmp/one.c" $TBC_LIBS -o "$tmp/shell_none" 2>"$tmp/cc.log" || { echo "hot: linking the plain shell failed"; exit 1; }
 out=$(HOT_NONE=1 HOT_PROCS="$tmp/p.tcl" "$tmp/shell_none" "$tmp/run.tcl" 2>&1)
-echo "$out" | grep -q '^hot-command: 0$' || { echo "hot: FAILED, a module built without -DTBC_COV has tbc::hot: $out"; exit 1; }
+printf '%s\n' "$out" | grep -q '^hot-command: 0$' || { echo "hot: FAILED, a module built without -DTBC_COV has tbc::hot: $out"; exit 1; }
 echo "hot: a module built without -DTBC_COV has no counters and no tbc::hot: ok"

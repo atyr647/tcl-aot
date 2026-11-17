@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # What a call into a compiled proc from interpreted code costs, against the interpreter's own call: instructions per call (callgrind, steady state: the difference of 5000 and 1000
 # calls), for one proc of each shape (bench/entry/procs.tcl, the arguments in bench/entry/cases.txt).  A ratio under 1.00 is a proc that is slower compiled than interpreted.
 # This is where the figures of liteProc (src/translate.tcl) come from: the entry costs about 700 instructions, and typed code of a loop-free body saves about 5 per instruction.
@@ -22,5 +22,5 @@ printf "%-12s %12s %12s %8s\n" proc "interp/call" "compiled/call" ratio
 while IFS= read -r line; do
   p=${line%% *}; arg=${line#* }
   i0=$(cnt 1000 x X=1); i1=$(cnt 5000 x X=1); c0=$(cnt 1000 x COMPILED=1); c1=$(cnt 5000 x COMPILED=1)
-  python3 -c "print('%-12s %12.0f %12.0f %8.2f' % ('$p', ($i1-$i0)/4000, ($c1-$c0)/4000, ($i1-$i0)/max(1,($c1-$c0))))"
+  awk -v p="$p" -v i0="$i0" -v i1="$i1" -v c0="$c0" -v c1="$c1" 'BEGIN { d = c1 - c0; if (d < 1) d = 1; printf "%-12s %12.0f %12.0f %8.2f\n", p, (i1 - i0) / 4000, (c1 - c0) / 4000, (i1 - i0) / d }'
 done < bench/entry/cases.txt

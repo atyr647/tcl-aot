@@ -1,12 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 # The tclbench programs, interpreted and compiled: for each file, a run with the capture on (the procs it builds), a module from what was captured, then the
 # file again, interpreted and compiled, timed by harness.tcl.   bench/real/run.sh [file.bench ...]   (bench/real/fetch.sh first)
 cd "$(dirname "$0")/../.." || exit 1
 . tools/env.sh || exit 1
+abspath() { printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")"; }
 dir=build/tclbench/tclbench/tcl
 [ -d $dir ] || { echo "run bench/real/fetch.sh first" >&2; exit 1; }
-files=("$@"); [ ${#files[@]} -eq 0 ] && files=($dir/*.bench)
-H=$(realpath bench/real/harness.tcl); export H
+[ $# -eq 0 ] && set -- "$dir"/*.bench
+H=$(abspath bench/real/harness.tcl); export H
 tmp=${KEEP:-$(mktemp -d)}; [ -z "$KEEP" ] && trap "rm -rf $tmp" EXIT; mkdir -p $tmp
 cat > "$tmp/main.c" <<'C'
 #include <tcl.h>
@@ -31,9 +32,9 @@ catch { source $env(H) }
 tbc::capture write $env(CAPTURED)
 C
 printf "%-14s %-38s %10s %10s %8s\n" file benchmark "interp ns" "comp ns" speedup
-for f in "${files[@]}"; do
+for f in "$@"; do
   b=$(basename $f .bench); w="$tmp/$b"; mkdir -p $w
-  BF=$(realpath $f) CAPTURED=$w/cap.tcl timeout 300 "$tmp/shell0" "$tmp/cap.tcl" >/dev/null 2>&1 </dev/null
+  tbc_timeout 300 env BF=$(abspath $f) CAPTURED=$w/cap.tcl "$tmp/shell0" "$tmp/cap.tcl" >/dev/null 2>&1 </dev/null
   [ -s $w/cap.tcl ] || { echo "$b: nothing captured"; cp /dev/null $w/cap.tcl; }
   # (the harness's own procs are left to the interpreter: the timing runs inside `bench`)
   python3 - $w/cap.tcl <<'PY'
@@ -48,7 +49,7 @@ open(p, 'w').write(''.join(out))
 PY
   "$TCLSH" src/translate.tcl $w/cap.tcl $w/m.c Realbench >$w/tr.log 2>&1 || { echo "$b: translate failed"; continue; }
   "$CC" -O2 -w -DMODINIT=Realbench_Init $TBC_INC "$tmp/main.c" $w/m.c $TBC_LIBS -o $w/shell >$w/cc.log 2>&1 || { echo "$b: build failed"; continue; }
-  ( cd $(dirname $f); timeout 300 $w/shell $H $(basename $f) > $w/i.txt 2>&1 </dev/null )
-  ( cd $(dirname $f); COMPILED=1 timeout 300 $w/shell $H $(basename $f) > $w/c.txt 2>&1 </dev/null )
+  ( cd $(dirname $f); tbc_timeout 300 $w/shell $H $(basename $f) > $w/i.txt 2>&1 </dev/null )
+  ( cd $(dirname $f); tbc_timeout 300 env COMPILED=1 $w/shell $H $(basename $f) > $w/c.txt 2>&1 </dev/null )
   python3 "$(dirname "$H")/compare.py" $b $w/i.txt $w/c.txt
 done

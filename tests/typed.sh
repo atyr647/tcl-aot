@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Typed code must not hand over at integer operations whose operands are integers written other than canonically (0xFF, 010, 0b11): a checksum loop that
 # masks with 0xFF stayed boxed at every operation and ran 1.2x faster than the interpreter instead of 4.7x.  TBC_DEADOPS=1 lists the instructions at which
 # typed code hands over.
@@ -22,7 +22,7 @@ proc tt_scan {data} {
 }
 TCL
 out=$(TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/t.tcl" "$tmp/t.c" Typedtest 2>&1)
-if echo "$out" | grep -q -E '^DEADOP (bit|invokeStk1 ::tcl::binary::scan :: ::tt_scan/B)'; then echo "typed: FAILED, typed code hands over at:"; echo "$out" | grep -E '^DEADOP (bit|invokeStk1 ::tcl::binary::scan :: ::tt_scan/B)'; exit 1; fi
+if printf '%s\n' "$out" | grep -q -E '^DEADOP (bit|invokeStk1 ::tcl::binary::scan :: ::tt_scan/B)'; then echo "typed: FAILED, typed code hands over at:"; printf '%s\n' "$out" | grep -E '^DEADOP (bit|invokeStk1 ::tcl::binary::scan :: ::tt_scan/B)'; exit 1; fi
 echo "typed: no hand-over at integer operations on integers written as 0xFF, or at binary scan with a number format: ok"
 
 # a key built from integers and literals that goes straight to an element of a native array is built as text in a buffer, not as a Tcl object (tbc_cat_*)
@@ -53,7 +53,7 @@ cat > "$tmp/e.tcl" <<'TCL'
 proc te_loop {l} { set n 0; foreach v $l { if {$v == {}} { continue }; if {$v != ""} { incr n } }; return $n }
 TCL
 out=$(TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/e.tcl" "$tmp/e.c" Emptytest 2>&1)
-if echo "$out" | grep -q -E '^DEADOP (eq|neq) '; then echo "typed: FAILED, == against the empty string hands over:"; echo "$out" | grep -E '^DEADOP (eq|neq) '; exit 1; fi
+if printf '%s\n' "$out" | grep -q -E '^DEADOP (eq|neq) '; then echo "typed: FAILED, == against the empty string hands over:"; printf '%s\n' "$out" | grep -E '^DEADOP (eq|neq) '; exit 1; fi
 echo "typed: == and != against the empty string stay in typed code: ok"
 
 # a proc that uses floating-point numbers keeps a loop over a list of numbers of either kind in typed code: its sums are tagged numbers (W), and the first addition does not
@@ -63,9 +63,9 @@ proc tw_sum {l} { set sum 0; set sumsq 0.0; foreach v $l { set sum [expr {$sum +
 proc tw_int {l} { set sum 0; foreach v $l { set sum [expr {$sum + $v}] }; return $sum }
 TCL
 out=$(env -u TBC_FORCE_WPOLICY TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/w.tcl" "$tmp/w.c" Wtest 2>&1)
-if echo "$out" | grep -q -E '^DEADOP add .*tw_sum'; then echo "typed: FAILED, the sum of a list of numbers hands over:"; echo "$out" | grep -E '^DEADOP add'; exit 1; fi
-echo "$out" | grep -E '::tw_sum/B ' | grep -q ' W ' || { echo "typed: FAILED, tw_sum has no tagged number variable:"; echo "$out" | grep tw_sum; exit 1; }
-echo "$out" | grep -E '::tw_int/B ' | grep -q ' W' && { echo "typed: FAILED, an integer-only proc got tagged numbers:"; echo "$out" | grep tw_int; exit 1; }
+if printf '%s\n' "$out" | grep -q -E '^DEADOP add .*tw_sum'; then echo "typed: FAILED, the sum of a list of numbers hands over:"; printf '%s\n' "$out" | grep -E '^DEADOP add'; exit 1; fi
+printf '%s\n' "$out" | grep -E '::tw_sum/B ' | grep -q ' W ' || { echo "typed: FAILED, tw_sum has no tagged number variable:"; printf '%s\n' "$out" | grep tw_sum; exit 1; }
+printf '%s\n' "$out" | grep -E '::tw_int/B ' | grep -q ' W' && { echo "typed: FAILED, an integer-only proc got tagged numbers:"; printf '%s\n' "$out" | grep tw_int; exit 1; }
 echo "typed: sums of numbers of either kind stay in typed code as tagged numbers (floating-point procs only): ok"
 
 # a tagged number is boxed only where an object is needed (here: the two values put in the returned list), not at every instruction of a loop (a boxing at the edge into each add and each
@@ -82,9 +82,9 @@ proc ta_bits {l} { set s 0; foreach v $l { set s [expr {$s ^ $v}] }; return $s }
 proc ta_count {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s $i }; return $s }
 TCL
 out=$(env -u TBC_FORCE_WPOLICY TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/a.tcl" "$tmp/a.c" Adapttest 2>&1)
-echo "$out" | grep -E '::ta_sum/Bw ' | grep -q ' W' || { echo "typed: FAILED, ta_sum has no adaptive tagged-number variant:"; echo "$out" | grep ta_sum; exit 1; }
-echo "$out" | grep -E '::ta_sum/B ' | grep -q ' W' && { echo "typed: FAILED, the first variant of ta_sum is already tagged:"; echo "$out" | grep ta_sum; exit 1; }
-echo "$out" | grep -E '::ta_(bits|count)/[A-Za-z]*w ' && { echo "typed: FAILED, a bit-operation or loop-free-of-data proc got an adaptive variant"; exit 1; }
+printf '%s\n' "$out" | grep -E '::ta_sum/Bw ' | grep -q ' W' || { echo "typed: FAILED, ta_sum has no adaptive tagged-number variant:"; printf '%s\n' "$out" | grep ta_sum; exit 1; }
+printf '%s\n' "$out" | grep -E '::ta_sum/B ' | grep -q ' W' && { echo "typed: FAILED, the first variant of ta_sum is already tagged:"; printf '%s\n' "$out" | grep ta_sum; exit 1; }
+printf '%s\n' "$out" | grep -E '::ta_(bits|count)/[A-Za-z]*w ' && { echo "typed: FAILED, a bit-operation or loop-free-of-data proc got an adaptive variant"; exit 1; }
 grep -q "tbc_wp_" "$tmp/a.c" || { echo "typed: FAILED, no adaptive flag in the generated code"; exit 1; }
 echo "typed: a proc that accumulates over data has an adaptive tagged-number variant; bit-operation and counting procs have none: ok"
 
@@ -94,7 +94,7 @@ proc tc_lit {x} { if {$x == "plain"} { return 1 }; if {$x != "left"} { return 2 
 proc tc_two {a b} { if {[lindex $a 0] == $a && [lindex $b 0] == $b} { return 1 }; return [expr {$a < $b}] }
 TCL
 out=$(TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/c.tcl" "$tmp/c.c" Cmptest 2>&1)
-if echo "$out" | grep -q -E '^DEADOP (eq|neq|lt|le|gt|ge) '; then echo "typed: FAILED, a comparison of objects hands over:"; echo "$out" | grep -E '^DEADOP (eq|neq|lt|le|gt|ge) '; exit 1; fi
+if printf '%s\n' "$out" | grep -q -E '^DEADOP (eq|neq|lt|le|gt|ge) '; then echo "typed: FAILED, a comparison of objects hands over:"; printf '%s\n' "$out" | grep -E '^DEADOP (eq|neq|lt|le|gt|ge) '; exit 1; fi
 grep -q "tbc_cmpo(" "$tmp/c.c" || { echo "typed: FAILED, no generic comparison in the code of tc_lit"; exit 1; }
 echo "typed: comparisons of objects and of text literals stay in typed code: ok"
 

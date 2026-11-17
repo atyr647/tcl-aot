@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Undefined behaviour in the generated code and in the runtime header.  What the C standard leaves undefined may give the right answer in one build and the
 # wrong one in another (the shared small integers once returned the object for -1 when asked for 9223372036854775807 + 256, in one optimised module and not in
 # a smaller one), so the answer of a test is not enough: the test module is built with -fsanitize=undefined (typed code, boxed code, tables, the runtime
@@ -31,10 +31,10 @@ for mode in plain forced; do
   for attach in lazy eager; do
     if [ $attach = eager ]; then export TBC_EAGER=1; else unset TBC_EAGER; fi
     out=$("$tmp/shell_$mode" tests/differential.tcl 2>&1)
-    if [ $? -eq 0 ] && ! echo "$out" | grep -q -E 'runtime error|MISMATCH|NOT COMPILED'; then
-      echo "ubsan: $mode, $attach attach: $(echo "$out" | grep -E 'compared' | head -1)"
+    if [ $? -eq 0 ] && ! printf '%s\n' "$out" | grep -q -E 'runtime error|MISMATCH|NOT COMPILED'; then
+      echo "ubsan: $mode, $attach attach: $(printf '%s\n' "$out" | grep -E 'compared' | head -1)"
     else
-      echo "$out" | grep -E -A6 'runtime error|MISMATCH|NOT COMPILED' | head -30
+      printf '%s\n' "$out" | grep -E -A6 'runtime error|MISMATCH|NOT COMPILED' | head -30
       echo "ubsan: FAILED ($mode, $attach attach)"
       fail=1
     fi
@@ -42,10 +42,10 @@ for mode in plain forced; do
   unset TBC_EAGER
   # the native matcher (include/tbc_re.h) too: its tables, class sets and bit operations run under the sanitizer on the fuzz of tests/refuzz.tcl
   out=$("$tmp/shell_$mode" tests/refuzz.tcl 5 1500 2>&1)
-  if [ $? -eq 0 ] && ! echo "$out" | grep -q -E 'runtime error|MISMATCH'; then
-    echo "ubsan: $mode, native matcher: $(echo "$out" | grep -E '^refuzz seed' | head -1)"
+  if [ $? -eq 0 ] && ! printf '%s\n' "$out" | grep -q -E 'runtime error|MISMATCH'; then
+    echo "ubsan: $mode, native matcher: $(printf '%s\n' "$out" | grep -E '^refuzz seed' | head -1)"
   else
-    echo "$out" | grep -E -A6 'runtime error|MISMATCH' | head -30
+    printf '%s\n' "$out" | grep -E -A6 'runtime error|MISMATCH' | head -30
     echo "ubsan: FAILED ($mode, native matcher)"
     fail=1
   fi

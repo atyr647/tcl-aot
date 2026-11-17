@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Idiomatic programs against the interpreter: wall time, best of three, results compared.   bench/idiom/run.sh
 cd "$(dirname "$0")/../.." || exit 1
 . tools/env.sh || exit 1

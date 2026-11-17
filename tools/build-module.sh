@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Build a module written by `translate.tcl ... -split N` into one object file.
 #
 #   tools/build-module.sh <module.c> <out.o> [-j N]
@@ -7,15 +7,18 @@
 # clang), the tables and Init (<module>.c) with CFLAGS_I (-O1), all in parallel.  The parts are linked with `ld -r` into one relocatable object
 # that exports only <Init>_Init, so that two modules in one program cannot clash.  With MERGE=0 the parts are left in an archive <out>.a instead
 # (for a toolchain whose linker has no relocatable output).
-set -euo pipefail
+#
+# POSIX sh: the parallelism is a pool of tokens in a FIFO (`mkfifo`, `exec 3<>`), so no `wait -n`, no `jobs -p`, no polling.
+set -eu
 
 [ $# -ge 2 ] || { echo "usage: $0 <module.c> <out.o> [-j N]" >&2; exit 2; }
 mod=$1
 out=$2
-jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+jobs=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 [ "${3:-}" = "-j" ] && jobs=${4:?"-j needs a number"}
 
-. "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+TBC_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$TBC_ROOT/tools/env.sh"
 if "$CC" --version 2>/dev/null | grep -qi clang; then boxed_default=-O1; else boxed_default=-Og; fi
 CFLAGS_V=${CFLAGS_V:--O2}
 CFLAGS_G=${CFLAGS_G:-$boxed_default}
@@ -32,21 +35,22 @@ compile() {
   "$CC" $1 -w $TBC_INC -I"$(dirname "$mod")" -c "$2" -o "$tmp/$(basename "${2%.c}").o"
 }
 
-# bash 3.2 (macOS) has no `wait -n`: poll instead
-pids=""
-waitslot() { while [ "$(jobs -rp | wc -l)" -ge "$1" ]; do sleep 0.05; done; }
-for f in "$base"_v*.c; do
-  compile "$CFLAGS_V" "$f" &
-  pids="$pids $!"
-  waitslot "$jobs"
+# a token pool: one token per job that may run at once; a job takes one before it starts and puts it back when it ends (also when it fails)
+mkfifo "$tmp/tokens"
+exec 3<>"$tmp/tokens"
+n=0
+while [ "$n" -lt "$jobs" ]; do echo >&3; n=$((n + 1)); done
+n=0
+for f in "$base"_v*.c "$base"_g*.c "$mod"; do
+  flags=$CFLAGS_V
+  case $f in "$base"_g*.c) flags=$CFLAGS_G ;; "$mod") flags=$CFLAGS_I ;; esac
+  read -r _ <&3
+  if [ -f "$tmp/failed" ]; then break; fi
+  n=$((n + 1))
+  ( compile "$flags" "$f" || : > "$tmp/failed"; echo >&3 ) &
 done
-for f in "$base"_g*.c "$mod"; do
-  flags=$CFLAGS_G; [ "$f" = "$mod" ] && flags=$CFLAGS_I
-  compile "$flags" "$f" &
-  pids="$pids $!"
-  waitslot "$jobs"
-done
-for p in $pids; do wait "$p" || { echo "$0: a compile failed" >&2; exit 1; }; done
+wait
+if [ -f "$tmp/failed" ]; then echo "$0: a compile failed" >&2; exit 1; fi
 
 if [ "${MERGE:-1}" = 1 ]; then
   # one relocatable object that exports only <Init>_Init: the one place where platforms differ (Mach-O has no objcopy; its linker has the switch)

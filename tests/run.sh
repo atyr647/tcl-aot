@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Run the test suite.
 #
 #   tests/run.sh          everything: differential, report, proc wrapper, forced hand-over, guard, typed, osr, hot (reports), cmdmap, names, nest cap, capture loop, pristine Tcl, fuzz seeds, valgrind if installed
@@ -29,21 +29,21 @@ tools/build-module.sh "$tmp/p.c" "$tmp/p.o" || { fail "building the test module"
 check_run() {
   label=$1; shift
   out=$("$@" 2>&1)
-  if [ $? -eq 0 ] && ! echo "$out" | grep -q -E 'MISMATCH|LEAK|NOT COMPILED|FAIL'; then
-    echo "$label: $(echo "$out" | grep -E 'compared|passed' | head -1)"
+  if [ $? -eq 0 ] && ! printf '%s\n' "$out" | grep -q -E 'MISMATCH|LEAK|NOT COMPILED|FAIL'; then
+    echo "$label: $(printf '%s\n' "$out" | grep -E 'compared|passed' | head -1)"
   else
-    echo "$out" | grep -E 'MISMATCH|LEAK|NOT COMPILED|FAIL|rror' | head -20
+    printf '%s\n' "$out" | grep -E 'MISMATCH|LEAK|NOT COMPILED|FAIL|rror' | head -20
     fail "$label"
   fi
 }
 
 for build in suite suite1; do
   # the memory-growth checks at the end of the differential test take a while: once per attach mode, on the split build
-  leakcheck=(); [ $build = suite1 ] && leakcheck=(TBC_NOLEAK=1)
+  leakcheck=""; [ $build = suite1 ] && leakcheck=TBC_NOLEAK=1
   for attach in lazy eager; do
     if [ $attach = eager ]; then export TBC_EAGER=1; else unset TBC_EAGER; fi
     echo "== $build, $attach attach"
-    check_run "differential" env TBC_ERRINFO=1 "${leakcheck[@]}" "$tmp/$build" tests/differential.tcl
+    check_run "differential" env TBC_ERRINFO=1 $leakcheck "$tmp/$build" tests/differential.tcl
     check_run "report" "$tmp/$build" tests/report.tcl
     check_run "proc wrapper" "$tmp/$build" tests/procwrap.tcl
   done
@@ -67,8 +67,8 @@ done
 
 echo "== guard, nest cap, capture loop, unmodified Tcl, undefined behaviour"
 for t in guard typed osr hot cmdmap names nestcap capture pristine lite ubsan localvec nv; do
-  out=$(tests/$t.sh 2>&1) || { echo "$out"; fail "tests/$t.sh"; continue; }
-  echo "$out" | grep -E ': ok$'
+  out=$(tests/$t.sh 2>&1) || { printf '%s\n' "$out"; fail "tests/$t.sh"; continue; }
+  printf '%s\n' "$out" | grep -E ': ok$'
 done
 
 echo "== fuzz"
@@ -77,7 +77,7 @@ for seed in 1 2; do fuzz/run.sh boxed $seed || fail "fuzz boxed $seed"; done
 TBC_FORCE_RATE=13 TBC_FORCE_SEED=1 fuzz/run.sh typed 3 || fail "fuzz typed 3 with forced hand-over"
 # the native matcher against Tcl's: random patterns of its subset (and some outside it), random subjects, and the whole command with its switches and variables
 for seed in 1 2 3; do
-  out=$("$tmp/suite" tests/refuzz.tcl $seed 8000 2>&1) && echo "refuzz seed $seed: $(echo "$out" | grep -E '^refuzz seed' | head -1)" || { echo "$out" | grep -E 'MISMATCH|refuzz' | head -10; fail "refuzz seed $seed"; }
+  out=$("$tmp/suite" tests/refuzz.tcl $seed 8000 2>&1) && echo "refuzz seed $seed: $(printf '%s\n' "$out" | grep -E '^refuzz seed' | head -1)" || { printf '%s\n' "$out" | grep -E 'MISMATCH|refuzz' | head -10; fail "refuzz seed $seed"; }
 done
 
 if command -v valgrind >/dev/null; then

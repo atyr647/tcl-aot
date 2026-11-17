@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Procs of the program that have the names of procs of the translator itself (lt, kd, emit, analyze, operand, effect, refuse, prepare, allprocs...) are compiled like any
 # other: the translator reads its inputs from the program's definitions, not from what is defined under the name in its own interpreter by the time it needs them.
 cd "$(dirname "$0")/.." || exit 1
@@ -28,9 +28,9 @@ TCL
 "$CC" -O1 -w -DMODULE=Names $TBC_INC tools/module-shell.c "$tmp/p.c" $TBC_LIBS -o "$tmp/shell" 2>"$tmp/cc.log" || { echo "names: build failed"; tail -3 "$tmp/cc.log"; exit 1; }
 want=$(NAMES_PROCS="$tmp/p.tcl" "$tmp/shell" "$tmp/run.tcl" 2>&1)
 got=$(NAMES_COMPILED=1 NAMES_PROCS="$tmp/p.tcl" "$tmp/shell" "$tmp/run.tcl" 2>&1)
-[ "$(echo "$got" | head -1)" = "$(echo "$want" | head -1)" ] || { echo "names: FAILED, results differ: interpreter '$(echo "$want" | head -1)', compiled '$(echo "$got" | head -1)'"; exit 1; }
+[ "$(printf '%s\n' "$got" | head -1)" = "$(printf '%s\n' "$want" | head -1)" ] || { echo "names: FAILED, results differ: interpreter '$(printf '%s\n' "$want" | head -1)', compiled '$(printf '%s\n' "$got" | head -1)'"; exit 1; }
 for p in lt analyze emit kd operand effect prepare refuse allprocs ordinary; do
-  echo "$got" | grep '^attached:' | grep -q "::$p\b" || { echo "names: FAILED, ::$p was left to the interpreter ($(echo "$got" | grep '^attached:'))"; exit 1; }
+  printf '%s\n' "$got" | grep '^attached:' | grep -q -E "::$p( |\$)" || { echo "names: FAILED, ::$p was left to the interpreter ($(printf '%s\n' "$got" | grep '^attached:'))"; exit 1; }
 done
 echo "names: procs named like the translator's own are compiled and give the interpreter's results: ok"
 

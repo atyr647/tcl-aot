@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Time the benchmark procs with the interpreter alone and with the compiled module, and, if valgrind is installed, count instructions (which, unlike
 # wall time, does not depend on the machine's load).
 #

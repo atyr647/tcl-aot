@@ -8,7 +8,7 @@
 #
 # To use a Tcl 8.6.14 of your own instead of the downloaded one, set TCL_SRC (its source tree) and TCL_OBJ (the directory it was built in, out of tree).
 
-SHELL := /bin/bash
+SHELL := /bin/sh
 
 TCL_VERSION := 8.6.14
 TCL_SHA256  := 5880225babf7954c58d4fb0f5cf6279104ce1cd6aa9b71e9a6322540e1c4de66

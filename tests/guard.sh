@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # A module compiled without the macros libtcl was built with must refuse to load: the object-allocation macros of Tcl's headers would take objects
 # from a free list that nothing refills (a leak of 80 bytes per loop iteration in boxed code).
 cd "$(dirname "$0")/.." || exit 1
