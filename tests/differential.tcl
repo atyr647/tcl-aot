@@ -661,6 +661,20 @@ foreach l {{} {5} {1 2 3} {3 2 1} {1.5 2 0x10 3} {0x10 16} {16 0x10} {2.0 2} {2 
 lappend calls {mm_clamp {1 2} abc 3} {mm_clamp {1 2} 1 {}}
 foreach l {{} {1} {1 2 3} {-1.5 2 -3} {0.5 0.5 -2} {9223372036854775807 1} {9223372036854775807 0.5} {-9223372036854775808 -1} {1e300 1e300} {2.5 -2.5 3} {abc} {1 abc} {0x10 0.5}} { lappend calls [list mw_funcs $l] }
 foreach a {0 1 -1 7 2.5 -2.5 0x10 9223372036854775807 -9223372036854775808 1e300 abc} { foreach b {0 1 -1 3 0.5 -0.5 9223372036854775807 4611686018427387904 abc} { lappend calls [list mw_one $a $b] } }
+# Phase A, blocker 3: lassign (la_*)
+set long {}; for {set i 0} {$i < 176} {incr i} { lappend long [expr {$i * 0.25}] }
+foreach r [list {1 2 3 4} {1 2} {} {1 2 3 4 5 6 7 8 9} "a \{b" " 1 2 3 4 " {{1 2} {3 4} 5 6} 0x10 {1.5 2.5 3.5 4.5} $long {1 2 3 abc} {1 2 3 4 5 6 7 8}] {
+    foreach p {la_sum la_rest la_many la_none la_ph la_shared la_catch la_used} { lappend calls [list $p $r] }
+    lappend calls [list la_dist $r 1 2] [list la_loop [list $r $r]]
+}
+lappend calls [list la_walls [list {0 0 4 0} {0 3 4 3} $long {0 0 0 4}] 1.5] {la_walls {} 1}
+# lindex with several indices (lx_*)
+set lxm [list {{a b c} {d e f} {g h i}} {{1 2} {3 4}} {} "a \{b" {{1 {2 3}} {4 5}} {a b c} 5 {{x y} {} {z}} "\{a b\} \{c"]
+set lxi {0 1 2 -1 5 end end-1 1+1 0x1 a " 1" 1.5 {} {1 2} 9223372036854775807}
+foreach m $lxm { foreach i $lxi { foreach j {0 1 end x} { lappend calls [list lx_multi $m $i $j] }; lappend calls [list lx_three $m $i 0 1] [list lx_three $m 0 $i 1] }
+    lappend calls [list lx_const $m] [list lx_end $m] }
+foreach n {0 1 3} { lappend calls [list lx_loop {{1 2 3} {4 5 6} {7 8 9}} $n] [list lx_dbl {{1.5 2 3} {4 5.5 6} {7 8 9.25}} $n] }
+lappend calls {lx_loop {{1 2} {3 4}} 3} {lx_dbl {{1 2} {3 4}} 3} {lx_loop {{1 2} {3 x}} 2}
 lappend calls {mm_redef}
 
 # TBC_SMALL=1: leave out the calls that loop long (for runs under valgrind)
@@ -698,7 +712,7 @@ puts "attached: [llength [tbc::attached]] of [llength [info commands t_*]]"
 set B [runall]
 puts "attached after the calls: [llength [tbc::attached]]"
 # procs that must run compiled (a refused proc would run interpreted and match trivially): the constructs that were once refused
-set mustAttach {::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop
+set mustAttach {::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop
     ::tl_dictfor_break ::tl_dictfor_ret ::tl_dictfor_err ::tl_dictfor_catch {::tw_odd?} {::tw_star*} {::tw_br[a]} {::tw with space} {::tw"quote} {::tw\back} {::tw;semi} ::tw_caller ::tb_try1 ::tb_try2 ::tb_try3 ::tb_catch1 ::tb_try4 ::tb_try5}
 foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } }
 if {[info exists ::notCompiled]} { puts "$::notCompiled procs that must run compiled do not" ; exit 1 }

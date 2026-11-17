@@ -1708,6 +1708,10 @@ proc stepT0 {key pc in} {
                 return [R fall [list {*}[lrange $in 0 [expr {$pl-1}]] I] "\{ int64_t i_ = si$pi; if (TBC_UNLIKELY((uint64_t) i_ >= (uint64_t) av$av.n)) goto D$pc; si$pl = av$av.p\[i_\]; \}"]
             }
             if {[kd $el] ne "B"} { return $dead }
+            if {[kd $ei] eq "L" && [lt $ei] ne ""} {
+                set il [litIntList [lindex $PI($P,lits) [lt $ei]]]
+                if {$il ne ""} { return [lindexChain $key $P $pc $in $pl [lmap w $il {list C $w}]] }
+            }
             set fl [fl $key $in]
             if {[kd $ei] eq "I"} {
                 set c "\{ Tcl_Obj *r_ = tbc_lindex_i(interp, s$pl, si$pi); if (!r_) goto $fl; Tcl_DecrRefCount(s$pl); s$pl = r_; \}"
@@ -1877,6 +1881,21 @@ proc stepT0 {key pc in} {
             if {$op in {strfind strrfind strindex strrange strrangeImm strmatch regexp}} {
                 set r [stepStrFast $key $pc $in $d $op $a]
                 if {$r ne ""} { return $r }
+            }
+            if {$op eq "lindexMulti"} {
+                set n [lindex $a 0]; set pl [expr {$d - $n}]
+                if {[kd [lindex $in $pl]] eq "B" && $n >= 2 && $n <= 9} {
+                    set items {}
+                    for {set k [expr {$pl + 1}]} {$k < $d} {incr k} {
+                        switch [kd [lindex $in $k]] { I { lappend items [list I $k] } B { lappend items [list B $k] } default { set items fail; break } }
+                    }
+                    if {$items ne "fail"} { return [lindexChain $key $P $pc $in $pl $items] }
+                }
+            }
+            # `lassign $rec a b c d` leaves the rest of the list for its own result and the next instruction throws it away: a list of 176 numbers was copied (172 of them) for
+            # every call.  Only whether the value is a list is looked at (the answer of `lrange` is an error exactly when it is not one); the slot keeps the list, which the pop releases.
+            if {$op eq "listRangeImm" && [kd [lindex $in $top]] eq "B" && [deadResult $P $pc]} {
+                return [R fall $in "\{ int n_; if (TBC_UNLIKELY(Tcl_ListObjLength(NULL, s$top, &n_) != TCL_OK)) goto [fl $key $in]; \}"]
             }
             return [stepCmdOp $key $pc $in $d $op $a]
         }
@@ -2231,6 +2250,36 @@ proc stepStrFast {key pc in d op a} {
 
 # An instruction the executor implements as a call of a command that uses no variable (cmdOpSpec): the operands are boxed and the command is called,
 # as in boxed code.  The result is an object.  An error starts the step again in the boxed code, which raises it with its error info.
+# `lindex $list i j k` with integer indices, and `lindex $list {i j}` with a literal list of them, is the same as `lindex [lindex [lindex $list i] j] k`: typed code takes the elements
+# one at a time (tbc_lindex_i: no list is built, an index out of range gives the empty string, a value that is not a list hands over before anything has changed).  `items`: one
+# entry per index, {I slot} for an integer slot, {B slot} for an object that must be an integer, {C text} for a literal integer.
+proc lindexChain {key P pc in pl items} {
+    set below [lrange $in 0 [expr {$pl-1}]]
+    set fl [fl $key $in]
+    set pre ""; set rel ""
+    foreach it $items {
+        lassign $it k v
+        if {$k eq "B"} { append pre "if (TBC_UNLIKELY(!tbc_isint(s$v))) goto $fl; "; append rel " Tcl_DecrRefCount(s$v);" }
+    }
+    set c "\{ ${pre}Tcl_Obj *c_\[[expr {[llength $items] + 1}]\]; c_\[0\] = s$pl;"
+    set i 0
+    foreach it $items {
+        lassign $it k v
+        set ix [switch $k { I { expr {"si$v"} } B { expr {"tbc_wide(s$v)"} } C { expr {"INT64_C($v)"} } }]
+        set drop [expr {$i > 0 ? " Tcl_DecrRefCount(c_\[$i\]);" : ""}]
+        append c " c_\[[expr {$i+1}]\] = tbc_lindex_i(interp, c_\[$i\], $ix); if (TBC_UNLIKELY(!c_\[[expr {$i+1}]\])) \{$drop goto $fl; \}"
+        if {$i > 0} { append c " Tcl_DecrRefCount(c_\[$i\]);" }
+        incr i
+    }
+    append c " Tcl_DecrRefCount(s$pl);$rel s$pl = c_\[$i\]; \}"
+    return [R fall [list {*}$below B] $c]
+}
+proc litIntList {text} {
+    if {[catch {llength $text} n] || $n < 1 || $n > 8} { return "" }
+    foreach w $text { if {![regexp {^(?:0|-?[1-9][0-9]{0,15})$} $w]} { return "" } }
+    return $text
+}
+
 proc stepCmdOp {key pc in d op a} {
     global PI
     lassign [keysplit $key] P sig
@@ -3310,6 +3359,16 @@ proc mmFunc {key P pc in d n q mf} {
     return [R fall [list {*}$below B] $pre]
 }
 
+# Is the result of the instruction at pc thrown away by the next instruction (a pop that nothing else reaches: not a jump target, not the target of a loop's or a catch's exit)?
+proc deadResult {P pc} {
+    global PI
+    set nx $PI($P,next,$pc)
+    if {![info exists PI($P,ins,$nx)] || [lindex $PI($P,ins,$nx) 0] ne "pop"} { return 0 }
+    foreach p $PI($P,reach) { if {$p != $pc && $nx in $PI($P,succ,$p)} { return 0 } }
+    foreach r $PI($P,ranges) { foreach k {break continue catch} { if {[dict exists $r $k] && [dict get $r $k] == $nx} { return 0 } } }
+    return 1
+}
+
 # is a call of the built-in command nm (first word after it: sub, or -) free of any access to variables and of callbacks into scripts?
 proc pureBuiltin {nm sub} {
     regsub {^::} $nm {} b
@@ -4013,6 +4072,7 @@ proc genG {key pc d} {
                 return "\{ int m_ = tbc_s_match($ss, $sp, $nocase); Tcl_DecrRefCount($sp); Tcl_DecrRefCount($ss); $sp = tbc_newint(m_); \}"
             }
             set fast [gStrFast $d $op $a]
+            if {$op eq "listRangeImm" && [deadResult $P $pc]} { set fast "\{ int n_; if (Tcl_ListObjLength(NULL, s[expr {$d-1}], &n_) == TCL_OK) \{\} " }
             if {$fast ne ""} { return "$fast else [gCmd $d $n $name 0 $pre $post] \}" }
             return [gCmd $d $n $name 0 $pre $post]
         }

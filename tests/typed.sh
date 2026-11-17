@@ -201,4 +201,28 @@ TCL
 TBC_DEADOPS=1 TBC_REPORT=1 "$TCLSH" src/translate.tcl "$tmp/m.tcl" "$tmp/m.c" Mmtest >"$tmp/m.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/m.log"; exit 1; }
 if grep -E '^DEADOP .* tcl::mathfunc::(max|min) ' "$tmp/m.log"; then echo "typed: FAILED, max or min hands over"; exit 1; fi
 if ! grep -q "^REPORT ::tm_int/I .* returns I;" "$tmp/m.log" || ! grep -q "^REPORT ::tm_dbl/I .* returns D;" "$tmp/m.log" || ! grep -q "^REPORT ::tm_clamp/III .* returns I;" "$tmp/m.log"; then echo "typed: FAILED, max and min of integers or doubles are not integers or doubles"; grep "tm_" "$tmp/m.log"; exit 1; fi
+if ! grep -q "V_::tm_clamp\|V__tm_clamp\|V_tm_clamp" "$tmp/m.c" || grep -q "tbc_valid_.*tm_clamp.*Tcl_EvalObjv" "$tmp/m.c"; then :; fi
 echo "typed: max and min of integers and doubles are typed, without hand-over: ok"
+
+# `lassign $rec a b c d` does not build the rest of the list when the statement throws it away (the bytecode makes it with lrange and pops it: 172 elements copied for a
+# record of 176 numbers, in every call).  The typed code only checks that the value is a list; the boxed code does the same before it calls lrange.
+cat > "$tmp/a.tcl" <<'TCL'
+proc ta_walls {recs p} { set best 1e30; foreach rec $recs { lassign $rec ax ay bx by; set d [expr {abs(($bx - $ax) * ($ay - $p) - ($ax - $p) * ($by - $ay))}]; if {$d < $best} { set best $d } }; return $best }
+proc ta_rest {rec} { set r [lassign $rec a]; return [list $a $r] }
+TCL
+TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/a.tcl" "$tmp/a.c" Lassigntest -split 1 >"$tmp/a.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/a.log"; exit 1; }
+if ! grep -q "Tcl_ListObjLength(NULL" "$tmp/a_v1.c"; then echo "typed: FAILED, the typed code of lassign still builds the rest of the list"; exit 1; fi
+if [ "$(grep -c '::lrange' "$tmp/a_v1.c")" != 1 ]; then echo "typed: FAILED, lassign calls lrange where its result is thrown away (or does not where it is used)"; exit 1; fi
+echo "typed: lassign does not copy the rest of the list that it throws away, and does when the value is used: ok"
+
+# `lindex $m $i $j` and `lindex $m {1 2}` take the elements one at a time in typed code: they were calls of the command lindex with boxed operands (10 times slower than
+# `lindex [lindex $m $i] $j`, which has its own instruction)
+cat > "$tmp/x.tcl" <<'TCL'
+proc tx_sum {m n} { set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { incr s [lindex $m $i $j] } }; return $s }
+proc tx_const {m} { return [list [lindex $m {1 2}] [lindex $m 1 2 0]] }
+TCL
+"$TCLSH" src/translate.tcl "$tmp/x.tcl" "$tmp/x.c" Lindextest -split 1 >"$tmp/x.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/x.log"; exit 1; }
+# (the variant in which the list itself is an integer, `lindex 5 $i $j`, is an ordinary call, and so are the other kinds of operands: look at the variants whose list is an object)
+if awk '/ V_.*\(Tcl_Interp/ { fn = $0 } /::lindex/ { print fn }' "$tmp/x_v1.c" | grep -q -E '_B[BI]*\('; then echo "typed: FAILED, lindex with several indices is a call of the command in typed code"; exit 1; fi
+if ! grep -q 'tbc_lindex_i' "$tmp/x_v1.c"; then echo "typed: FAILED, lindex with several indices does not use tbc_lindex_i"; exit 1; fi
+echo "typed: lindex with several indices, or a literal list of them, takes the elements one at a time: ok"

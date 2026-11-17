@@ -2208,3 +2208,25 @@ proc mm_redef {} {
 # the math functions that take a tagged number (a sum of integers and doubles, in a proc that uses doubles): abs, int, wide, round and the double ones
 proc mw_funcs {l} { set s 0.0; set r {}; foreach v $l { set s [expr {$s + $v}]; lappend r [expr {abs($s)}] [expr {int($s)}] [expr {round($s)}] [expr {wide($s)}] [expr {sqrt(abs($s))}] [expr {max($s, $v)}] [expr {min($s, $v)}] }; return $r }
 proc mw_one {a b} { set s [expr {$a + $b * 0.5}]; list [expr {abs($s)}] [expr {int($s)}] [expr {round($s)}] [expr {wide($s)}] [expr {max($s, 1)}] }
+
+# ---- Phase A, blocker 3: lassign.  The bytecode takes the elements one at a time and then builds the rest of the list, which the statement throws away; typed code does not
+# build it (only checks that the value is a list), and uses the result when the command's value is used.
+proc la_sum {rec} { lassign $rec a b c d; return [expr {$a + $b * $c - $d}] }
+proc la_rest {rec} { set rest [lassign $rec a b]; list $a $b $rest }
+proc la_loop {recs} { set s 0.0; foreach r $recs { lassign $r ax ay bx by; set s [expr {$s + ($bx - $ax) * ($by - $ay)}] }; return $s }
+proc la_many {rec} { lassign $rec a b c d e f g h; list $a $b $c $d $e $f $g $h }
+proc la_none {rec} { lassign $rec; return ok }
+proc la_ph {rec} { lassign $rec - b - d; list $b $d }
+proc la_shared {rec} { lassign $rec a b; lappend rec z; list $a $b $rec }
+proc la_catch {rec} { catch {lassign $rec a b} m; list [info exists a] $m }
+proc la_used {rec} { expr {[llength [lassign $rec a]] + 1} }
+proc la_dist {rec x y} { lassign $rec ax ay bx by; set dx [expr {$bx - $ax}]; set dy [expr {$by - $ay}]; return [expr {sqrt($dx * $dx + $dy * $dy) + $x - $y}] }
+proc la_walls {recs p} { set best 1e30; foreach rec $recs { lassign $rec ax ay bx by; set d [expr {abs(($bx - $ax) * ($ay - $p) - ($ax - $p) * ($by - $ay))}]; if {$d < $best} { set best $d } }; return $best }
+
+# lindex with several indices, or with a literal list of them, on nested lists (matrices): the elements are taken one at a time
+proc lx_multi {m i j} { lindex $m $i $j }
+proc lx_three {m i j k} { lindex $m $i $j $k }
+proc lx_const {m} { list [lindex $m {1 2}] [lindex $m 1 2] [lindex $m {0 0 0}] [lindex $m {-1 0}] [lindex $m {5 5}] [lindex $m {0}] [lindex $m {1 end}] [lindex $m {} ] }
+proc lx_end {m} { list [lindex $m end 0] [lindex $m 0 end] [lindex $m {end end}] [lindex $m end-1 1] }
+proc lx_loop {m n} { set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { incr s [lindex $m $i $j] } }; return $s }
+proc lx_dbl {m n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set s [expr {$s + [lindex $m $i $j]}] } }; return $s }
