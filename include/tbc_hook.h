@@ -2534,6 +2534,27 @@ static void tbc_mf_setup(Tcl_Interp *interp) {
         else tbc_trace(interp, "add", "command", Tcl_GetString(full), "rename delete", "::tbc::invalidate", 1);
         Tcl_DecrRefCount(full);
     }
+    /* max and min are procs of the Tcl library (init.tcl), not commands in C.  Typed code computes them itself (translate.tcl, mmFunc), which is right only while they
+     * are the stock procs: their bodies are compared by hash with the ones of Tcl 8.6.14 (the module is valid for that release only), and renaming or deleting one clears the
+     * flag like the others.  A program that defines its own `tcl::mathfunc::max` goes through tbc_invalidate_name. */
+    {
+        static const struct { const char *name; unsigned long long hash; } mm[] = { { "max", 0x3594bb2113580599ULL }, { "min", 0x1bccbe3b07a281deULL } };
+        for (i = 0; i < 2; i++) {
+            Tcl_CmdInfo ci;
+            Tcl_Obj *full = Tcl_ObjPrintf("::tcl::mathfunc::%s", mm[i].name);
+            Tcl_IncrRefCount(full);
+            if (!Tcl_GetCommandInfo(interp, Tcl_GetString(full), &ci) || !ci.isNativeObjectProc || !TBC_IS_PROC_OBJPROC(ci.objProc)) ok = 0;
+            else {
+                Proc *p = (Proc *) ci.objClientData;
+                unsigned long long h = 0xcbf29ce484222325ULL;
+                const unsigned char *b = (const unsigned char *) Tcl_GetString(p->bodyPtr);
+                while (*b) { h ^= *b++; h *= 0x100000001b3ULL; }
+                if (p->numArgs != 1 || !p->firstLocalPtr || strcmp(p->firstLocalPtr->name, "args") != 0 || h != mm[i].hash) ok = 0;
+                else tbc_trace(interp, "add", "command", Tcl_GetString(full), "rename delete", "::tbc::invalidate", 1);
+            }
+            Tcl_DecrRefCount(full);
+        }
+    }
     if (ok && tbc_mf_shadowed(((Interp *) interp)->globalNsPtr, 1)) ok = 0;
     tbc_mf_ok = ok;
 }

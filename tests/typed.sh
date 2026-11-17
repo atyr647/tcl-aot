@@ -189,3 +189,16 @@ TCL
 TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/l.tcl" "$tmp/l.c" Lentest >"$tmp/l.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/l.log"; exit 1; }
 if ! grep -q "tbc_ilen" "$tmp/l.c"; then echo "typed: FAILED, string length of an integer boxes it and counts the characters of its text"; exit 1; fi
 echo "typed: string length of an integer is its digit count, without an object: ok"
+
+# max and min in an expression are typed: no hand-over at the call (they were procs of the Tcl library called through the interpreter, 250 times slower than the same
+# test written with ?:), and a proc that uses them is pure when nothing else stops it, so a compiled caller calls it directly
+cat > "$tmp/m.tcl" <<'TCL'
+proc tm_int {n} { set s 0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + max($i % 7, $i % 5, 2) - min($i % 3, 1)}] }; return $s }
+proc tm_dbl {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set a [expr {$i * 0.5}]; set s [expr {$s + max($a, 3.5) + min($a, 1.25)}] }; return $s }
+proc tm_clamp {x lo hi} { return [expr {max($lo, min($hi, $x))}] }
+proc tm_call {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s [tm_clamp $i 3 20] }; return $s }
+TCL
+TBC_DEADOPS=1 TBC_REPORT=1 "$TCLSH" src/translate.tcl "$tmp/m.tcl" "$tmp/m.c" Mmtest >"$tmp/m.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/m.log"; exit 1; }
+if grep -E '^DEADOP .* tcl::mathfunc::(max|min) ' "$tmp/m.log"; then echo "typed: FAILED, max or min hands over"; exit 1; fi
+if ! grep -q "^REPORT ::tm_int/I .* returns I;" "$tmp/m.log" || ! grep -q "^REPORT ::tm_dbl/I .* returns D;" "$tmp/m.log" || ! grep -q "^REPORT ::tm_clamp/III .* returns I;" "$tmp/m.log"; then echo "typed: FAILED, max and min of integers or doubles are not integers or doubles"; grep "tm_" "$tmp/m.log"; exit 1; fi
+echo "typed: max and min of integers and doubles are typed, without hand-over: ok"

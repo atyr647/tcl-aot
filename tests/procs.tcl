@@ -2175,3 +2175,36 @@ proc sd_for_break {l} { set r {}; for {set i 0} {$i < [llength $l]} {incr i} { l
 proc sd_catch {l} { set r {}; foreach s $l { catch { lappend r {*}[sd_cmd {*}$s] } m }; list $r $m }
 proc sd_two_loops {l} { set r {}; foreach a $l { foreach b $a { lappend r {*}[sd_cmd {*}$b] }; lappend r | }; return $r }
 proc sd_global {l} { set ::sd_g {}; foreach s $l { lappend ::sd_g {*}[string cat {*}$s] }; return $::sd_g }
+
+# ---- Phase A, blocker 2: max() and min() in expressions.  They are procs of the Tcl library, which returned the argument itself (an integer stays an integer, text keeps its form),
+# the first of equal values, and failed with the interpreter's own messages for text.  Typed code compares unboxed integers and doubles and objects as numbers.
+proc mm_int {n} { set s 0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + max($i % 7, $i % 5, 2) - min($i % 3, 1)}] }; return $s }
+proc mm_dbl {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set a [expr {$i * 0.5}]; set s [expr {$s + max($a, 3.5) + min($a, 1.25, 7.0)}] }; return $s }
+proc mm_mixed {n} { set r {}; for {set i 0} {$i < $n} {incr i} { set a [expr {$i * 0.5}]; lappend r [expr {max($a, 2)}] [expr {min($a, 2)}] [expr {max(2, $a)}] [expr {min(2, $a)}] [expr {max($i, $a)}] }; return $r }
+proc mm_args {a b c} { list [expr {max($a, $b)}] [expr {min($a, $b)}] [expr {max($a, $b, $c)}] [expr {min($c, $b, $a)}] [expr {max($b, $c)}] }
+proc mm_one {a} { list [expr {max($a)}] [expr {min($a)}] }
+proc mm_lit {x} { list [expr {max($x, 0x10)}] [expr {max(1e3, $x)}] [expr {min($x, 2.50)}] [expr {max($x * 1, 007)}] [expr {min($x, 0)}] [expr {max($x, 0.0)}] }
+proc mm_many {a b c d e f g h} { list [expr {max($a, $b, $c, $d, $e, $f, $g, $h)}] [expr {min($a, $b, $c, $d, $e, $f, $g, $h)}] }
+proc mm_ties {a b} { set x [expr {$a * 1.0}]; set y [expr {$b * 1.0}]; list [expr {max($x, $y)}] [expr {max($y, $x)}] [expr {min($x, $y)}] [expr {min($y, $x)}] }
+proc mm_tag {a b} { set x [expr {$a + 0}]; set y [expr {$b + 0}]; list [expr {max($x, $y)}] [expr {min($x, $y)}] [expr {max($x, $y) + 1}] }
+proc mm_loop {l} { set m -1e300; foreach v $l { set m [expr {max($m, $v)}] }; return $m }
+proc mm_loop_min {l} { set m 1e300; foreach v $l { set m [expr {min($m, $v)}] }; return $m }
+proc mm_clamp {l lo hi} { set r {}; foreach v $l { lappend r [expr {max($lo, min($hi, $v))}] }; return $r }
+proc mm_call {a b} { return [mm_helper $a $b] }
+proc mm_helper {a b} { expr {max($a, $b) - min($a, $b)} }
+proc mm_err {a b} { catch {expr {max($a, $b)}} m; set m }
+proc mm_ns_user {a b} { return [mmns::go $a $b] }
+namespace eval mmns { proc go {a b} { expr {max($a, $b) * 2 + min($a, $b)} } }
+proc mm_redef {} {
+    set before [mm_args 1 2 3]
+    rename ::tcl::mathfunc::max ::mm_saved_max
+    proc ::tcl::mathfunc::max {args} { return REDEFINED }
+    set during [mm_args 1 2 3]
+    rename ::tcl::mathfunc::max {}
+    rename ::mm_saved_max ::tcl::mathfunc::max
+    list $before $during [mm_args 1 2 3]
+}
+
+# the math functions that take a tagged number (a sum of integers and doubles, in a proc that uses doubles): abs, int, wide, round and the double ones
+proc mw_funcs {l} { set s 0.0; set r {}; foreach v $l { set s [expr {$s + $v}]; lappend r [expr {abs($s)}] [expr {int($s)}] [expr {round($s)}] [expr {wide($s)}] [expr {sqrt(abs($s))}] [expr {max($s, $v)}] [expr {min($s, $v)}] }; return $r }
+proc mw_one {a b} { set s [expr {$a + $b * 0.5}]; list [expr {abs($s)}] [expr {int($s)}] [expr {round($s)}] [expr {wide($s)}] [expr {max($s, 1)}] }

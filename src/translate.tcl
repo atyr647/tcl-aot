@@ -95,8 +95,36 @@ set tbcStrOps {strindex ::tcl::string::index strfind ::tcl::string::first strrfi
 # (and, by their number of words: `scan s fmt` and `gets chan` set no variable)
 set tbcPureArity {scan 3}
 set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan scan gets}
-# one of Tcl's own math functions that is a command written in C (max and min are procs of the Tcl library): it never uses the caller's variables
-proc isMathBuiltin {b} { expr {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f] && $f ni {max min}} }
+# one of Tcl's own math functions: it never uses the caller's variables.  max and min are procs of the Tcl library (init.tcl) and count only while they are the stock ones
+# (the text of their bodies is checked here and, when the module loads, in tbc_mf_setup: a program that defines its own `tcl::mathfunc::max` gets the ordinary calls)
+set tbcStockMM(max) 0x3594bb2113580599
+set tbcStockMM(min) 0x1bccbe3b07a281de
+proc fnv64 {s} {
+    set h [expr {wide(0xcbf29ce484222325)}]
+    foreach b [split [encoding convertto utf-8 $s] ""] {
+        scan $b %c c
+        set h [expr {(($h ^ $c) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF}]
+    }
+    return [format 0x%016x $h]
+}
+proc stockMM {f} {
+    global tbcStockMM tbcStockMMok
+    if {![info exists tbcStockMMok($f)]} {
+        set tbcStockMMok($f) [expr {![catch {info args ::tcl::mathfunc::$f} a] && $a eq "args" && [fnv64 [info body ::tcl::mathfunc::$f]] eq $tbcStockMM($f)}]
+    }
+    return $tbcStockMMok($f)
+}
+proc isMathBuiltin {b} {
+    if {![regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f]} { return 0 }
+    if {$f in {max min}} { return [stockMM $f] }
+    return 1
+}
+# does the command word nm0, called from namespace ns, name the stock max or min?  (the proc it resolves to is ::tcl::mathfunc::max or min, and that is Tcl's own)
+proc isStockMM {ns nm0} {
+    if {![regexp {^(?:::)?tcl::mathfunc::(max|min)$} $nm0 -> f]} { return "" }
+    if {[resolveProc $ns $nm0] ne "::tcl::mathfunc::$f" || ![stockMM $f]} { return "" }
+    return $f
+}
 # The words of `regexp` and `regsub` that name result variables.  `words` are the arguments after the command name: the text of a literal one, or {} for another.  The options are read
 # as the command reads them; a word that is not literal where an option may be makes the answer "no" (-1), except that a non-literal word can only have the command read fewer variables
 # than assumed here (an option it holds would shift the rest), never other ones.  Returns the indexes into `words` of the variable names, or -1.
@@ -574,6 +602,7 @@ proc prepare {P} {
                     }
                 }
                 set callee [resolveProc $ns $nm]
+                if {[isStockMM $ns $nm] ne ""} { set callee "" }
                 if {$callee ne ""} {
                     lappend callees $callee
                 } else {
@@ -2860,8 +2889,8 @@ proc stepInvoke {key pc in d n} {
         set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
         set nm [resolveProc $ns $nm0]
         if {$nm ni $pureProcs} { set nm "" }
-        if {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $nm0 -> mf] && [resolveProc $ns $nm0] eq ""} {
-            set r [mathFunc $P $pc $in $d $n $q $mf]
+        if {[regexp {^(?:::)?tcl::mathfunc::(\w+)$} $nm0 -> mf] && ([resolveProc $ns $nm0] eq "" || [isStockMM $ns $nm0] ne "")} {
+            set r [expr {$mf in {max min} ? [mmFunc $key $P $pc $in $d $n $q $mf] : [mathFunc $P $pc $in $d $n $q $mf]}]
             if {$r ne ""} { return $r }
         }
         set isLrepeat [expr {$nm0 in {lrepeat ::lrepeat} && [resolveProc $ns $nm0] eq ""}]
@@ -2946,6 +2975,7 @@ proc stepInvoke {key pc in d n} {
     set nm0 [lindex $PI($P,lits) [lt $cmdE]]
     set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
     set cp [resolveProc $ns $nm0]
+    if {[isStockMM $ns $nm0] ne ""} { set cp "" }
     if {$cp ne ""} {
         # a translated proc that needs a frame (arrays, global, variable...): the interpreter makes the call, with boxed arguments, and typed code goes on
         # with the result.  The callee cannot reach this proc's variables (it is caller-safe), so they can stay in C variables.  The call has effects, so an
@@ -3163,7 +3193,15 @@ proc mathFunc {P pc in d n q mf} {
         set c "\{ double r_; $pre${guard}errno = 0; r_ = tbc_opaque_dbl(${fn}([lindex $xs 0], [lindex $xs 1])); if (TBC_UNLIKELY(!TBC_MF_OK(r_, errno))) goto D$pc;$rel sd$q = r_; \}"
         return [R fall [list {*}$below D] $c]
     }
-    if {$mf in {int wide round abs} && [kd [lindex $args 0]] eq "W"} { return "" }
+    if {$mf in {int wide round abs} && [kd [lindex $args 0]] eq "W"} {
+        # a tagged number: the integer or the double it holds, as the typed kinds I and D are done below
+        set p0 [expr {$q + 1}]
+        switch $mf {
+            int - wide { return [R fall [list {*}$below I] "\{ int64_t r_; ${guard}if (TBC_UNLIKELY(sizeof(long) != 8)) goto D$pc; if (!sw$p0) r_ = si$p0; else if (TBC_UNLIKELY(!tbc_dbl_to_int(sd$p0, &r_))) goto D$pc; si$q = r_; \}"] }
+            round { return [R fall [list {*}$below I] "\{ int64_t r_; ${guard}if (!sw$p0) r_ = si$p0; else if (TBC_UNLIKELY(!tbc_dbl_round(sd$p0, &r_))) goto D$pc; si$q = r_; \}"] }
+            abs { return [R fall [list {*}$below W] "\{ ${guard}if (!sw$p0) \{ int64_t a_ = si$p0; if (TBC_UNLIKELY(a_ == INT64_MIN)) goto D$pc; sw$q = 0; si$q = a_ < 0 ? -a_ : a_; \} else \{ sw$q = 1; sd$q = fabs(sd$p0); \} \}"] }
+        }
+    }
     switch $mf {
         double {
             return [R fall [list {*}$below D] "\{ $pre${guard}sd$q = [lindex $xs 0];$rel \}"]
@@ -3192,6 +3230,84 @@ proc mathFunc {P pc in d n q mf} {
         }
     }
     return ""
+}
+
+# Is the literal's text what the object would print for its value?  (typed code gives a number its canonical text when it boxes it; a literal like 0x10, 1e3 or 2.50 must come back as written)
+proc litCanon {text kind} {
+    if {$kind eq "I"} { return [regexp {^(?:0|-?[1-9][0-9]*)$} $text] }
+    return [expr {![catch {expr {double($text)}} v] && $v eq $text}]
+}
+# max and min with 1 to 8 arguments, as the proc of the Tcl library does them: `val` starts at -Inf (Inf) and takes each argument that is strictly greater (less) than it, so the
+# first of equal values wins and the result is that argument itself (an integer stays an integer, text keeps its form).  Integers and doubles in typed slots are compared
+# unboxed (an integer and a double as numbers, with the same 2^53 limit as the arithmetic's mixed comparison); an object operand is read with tbc_num and the result is that object.
+# The result is I or D when every operand is, W when the operands are numbers of the kinds I, D and W in a proc that uses W, else an object.  Anything that is not a finite
+# number (text, a bignum) hands over before anything is changed, and the proc of the library then reports it.
+proc mmFunc {key P pc in d n q mf} {
+    global PI
+    set below [lrange $in 0 [expr {$q-1}]]
+    set args [lrange $in [expr {$q+1}] end]
+    set na [llength $args]
+    if {$na < 1 || $na > 8} { return "" }
+    foreach e $args { if {[kd $e] eq "U"} { return [R fall [list {*}$below U] ""] } }
+    foreach e $args { if {[kd $e] ni {I D W B}} { return "" } }
+    set sym [expr {$mf eq "max" ? ">" : "<"}]
+    set allI 1; set allD 1; set allNum 1; set canon 1
+    foreach e $args {
+        if {[kd $e] ne "I"} { set allI 0 }
+        if {[kd $e] ne "D"} { set allD 0 }
+        if {[kd $e] eq "B"} { set allNum 0 }
+        if {[kd $e] in {I D} && [lt $e] ne "" && ![litCanon [lindex $PI($P,lits) [lt $e]] [kd $e]]} { set canon 0 }
+    }
+    set guard "if (TBC_UNLIKELY(!tbc_mf_ok)) goto D$pc; "
+    set p0 [expr {$q + 1}]
+    if {$canon && $allI} {
+        set c "${guard}\{ int64_t b_ = si$p0;"
+        for {set k 1} {$k < $na} {incr k} { set p [expr {$q + 1 + $k}]; append c " if (si$p $sym b_) b_ = si$p;" }
+        append c " si$q = b_; \}"
+        return [R fall [list {*}$below I] $c]
+    }
+    if {$canon && $allD} {
+        set c "${guard}\{ double b_ = sd$p0;"
+        for {set k 1} {$k < $na} {incr k} { set p [expr {$q + 1 + $k}]; append c " if (sd$p $sym b_) b_ = sd$p;" }
+        append c " sd$q = b_; \}"
+        return [R fall [list {*}$below D] $c]
+    }
+    # the operands as tagged numbers: tg<k> 0 for an integer in iv<k>, 1 for a double in dv<k>
+    set pre "$guard\{ int tg_\[$na\]; int64_t iv_\[$na\]; double dv_\[$na\]; int b_ = 0, bt_; int64_t bi_; double bd_; Tcl_WideInt w_; double d_; int k_; (void) w_; (void) d_; (void) k_;"
+    for {set k 0} {$k < $na} {incr k} {
+        set p [expr {$q + 1 + $k}]; set e [lindex $args $k]
+        switch [kd $e] {
+            I { append pre " tg_\[$k\] = 0; iv_\[$k\] = si$p; dv_\[$k\] = 0;" }
+            D { append pre " tg_\[$k\] = 1; iv_\[$k\] = 0; dv_\[$k\] = sd$p;" }
+            W { append pre " tg_\[$k\] = sw$p; iv_\[$k\] = si$p; dv_\[$k\] = sd$p;" }
+            B { append pre " k_ = tbc_num(s$p, &w_, &d_); if (k_ == 1) \{ tg_\[$k\] = 0; iv_\[$k\] = (int64_t) w_; dv_\[$k\] = 0; \} else if (k_ == 2 && d_ == d_) \{ tg_\[$k\] = 1; iv_\[$k\] = 0; dv_\[$k\] = d_; \} else goto D$pc;" }
+        }
+    }
+    append pre " bt_ = tg_\[0\]; bi_ = iv_\[0\]; bd_ = dv_\[0\];"
+    for {set k 1} {$k < $na} {incr k} {
+        append pre " if (tg_\[$k\] == 0 && bt_ == 0) \{ if (iv_\[$k\] $sym bi_) \{ b_ = $k; bi_ = iv_\[$k\]; \} \} else \{ if (TBC_UNLIKELY((tg_\[$k\] == 0 && (iv_\[$k\] > TBC_2P53 || iv_\[$k\] < -TBC_2P53)) || (bt_ == 0 && (bi_ > TBC_2P53 || bi_ < -TBC_2P53)))) goto D$pc; if ((tg_\[$k\] ? dv_\[$k\] : (double) iv_\[$k\]) $sym (bt_ ? bd_ : (double) bi_)) \{ b_ = $k; bt_ = tg_\[$k\]; bi_ = iv_\[$k\]; bd_ = dv_\[$k\]; \} \}"
+    }
+    if {$canon && $allNum && [wpolK $key]} {
+        # (a double that was the best so far keeps bd_, an integer bi_; the tag says which)
+        append pre " sw$q = bt_; si$q = bi_; sd$q = bd_; \}"
+        return [R fall [list {*}$below W] $pre]
+    }
+    # an object: the winner itself
+    append pre " \{ Tcl_Obj *r_ = NULL;"
+    for {set k 0} {$k < $na} {incr k} {
+        set p [expr {$q + 1 + $k}]; set e [lindex $args $k]
+        switch [kd $e] {
+            B { set win "r_ = s$p;"; set lose "Tcl_DecrRefCount(s$p);" }
+            I - D {
+                if {[lt $e] ne ""} { set win "r_ = L_[cident $P]_[lt $e]; Tcl_IncrRefCount(r_);" } else { set win [expr {[kd $e] eq "I" ? "r_ = tbc_newint(si$p);" : "r_ = tbc_newdbl(sd$p);"}] }
+                set lose ""
+            }
+            W { set win "r_ = sw$p ? tbc_newdbl(sd$p) : tbc_newint(si$p);"; set lose "" }
+        }
+        append pre " if (b_ == $k) \{ $win \}[expr {$lose ne "" ? " else \{ $lose \}" : ""}]"
+    }
+    append pre " s$q = r_; \} \}"
+    return [R fall [list {*}$below B] $pre]
 }
 
 # is a call of the built-in command nm (first word after it: sub, or -) free of any access to variables and of callbacks into scripts?
@@ -3402,7 +3518,7 @@ proc wnorm {P out sop} {
     set n [llength $out]
     if {$op in {invokeStk1 invokeStk4}} {
         set ce [lindex $out [expr {$n - [lindex $a 0]}]]
-        if {[kd $ce] eq "L" && [lt $ce] ne "" && [regexp {^(?:::)?tcl::mathfunc::(?:double|sqrt|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|log|log10|fmod|hypot|floor|ceil|pow)$} [lindex $PI($P,lits) [lt $ce]]]} { return $out }
+        if {[kd $ce] eq "L" && [lt $ce] ne "" && [regexp {^(?:::)?tcl::mathfunc::(?:double|sqrt|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|log|log10|fmod|hypot|floor|ceil|pow|max|min|abs|int|wide|round)$} [lindex $PI($P,lits) [lt $ce]]]} { return $out }
     }
     set pops [lindex [effect $op $a [llength $out] [lindex $PI($P,mk,$sop) end]] 0]
     for {set i [expr {max($n - $pops, 0)}]} {$i < $n} {incr i} { if {[kd [lindex $out $i]] eq "W"} { set out [lreplace $out $i $i B] } }

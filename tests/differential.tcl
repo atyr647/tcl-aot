@@ -647,6 +647,22 @@ foreach l {{} {{a}} {{a b} {c} {d e f}} {{a} {x} {b}} {{a} {c} {b}} {{a} {e} {b}
 lappend calls {sd_for {a b c}} {sd_while {a b c}} {sd_for {}} {sd_while {x}}
 foreach l {{} {{{a b} {c}} {{d}}} {{{a} {x} {b}} {{c}}} {{{a} {c} {b}} {{d}}} {{{a} {e}} {{d}}}} { lappend calls [list sd_two_loops $l] }
 
+# Phase A, blocker 2: max and min (mm_*): integers, doubles, mixed, objects of every form, ties, the 2^53 boundary, text and bignums (errors), one to eight arguments
+set mmv {0 1 -1 2 7 3.5 -2.5 0x10 010 " 5" 1e3 abc {} 9007199254740993 9007199254740992 -9007199254740993 9223372036854775807 -9223372036854775808 18446744073709551616 0.0 -0.0 Inf -Inf 1e400 true 1.50 2.0 2}
+foreach a $mmv { foreach b $mmv {
+    lappend calls [list mm_args $a $b 3] [list mm_args 3 $a $b] [list mm_err $a $b] [list mm_ties $a $b] [list mm_tag $a $b] [list mm_call $a $b] [list mm_ns_user $a $b]
+}
+    lappend calls [list mm_one $a] [list mm_lit $a] [list mm_many $a 1 2 3 4 5 6 7] [list mm_many 1 $a 2.5 3 4 5 6 $a]
+}
+foreach n {0 1 5 40} { lappend calls [list mm_int $n] [list mm_dbl $n] [list mm_mixed $n] }
+foreach l {{} {5} {1 2 3} {3 2 1} {1.5 2 0x10 3} {0x10 16} {16 0x10} {2.0 2} {2 2.0} {-0.0 0.0} {0.0 -0.0} {1 abc 2} {1e3 999} {1.50 1.5}} {
+    lappend calls [list mm_loop $l] [list mm_loop_min $l] [list mm_clamp $l 1 2] [list mm_clamp $l 0.5 1.5] [list mm_clamp $l 0x2 5]
+}
+lappend calls {mm_clamp {1 2} abc 3} {mm_clamp {1 2} 1 {}}
+foreach l {{} {1} {1 2 3} {-1.5 2 -3} {0.5 0.5 -2} {9223372036854775807 1} {9223372036854775807 0.5} {-9223372036854775808 -1} {1e300 1e300} {2.5 -2.5 3} {abc} {1 abc} {0x10 0.5}} { lappend calls [list mw_funcs $l] }
+foreach a {0 1 -1 7 2.5 -2.5 0x10 9223372036854775807 -9223372036854775808 1e300 abc} { foreach b {0 1 -1 3 0.5 -0.5 9223372036854775807 4611686018427387904 abc} { lappend calls [list mw_one $a $b] } }
+lappend calls {mm_redef}
+
 # TBC_SMALL=1: leave out the calls that loop long (for runs under valgrind)
 if {[info exists ::env(TBC_SMALL)]} { set calls [lmap c $calls { if {[regexp {(^|[ \{])(1000|3000|6000|10000|30000|100000|1000000|900|1500)($|[ \}])} $c]} { continue }; set c }] }
 proc runall {} {
@@ -682,7 +698,7 @@ puts "attached: [llength [tbc::attached]] of [llength [info commands t_*]]"
 set B [runall]
 puts "attached after the calls: [llength [tbc::attached]]"
 # procs that must run compiled (a refused proc would run interpreted and match trivially): the constructs that were once refused
-set mustAttach {::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop
+set mustAttach {::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop
     ::tl_dictfor_break ::tl_dictfor_ret ::tl_dictfor_err ::tl_dictfor_catch {::tw_odd?} {::tw_star*} {::tw_br[a]} {::tw with space} {::tw"quote} {::tw\back} {::tw;semi} ::tw_caller ::tb_try1 ::tb_try2 ::tb_try3 ::tb_catch1 ::tb_try4 ::tb_try5}
 foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } }
 if {[info exists ::notCompiled]} { puts "$::notCompiled procs that must run compiled do not" ; exit 1 }
