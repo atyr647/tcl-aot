@@ -1243,7 +1243,8 @@ proc wpol {P} {
 # the policy of one variant: the static one of the proc, or the tagged-number version of a proc that adapts (its key ends in w)
 proc wpolK {key} {
     lassign [keysplit $key] P sig
-    return [expr {[wpol $P] || [string match *w $sig]}]
+    # (a variant that takes a double has a sign of floating-point numbers, as a proc with a double literal has: objects read in it, list elements, variables, are numbers of either kind)
+    return [expr {[wpol $P] || [string match *w $sig] || [string first D $sig] >= 0}]
 }
 proc jd {a b} {
     if {$a eq $b} { return $a }

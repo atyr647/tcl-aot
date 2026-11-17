@@ -12,12 +12,17 @@ namespace eval nvx { variable K 3.0; variable F; array set F {a 1.5 b 2} }
 proc nv_var {x} { variable ::nvx::K; return [expr {$x * $K + 0.5}] }
 proc nv_up {x} { upvar #0 ::nvx::K k; return [expr {$x + $k + 0.5}] }
 proc nv_abs {x} { return [expr {$x * $::nvx::K + $::nvx::F(a) + 0.5}] }
+# a loop-free helper that takes doubles and multiplies list elements (objects) by them: no sign of floating-point numbers but the argument kinds, so tagged numbers must be used
+# in the variants that take a double (it handed over at the multiplication in every call, and the whole call was made by the interpreter)
+proc nv_at {pl b x y} { return [expr {[lindex $pl $b] + [lindex $pl $b+1] * $x + [lindex $pl $b+2] * $y}] }
+proc nv_at_loop {n} { set pl {0.5 1.5 2.5 3.5 4.5 5.5}; set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [nv_at $pl 1 [expr {$i * 0.5}] 1.25]}] }; return $s }
 proc nv_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [nv_var $i] + [nv_up $i] + [nv_abs $i]}] }; return $s }
 TCL
 cat > "$tmp/run.tcl" <<'TCL'
 load {} Nvtest
 source $::env(NV_PROCS)
 set r1 [nv_loop 1000]
+set r3 [nv_at_loop 1000]
 set d [tbc::hot -dict]
 proc check {what cond} { if {![uplevel 1 [list expr $cond]]} { puts "FAILED: $what"; incr ::bad } }
 set bad 0
@@ -27,6 +32,9 @@ foreach p {::nv_var ::nv_up ::nv_abs} {
     check "$p never hands over" {[dict get $d $p handovers] == 0}
 }
 check "the loop does not hand over" {[dict get $d ::nv_loop handovers] == 0}
+# (the first call is the interpreter's, which attaches the compiled body and enters with objects, where the integer variant meets a double once)
+check "a helper that takes doubles hands over at most once, not in every call" {[dict get $d ::nv_at handovers] <= 1 && [lindex [dict get $d ::nv_at entries] end] >= 998}
+check "and gives the interpreter's result" {$r3 == 630250.0}
 tbc::hot -reset
 # a trace on the variable: the calls are made the ordinary way, and give the interpreter's results
 set ::log {}
