@@ -429,6 +429,8 @@ proc prepare {P} {
                 if {$r ne "" && [dict get $r type] ne "catch"} {
                     set tg [dict get $r [expr {$m == 3 ? "break" : "continue"}]]
                     set tmk [expr {[info exists mkAt([dict get $r from])] ? $mkAt([dict get $r from]) : $mk}]
+                    # (an invokeExpanded has already taken its own expansion off the interpreter's auxiliary stack when it returns break or continue: the handler's expandDrop is for the one outside it)
+                    if {$op eq "invokeExpanded"} { set tmk [lrange $mk 0 end-1] }
                     if {$tg >= 0} { lappend soft [list $pc $m $tg [expr {$d - $cl}] $tmk] }
                 }
             }

@@ -640,6 +640,13 @@ foreach l [list {} 5 {1 2 3} {9223372036854775806 1 2} {9223372036854775807 1} {
 }
 foreach n {0 1 5} { lappend calls [list tbx_concat_loop $n] }
 
+# Phase A, blocker 4: expansions nested in an expansion, inside loops (sd_*): with and without a break, continue, error or return from the inner command
+foreach l {{} {{a}} {{a b} {c} {d e f}} {{a} {x} {b}} {{a} {c} {b}} {{a} {e} {b}} {{a} {r} {b}} {{x}} {{c}} {{1 2} {x} {3}} {{a b c}}} {
+    foreach p {sd_cat sd_append sd_nest sd_break sd_while_break sd_for_break sd_catch sd_global} { lappend calls [list $p $l] }
+}
+lappend calls {sd_for {a b c}} {sd_while {a b c}} {sd_for {}} {sd_while {x}}
+foreach l {{} {{{a b} {c}} {{d}}} {{{a} {x} {b}} {{c}}} {{{a} {c} {b}} {{d}}} {{{a} {e}} {{d}}}} { lappend calls [list sd_two_loops $l] }
+
 # TBC_SMALL=1: leave out the calls that loop long (for runs under valgrind)
 if {[info exists ::env(TBC_SMALL)]} { set calls [lmap c $calls { if {[regexp {(^|[ \{])(1000|3000|6000|10000|30000|100000|1000000|900|1500)($|[ \}])} $c]} { continue }; set c }] }
 proc runall {} {
@@ -675,7 +682,7 @@ puts "attached: [llength [tbc::attached]] of [llength [info commands t_*]]"
 set B [runall]
 puts "attached after the calls: [llength [tbc::attached]]"
 # procs that must run compiled (a refused proc would run interpreted and match trivially): the constructs that were once refused
-set mustAttach {::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop
+set mustAttach {::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop
     ::tl_dictfor_break ::tl_dictfor_ret ::tl_dictfor_err ::tl_dictfor_catch {::tw_odd?} {::tw_star*} {::tw_br[a]} {::tw with space} {::tw"quote} {::tw\back} {::tw;semi} ::tw_caller ::tb_try1 ::tb_try2 ::tb_try3 ::tb_catch1 ::tb_try4 ::tb_try5}
 foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } }
 if {[info exists ::notCompiled]} { puts "$::notCompiled procs that must run compiled do not" ; exit 1 }

@@ -2156,3 +2156,22 @@ proc rn_all {s} { set n 0; set i 0; while {$i < 4} { incr n [regexp -all {a*} $s
 proc rn_dyn {p s} { regexp -inline -all -indices -- $p $s }
 namespace eval rnns { proc go {s} { regexp -inline -all {b+} $s } }
 proc rn_ns {s} { rnns::go $s }
+
+# ---- Phase A, blocker 4: an argument expansion inside a command that is an argument of a command with an expansion, in a loop (valid Tcl; once refused with
+# "inconsistent stack depth").  The inner command can end with break or continue, which the interpreter sends to the handler of the inner expansion (it has already
+# taken its own marker off the auxiliary stack), so the loop's own break and continue must still work.
+proc sd_cat {l} { set r {}; foreach s $l { lappend r {*}[string cat {*}$s] }; return $r }
+proc sd_for {l} { set r {}; for {set i 0} {$i < 3} {incr i} { lappend r {*}[string cat {*}$l] }; return $r }
+proc sd_while {l} { set r {}; set n 0; while {[incr n] < 3} { lappend r {*}[string cat {*}$l] }; return $r }
+proc sd_append {l} { set r {}; foreach s $l { append r {*}[string cat {*}$s] }; return $r }
+proc sd_nest {l} { set r {}; foreach s $l { set r [string cat {*}[string cat {*}$s]] }; return $r }
+proc sd_cmd {args} {
+    switch -- [lindex $args 0] { x { return -code break } c { return -code continue } e { error boom } r { return -code return done } }
+    return $args
+}
+proc sd_break {l} { set r {}; foreach s $l { lappend r {*}[sd_cmd {*}$s] }; return $r }
+proc sd_while_break {l} { set r {}; set i 0; while {$i < [llength $l]} { set s [lindex $l $i]; incr i; lappend r {*}[sd_cmd {*}$s] }; return $r }
+proc sd_for_break {l} { set r {}; for {set i 0} {$i < [llength $l]} {incr i} { lappend r {*}[sd_cmd {*}[lindex $l $i]] }; return $r }
+proc sd_catch {l} { set r {}; foreach s $l { catch { lappend r {*}[sd_cmd {*}$s] } m }; list $r $m }
+proc sd_two_loops {l} { set r {}; foreach a $l { foreach b $a { lappend r {*}[sd_cmd {*}$b] }; lappend r | }; return $r }
+proc sd_global {l} { set ::sd_g {}; foreach s $l { lappend ::sd_g {*}[string cat {*}$s] }; return $::sd_g }
