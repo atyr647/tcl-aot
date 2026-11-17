@@ -49,13 +49,12 @@ done
 for p in $pids; do wait "$p" || { echo "$0: a compile failed" >&2; exit 1; }; done
 
 if [ "${MERGE:-1}" = 1 ]; then
-  if [ "$(uname -s)" != Darwin ]; then ld -r -o "$tmp/all.o" "$tmp"/*.o; fi
-  if [ "$(uname -s)" = Darwin ]; then
-    # no objcopy on macOS: relink with only <Init>_Init exported (the Mach-O linker's own switch)
-    ld -r -exported_symbol "_$init" -o "$out" "$tmp"/*.o
-  else
-    objcopy --keep-global-symbol="$init" "$tmp/all.o" "$out"
-  fi
+  # one relocatable object that exports only <Init>_Init: the one place where platforms differ (Mach-O has no objcopy; its linker has the switch)
+  case "$(uname -s)" in
+    Darwin) ld -r -exported_symbol "_$init" -o "$out" "$tmp"/*.o ;;
+    *)      ld -r -o "$tmp/all.o" "$tmp"/*.o
+            objcopy --keep-global-symbol="$init" "$tmp/all.o" "$out" ;;
+  esac
 else
   rm -f "${out%.o}.a"
   ar rcs "${out%.o}.a" "$tmp"/*.o

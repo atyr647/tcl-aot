@@ -29,7 +29,7 @@ tcl: $(TCL_OBJ)/libtcl8.6.a
 $(TARBALL):
 	mkdir -p $(BUILD)
 	curl -fsSL -o $@.part $(TCL_URL)
-	echo "$(TCL_SHA256)  $@.part" | sha256sum -c --quiet -
+	echo "$(TCL_SHA256)  $@.part" | { sha256sum -c --quiet - 2>/dev/null || shasum -a 256 -c --quiet -; }
 	mv $@.part $@
 
 $(TCL_SRC)/generic/tclInt.h: $(TARBALL)

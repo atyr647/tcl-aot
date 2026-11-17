@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.." || exit 1
 . tools/env.sh || exit 1
 status=0
 
-bad=$(cd "$TCL_SRC" && sha256sum -c --quiet "$TBC_ROOT/tests/tcl-8.6.14.sha256" 2>&1 | grep -c 'FAILED\|No such')
+bad=$(cd "$TCL_SRC" && tbc_sha256_check "$TBC_ROOT/tests/tcl-8.6.14.sha256" 2>&1 | grep -c 'FAILED\|No such')
 if [ "$bad" = 0 ]; then
   echo "pristine: $TCL_SRC is identical to the Tcl 8.6.14 release: ok"
 else

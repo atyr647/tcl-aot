@@ -16,7 +16,7 @@ the interpreter): loops and arithmetic 3x to 5.5x (`loops` 5.5x, `data` 4.8x, ba
 mix loops with commands 1.2x to 2.1x (`ascii85` 2.1x, `sha1` 1.9x, `base64` 1.7x, `klist` 1.5x, `binary` 1.5x, `gccont` 1.3x), and programs whose time is in one
 Tcl command about 1.0x (`regexp`, `map`, `parse`, `encoding`, and `md5`, which computes bignums by design).  `docs/decisions.md`, decisions 42 to 48, has every figure.
 
-Status: experimental.  Tcl 8.6.14 on Linux/x86-64 is what the test suite runs on.  The suite was also run as a wasm32-wasip3 guest (see decision 11 in
+Status: experimental.  Tcl 8.6.14 on Linux/x86-64 and macOS/arm64 is what the test suite runs on.  The suite was also run as a wasm32-wasip3 guest (see decision 11 in
 `docs/decisions.md`); the build recipe for that is not part of this repository.
 
 ## Try it

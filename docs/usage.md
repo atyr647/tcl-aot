@@ -4,7 +4,7 @@
 
 * Tcl **8.6.14**, built as a static library from its own source tree.  The generated code uses Tcl's internal headers (`tclInt.h`, `tclCompile.h`), so it is
   valid for exactly one Tcl release; a module refuses to load into any other.  `make tcl` downloads, verifies and builds the release for you.
-* A C compiler (gcc or clang), GNU make, curl, `ld` and `objcopy` (for split builds).  Linux on x86-64 is what is tested.
+* A C compiler (gcc or clang), GNU make, curl, and `ld` (and `objcopy`, except on macOS, for split builds).  Linux on x86-64 and macOS on arm64 are what is tested.
 * The program must be able to embed Tcl: the compiled code is linked into the executable together with libtcl.  A script run by an ordinary `tclsh` cannot
   load a module (a shared-library build is not supported).
 

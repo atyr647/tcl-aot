@@ -27,3 +27,12 @@ done
 TBC_INC="-I$TCL_SRC/generic -I$TCL_SRC/unix -I$TBC_ROOT/include$TBC_DEFS"
 TBC_LIBS="$TCL_OBJ/libtcl8.6.a $TCL_LIBS"
 TCLSH=${TCLSH:-$BUILD/tcl-aot-sh}
+
+# Portability helpers: GNU `timeout` and `sha256sum` are not on a stock macOS (they come with coreutils), so fall back to what the system has.
+# TBC_TIMEOUT is a command prefix (empty when there is no timeout command: the run is then not limited); tbc_sha256_check is `sha256sum -c --quiet`.
+if command -v timeout >/dev/null 2>&1; then TBC_TIMEOUT=timeout
+elif command -v gtimeout >/dev/null 2>&1; then TBC_TIMEOUT=gtimeout
+else TBC_TIMEOUT=""; fi
+tbc_sha256_check() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum -c --quiet "$@"; else shasum -a 256 -c --quiet "$@"; fi
+}

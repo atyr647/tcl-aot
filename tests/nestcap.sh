@@ -14,7 +14,7 @@ for cap in 1 3 40; do
   "$CC" -O1 -w -DTBC_NEST_CAP=$cap $TBC_INC tests/harness.c "$tmp/p.c" $TBC_LIBS -o "$tmp/suite" 2>&1 | grep error
   for mode in lazy eager; do
     if [ $mode = eager ]; then export TBC_EAGER=1; else unset TBC_EAGER; fi
-    out=$(TBC_NOLEAK=1 timeout 600 "$tmp/suite" tests/differential.tcl 2>&1 | grep -E 'compared|NOT COMPILED')
+    out=$(TBC_NOLEAK=1 $TBC_TIMEOUT 600 "$tmp/suite" tests/differential.tcl 2>&1 | grep -E 'compared|NOT COMPILED')
     case "$out" in
       *" 0 mismatches"*) echo "nest cap $cap, $mode attach: $out: ok" ;;
       *) echo "nest cap $cap, $mode attach: FAILED: $out"; status=1 ;;

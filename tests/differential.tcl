@@ -698,7 +698,16 @@ runall; set l1 [live]; runall; set l2 [live]; runall; set l3 [live]; runall; set
 puts "live allocations after repeated full runs: $l1 $l2 $l3 $l4"
 
 # reference-count stress: a leak of one object per iteration would show as memory growth
-proc rss {} { set f [open /proc/self/status]; set t [read $f]; close $f; regexp {VmRSS:\s+(\d+)} $t -> kb; return $kb }
+# resident set size in KB: /proc where there is one (Linux), `ps` elsewhere (macOS has no /proc)
+proc rss {} {
+    if {[file readable /proc/self/status]} {
+        set f [open /proc/self/status]; set t [read $f]; close $f
+        regexp {VmRSS:\s+(\d+)} $t -> kb
+    } else {
+        set kb [string trim [exec ps -o rss= -p [pid]]]
+    }
+    return $kb
+}
 set iters [expr {[info exists ::env(TBC_LEAK_ITERS)] ? $::env(TBC_LEAK_ITERS) : 3000000}]
 t_leak_loop 1000
 set r0 [rss]; set a0 [live]
