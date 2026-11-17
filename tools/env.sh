@@ -45,3 +45,18 @@ tbc_timeout() {
 tbc_sha256_check() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum -c --quiet "$@"; else shasum -a 256 -c --quiet "$@"; fi
 }
+
+# Tk (optional: `make tk` builds a static libtk8.6.a of the same release).  TBC_TK is 1 when there is one; TBC_TK_INC and TBC_TK_LIBS are what a program
+# that uses Tk compiles and links with, in addition to TBC_INC and TBC_LIBS.  The one platform difference (Tk's windowing system) is this `case`.
+TK_SRC=${TK_SRC:-$BUILD/tk8.6.14}
+TK_OBJ=${TK_OBJ:-$BUILD/tk-obj}
+TBC_TK=0; TBC_TK_INC=""; TBC_TK_LIBS=""
+if [ -f "$TK_OBJ/libtk8.6.a" ] && [ -f "$TK_OBJ/tkConfig.sh" ] && [ -f "$TK_SRC/generic/tk.h" ]; then
+  TBC_TK=1
+  . "$TK_OBJ/tkConfig.sh"
+  case "$(uname -s)" in
+    Darwin) TBC_TK_INC="-DMAC_OSX_TK=1 -I$TK_SRC/xlib -I$TK_SRC/generic -I$TK_SRC/macosx" ;;
+    *)      TBC_TK_INC="-I$TK_SRC/generic -I$TK_SRC/unix $TK_XINCLUDES" ;;
+  esac
+  TBC_TK_LIBS="$TK_OBJ/libtk8.6.a $TK_LIBS"
+fi

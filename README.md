@@ -22,7 +22,7 @@ Status: experimental.  Tcl 8.6.14 on Linux/x86-64 and macOS/arm64 is what the te
 ## Try it
 
 ```
-make tcl shell          # downloads Tcl 8.6.14, checks its sha256, builds a static libtcl and the translator shell under build/
+make tcl shell          # downloads Tcl 8.6.14, checks its sha256, builds a static libtcl and the translator shell under build/ (`make tk` does the same for Tk)
 examples/run.sh         # translates examples/collatz.tcl, links it, runs main.tcl with the interpreter alone and compiled
 ```
 
@@ -67,7 +67,18 @@ sha1 1.7x, binary packing 1.5x, statistics 6.2x, linear algebra 4.7x; the text a
 1.07x: their time is in Tcl's library.  A Tcl built with `--disable-threads` (point
 `TCL_SRC` and `TCL_OBJ` at it) used 6-20% fewer instructions on the two workloads measured, both interpreted and compiled.
 
-## Use it on your program
+## Use it on your program: one step
+
+```
+make tcl shell tk                                   # once (tk only for programs that use Tk)
+tools/tcl-aot build -o out myprogram.tcl arg1 arg2    # runs the program once to record its procs, translates, builds, links
+out/shell myprogram.tcl arg1 arg2                     # the same program, unchanged, with its procs compiled (TBC_OFF=1: the interpreter alone)
+```
+
+`docs/usage.md`, "Compile a program", has the options (several recording runs, a program with an event loop, a `wish`-like shell).  The steps below are what it does, for when you want
+to run them yourself.
+
+## Use it on your program: step by step
 
 ```
 build/tcl-aot-sh src/translate.tcl myprocs.tcl mymodule.c MyModule        # translate (. tools/env.sh sets TCL_LIBRARY)

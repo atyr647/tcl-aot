@@ -19,6 +19,31 @@ To use a Tcl you built yourself, give the source tree and the (out-of-tree) buil
 in `tools/` read the same two variables (see `tools/env.sh`).  The compile flags that decide how Tcl objects are allocated are taken from the build's
 `tclConfig.sh`.
 
+## Compile a program (one step, the program unchanged)
+
+```
+make tcl shell tk                     # once: Tcl, the translator shell, and (for Tk programs) a static Tk
+tools/tcl-aot build -o out [options] PROGRAM [ARGUMENT...]
+out/shell PROGRAM [ARGUMENT...]       # the same program, with its procs compiled
+```
+
+`tools/tcl-aot build` runs `PROGRAM ARGUMENT...` once in a shell that records the definition of every proc the program makes (procs in its files, procs it builds at
+run time with `string map`, `regsub` or `eval`, procs of the packages it loads: `tbc::capture`, switched on by `TBC_CAPTURE=file`, written when the process exits, however it
+exits), merges the records of `-also 'ARGUMENTS'` runs, translates them, builds the module (in parallel, `-split` and `-j`) and links `out/shell`.  `out/shell` is a `tclsh` with the module
+started before the program's first command, and with Tk linked in when `make tk` has been run: `out/shell program.tcl args` does what `tclsh program.tcl args` does.  With `-wish` it is
+a `wish` (`Tk_Main`: the main window exists, wish's switches are understood).  `TBC_OFF=1` leaves the module out: the same shell runs the interpreter alone, which is the reference for a
+comparison.  Nothing in the program changes: no list of procs, no `load`, no `tbc::capture`.
+
+* A proc that no recording run defined is not compiled and runs in the interpreter, with the results it always had: the module attaches a body only to a definition with the exact
+  namespace, arguments and body that were recorded.  A run that does not reach part of the program costs speed there, not correctness; record the other paths with `-also`.
+* A program that never ends by itself (a window with an event loop) is recorded with `-after MS`: the recording run ends after that many milliseconds in the event loop (or with
+  `-limit SECONDS`).  Its side effects happen as in any run (files written, windows opened).
+* Where the Tcl and Tk library scripts are is compiled into the shell (`TCL_LIBRARY` and `TK_LIBRARY` in the environment win).  The shell is built against the exact Tcl 8.6.14 and Tk
+  8.6.14 that `make tcl tk` built, not against the Tcl or Tk the program runs with elsewhere: the compiled program uses these.
+* `make tk` builds Tk 8.6.14 as a static library (`macosx/configure --enable-aqua` on macOS, `unix/configure` elsewhere, which needs the X11 development files).
+* `tests/dropin.sh` is the check: a program with a sourced file, a namespace with a variable, procs built at run time and one defined only for some arguments, compared with the
+  interpreter's output and exit status, and a Tk program when Tk is built.
+
 ## Translate
 
 ```

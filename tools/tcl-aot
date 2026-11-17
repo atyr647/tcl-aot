@@ -1,0 +1,158 @@
+#!/bin/sh
+# tcl-aot: compile a Tcl or Tcl/Tk program without changing it.
+#
+#   tools/tcl-aot build [options] PROGRAM [ARGUMENT...]
+#
+# Runs PROGRAM once, with its arguments, in a shell that records every proc the program defines (also the ones it builds at run time, from `string map`,
+# `regsub`, `source`, a package...), translates them, builds a module and links it into a shell, DIR/shell.  Then
+#
+#   DIR/shell PROGRAM ARGUMENT...
+#
+# runs the same program, unchanged, as `tclsh PROGRAM ARGUMENT...` (or `wish`, with -wish) would, with the compiled bodies attached to its procs.
+# TBC_OFF=1 in the environment makes the same shell run the interpreter alone (the reference to compare with).
+#
+# Options (before PROGRAM):
+#   -o DIR          where the result goes (default ./tcl-aot-out): shell, captured.tcl (the definitions), work/ (the C and the logs)
+#   -name NAME      the module's InitName (default Aot, a C identifier)
+#   -also 'ARGS'    one more recording run of PROGRAM with these arguments (a shell word list); the definitions of all the runs are merged.  Repeatable.
+#                   A proc that no run defines is not compiled (and runs in the interpreter: a program never gets different results)
+#   -after MS       end each recording run after MS milliseconds in the event loop (a program with a window that does not end by itself)
+#   -limit SECONDS  stop a recording run after that many seconds (default 1800 when the system has `timeout`)
+#   -wish           the shell behaves as wish (Tk_Main: the main window exists, wish's switches); the default is a tclsh with Tk available to
+#                   `package require Tk`.  Both need `make tk` (a static Tk); without it the shell has no Tk
+#   -notk           no Tk even if it is built
+#   -hints FILE, -untyped, -split N, -j N    passed to the translator and the module build (docs/usage.md); -split defaults to the number of
+#                   processors for a program of more than 100 procs
+#   -O FLAGS        compiler flags for the typed code and the link (default -O2)
+#
+# The recording run executes PROGRAM, with its side effects (files written, windows opened), exactly as a run of it does.  Its exit status is not
+# checked (a program may end with `exit 1`).  See docs/usage.md, "Compile a program".
+set -eu
+
+TBC_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$TBC_ROOT/tools/env.sh"
+
+usage() { sed -n '2,/^set -eu/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//' >&2; exit 2; }
+[ "${1:-}" = build ] || usage
+shift
+out=./tcl-aot-out; name=Aot; also=""; after=""; limit=1800; wish=0; usetk=$TBC_TK; hints=""; untyped=""; splitn=""; jobs=""; cflags="-O2"
+nalso=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) out=${2:?"-o needs a directory"}; shift 2 ;;
+    -name) name=${2:?"-name needs a name"}; shift 2 ;;
+    -also) nalso=$((nalso + 1)); eval "also_$nalso=\$2"; shift 2 ;;
+    -after) after=${2:?"-after needs milliseconds"}; shift 2 ;;
+    -limit) limit=${2:?"-limit needs seconds"}; shift 2 ;;
+    -wish) wish=1; shift ;;
+    -notk) usetk=0; shift ;;
+    -hints) hints=${2:?"-hints needs a file"}; shift 2 ;;
+    -untyped) untyped=-untyped; shift ;;
+    -split) splitn=${2:?"-split needs a number"}; shift 2 ;;
+    -j) jobs=${2:?"-j needs a number"}; shift 2 ;;
+    -O) cflags=${2:?"-O needs flags"}; shift 2 ;;
+    -h|--help) usage ;;
+    --) shift; break ;;
+    -*) echo "tcl-aot: unknown option $1" >&2; usage ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || usage
+progcmd=$*
+case $name in ''|[0-9]*|*[!A-Za-z0-9_]*) echo "tcl-aot: -name must be a C identifier" >&2; exit 2 ;; esac
+[ -x "$TCLSH" ] || { echo "tcl-aot: $TCLSH not built; run 'make shell'" >&2; exit 1; }
+if [ "$wish$usetk" != "00" ] && [ "$TBC_TK" != 1 ]; then
+  [ "$wish" = 1 ] && { echo "tcl-aot: -wish needs a static Tk: run 'make tk'" >&2; exit 1; }
+  usetk=0
+fi
+program=$1
+[ -f "$program" ] || { echo "tcl-aot: no such program: $program" >&2; exit 1; }
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+work=$out/work
+rm -rf "$work"; mkdir -p "$work"
+[ -n "$jobs" ] || jobs=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+# the macros for the shell: one source, tools/module-shell.c
+shellflags="-DTBC_AUTOLOAD"
+shellinc=""; shelllibs=""
+if [ "$usetk" = 1 ]; then
+  shellflags="$shellflags -DTBC_WITH_TK"
+  [ "$wish" = 1 ] && shellflags="$shellflags -DTBC_WISH"
+  shellinc=$TBC_TK_INC
+  shelllibs=$TBC_TK_LIBS
+fi
+shellflags="$shellflags -DTBC_TCL_LIBRARY=\"$TCL_LIBRARY\""
+[ "$usetk" = 1 ] && shellflags="$shellflags -DTBC_TK_LIBRARY=\"$TK_SRC/library\""
+
+say() { printf 'tcl-aot: %s\n' "$*"; }
+now() { date +%s; }
+
+# 1. a shell with the runtime and no code: the program runs in it as in the interpreter, and the definitions are recorded
+t0=$(now)
+printf 'proc tbc_none {} {}\n' > "$work/none.tcl"
+"$TCLSH" "$TBC_ROOT/src/translate.tcl" "$work/none.tcl" "$work/none.c" Tbcnone >"$work/none.log" 2>&1 || { cat "$work/none.log" >&2; exit 1; }
+# shellcheck disable=SC2086  # the flag variables hold several words
+"$CC" -O1 -w $shellflags -DMODULE=Tbcnone $TBC_INC $shellinc "$TBC_ROOT/tools/module-shell.c" "$work/none.c" $shelllibs $TBC_LIBS -o "$work/capture-shell" || { echo "tcl-aot: the recording shell did not build" >&2; exit 1; }
+
+# 2. the recording runs
+runs=0
+record() {
+  runs=$((runs + 1))
+  say "recording run $runs: $*"
+  rc=0
+  if [ -n "$after" ]; then
+    tbc_timeout "$limit" env TBC_CAPTURE="$work/capture.$runs.tcl" TBC_CAPTURE_AFTER="$after" "$work/capture-shell" "$@" || rc=$?
+  else
+    tbc_timeout "$limit" env TBC_CAPTURE="$work/capture.$runs.tcl" "$work/capture-shell" "$@" || rc=$?
+  fi
+  [ "$rc" = 0 ] || say "  (the program ended with status $rc)"
+  [ -s "$work/capture.$runs.tcl" ] || { say "  nothing was recorded: the program defined no proc, or it was stopped before it exited (see -after and -limit)"; }
+}
+record "$@"
+i=1
+while [ "$i" -le "$nalso" ]; do
+  eval "extra=\$also_$i"
+  eval "set -- $extra"
+  record "$program" "$@"
+  i=$((i + 1))
+done
+files=""
+i=1
+while [ "$i" -le "$runs" ]; do [ -s "$work/capture.$i.tcl" ] && files="$files $work/capture.$i.tcl"; i=$((i + 1)); done
+[ -n "$files" ] || { echo "tcl-aot: no run recorded a proc; nothing to compile" >&2; exit 1; }
+# shellcheck disable=SC2086
+"$TCLSH" "$TBC_ROOT/tools/tcl-aot-merge.tcl" "$out/captured.tcl" $files
+t1=$(now)
+nprocs=$(grep -c '^proc ' "$out/captured.tcl" || true)
+
+# 3. translate
+[ -n "$splitn" ] || { splitn=0; [ "$nprocs" -gt 100 ] && splitn=$jobs; }
+topts=""
+[ -n "$hints" ] && topts="$topts -hints $hints"
+[ -n "$untyped" ] && topts="$topts -untyped"
+[ "$splitn" -gt 0 ] && topts="$topts -split $splitn"
+say "translating $nprocs procs"
+# shellcheck disable=SC2086
+"$TCLSH" "$TBC_ROOT/src/translate.tcl" "$out/captured.tcl" "$work/module.c" "$name" $topts >"$work/translate.log" 2>"$work/translate.err" || { tail -5 "$work/translate.err" >&2; echo "tcl-aot: translation failed (see $work/translate.err)" >&2; exit 1; }
+grep '^tcl-aot:' "$work/translate.log" | sed 's/^/  /'
+nref=$(grep -c 'stays interpreted' "$work/translate.err" || true)
+[ "$nref" = 0 ] || say "  $nref procs stay interpreted; the reasons are in $work/translate.err"
+t2=$(now)
+
+# 4. build the module and link the shell
+if [ "$splitn" -gt 0 ]; then
+  say "compiling the module ($splitn parts, $jobs at a time)"
+  CFLAGS_V="$cflags" "$TBC_ROOT/tools/build-module.sh" "$work/module.c" "$work/module.o" -j "$jobs"
+  modsrc="$work/module.o"
+else
+  say "compiling the module"
+  modsrc="$work/module.c"
+fi
+t3=$(now)
+# shellcheck disable=SC2086
+"$CC" $cflags -w $shellflags -DMODULE="$name" $TBC_INC $shellinc "$TBC_ROOT/tools/module-shell.c" "$modsrc" $shelllibs $TBC_LIBS -o "$out/shell" || { echo "tcl-aot: the shell did not link" >&2; exit 1; }
+t4=$(now)
+flavour=tclsh; [ "$usetk" = 1 ] && flavour="tclsh with Tk"; [ "$wish" = 1 ] && flavour=wish
+say "built $out/shell ($flavour): recording $((t1 - t0)) s, translation $((t2 - t1)) s, C compiler $((t3 - t2)) s, link $((t4 - t3)) s"
+say "run the program as  $out/shell $progcmd"

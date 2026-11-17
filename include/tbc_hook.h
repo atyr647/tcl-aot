@@ -2636,6 +2636,31 @@ static void tbc_mf_setup(Tcl_Interp *interp) {
     tbc_mf_ok = ok;
 }
 
+/* TBC_CAPTURE=<file> in the environment (tools/tcl-aot, the drop-in build): the capture is on from the start and the definitions are written to <file> when the
+ * process exits, however it exits (the program's `exit`, the end of its script, the end of its event loop); TBC_CAPTURE_AFTER=<ms> also ends the process after that
+ * long in the event loop (for a program with a window that never ends by itself).  Written with stdio: the interpreter may be gone when the exit handlers run. */
+static void tbc_capture_atexit(ClientData cd) {
+    const char *path = (const char *) cd;
+    FILE *f;
+    int n = 0, i;
+    Tcl_Obj **w;
+    if (!path || !tbc_capture_ready) return;
+    f = fopen(path, "wb");
+    if (!f) return;
+    if (Tcl_ListObjGetElements(NULL, tbc_capture_defs, &n, &w) == TCL_OK) {
+        for (i = 0; i < n; i++) { int len; const char *b = Tcl_GetStringFromObj(w[i], &len); fwrite(b, 1, (size_t) len, f); fputc('\n', f); }
+    }
+    fclose(f);
+}
+static void tbc_capture_timer(ClientData cd) { (void) cd; Tcl_Exit(0); }
+static void tbc_capture_env(void) {
+    const char *path = getenv("TBC_CAPTURE"), *after = getenv("TBC_CAPTURE_AFTER");
+    if (!path || !path[0]) return;
+    tbc_capture_on = 1;
+    Tcl_CreateExitHandler(tbc_capture_atexit, (ClientData) path);
+    if (after && atoi(after) > 0) Tcl_CreateTimerHandler(atoi(after), tbc_capture_timer, NULL);
+}
+
 static void tbc_install(Tcl_Interp *interp) {
     static int done;
     tbc_reg_init();
@@ -2653,6 +2678,7 @@ static void tbc_install(Tcl_Interp *interp) {
     Tcl_CreateObjCommand(interp, "::tbc::attach", tbc_attach_cmd, NULL, NULL);
     tbc_mf_setup(interp);
     if (getenv("TBC_EAGER") && getenv("TBC_EAGER")[0] == '1') tbc_eager = 1;
+    tbc_capture_env();
     {
         Tcl_CmdInfo ci;
         if (Tcl_GetCommandInfo(interp, "::proc", &ci) && ci.isNativeObjectProc && ci.objProc == Tcl_ProcObjCmd) {
