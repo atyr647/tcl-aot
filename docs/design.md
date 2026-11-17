@@ -71,7 +71,7 @@ failing instruction instead (the earlier steps had effects).
 A call by literal name to another translated proc whose callee is *pure* becomes a direct C call of the callee's typed variant for the argument kinds.
 Pure means: the callee uses no variable by name, no `upvar`/`global`/`variable`, no array, and only built-in commands that cannot observe the caller's
 frame, so it needs no frame of its own.  A flag per callee, cleared when the callee is renamed, deleted or redefined (traces that the module installs),
-guards each call; a failed guard makes the call the ordinary way.  Results travel in the C return value; anything else (an error, a callee that had to
+guards each call; a failed guard makes the call the ordinary way.  A proc that only *reads* namespace variables (links by name with `variable`, `upvar #0`, `global`, or `$::ns::name`, and nothing else that needs a frame) is called the same way: its typed code runs on a private array of locals whose links point at the namespace variables, which are found once per call site and kept (decision 57); anything unusual about a variable (missing, unset, a trace, an array where a scalar is read) hands over before anything has changed, and the call is made the ordinary way.  Results travel in the C return value; anything else (an error, a callee that had to
 leave typed mode) is reported through `tbc_st` and handled at the call site.  Recursion depth is carried in a register argument and raises Tcl's
 "too many nested evaluations" error at exactly the interpreter's limit.
 

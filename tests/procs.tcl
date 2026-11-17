@@ -2230,3 +2230,61 @@ proc lx_const {m} { list [lindex $m {1 2}] [lindex $m 1 2] [lindex $m {0 0 0}] [
 proc lx_end {m} { list [lindex $m end 0] [lindex $m 0 end] [lindex $m {end end}] [lindex $m end-1 1] }
 proc lx_loop {m n} { set s 0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { incr s [lindex $m $i $j] } }; return $s }
 proc lx_dbl {m n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { for {set j 0} {$j < $n} {incr j} { set s [expr {$s + [lindex $m $i $j]}] } }; return $s }
+
+# ---- Phase A, blocker 1: procs that only read namespace variables (`variable`, `upvar #0`, `global`, `$::ns::var`) are called directly by compiled code, with no frame.  The variable
+# is found once and kept; what is not usual (missing, unset, array where a scalar is read, a read trace, a namespace deleted and made again, a callee renamed) is the interpreter's.
+proc nv_reset {{k 3.0} {i 7}} {
+    catch {namespace delete ::nvns}
+    namespace eval ::nvns [list variable K $k]
+    namespace eval ::nvns [list variable I $i]
+    namespace eval ::nvns {  variable F; array set F {a 1 b 2.5 3 x}; variable S str; proc get {x} { variable K; variable I; return [expr {$x * $K + $I + 0.5}] } }
+    set ::nvlog {}
+    set ::nvG 11
+    catch {namespace delete ::nvdel}
+    namespace eval ::nvdel { variable V 2.5 }
+    return ok
+}
+proc nv_trace {args} { lappend ::nvlog $args }
+nv_reset
+proc nv_k {x} { variable ::nvns::K; return [expr {$x * $K + 0.5}] }
+proc nv_up {x} { upvar #0 ::nvns::K k; return [expr {$x + $k + 0.5}] }
+proc nv_glob {x} { global nvG; return [expr {$x * $nvG + 0.5}] }
+proc nv_abs {x} { return [expr {$x * $::nvns::K + 0.5}] }
+proc nv_arr {x} { variable ::nvns::F; return [expr {$F(a) + $F($x) + 0.5}] }
+proc nv_absarr {x} { return [expr {$::nvns::F(a) * $::nvns::F(b) + $::nvns::F($x) + 0.5}] }
+proc nv_str {x} { variable ::nvns::S; return [string length $S$x] }
+proc nv_two {x} { variable ::nvns::K; variable ::nvns::I; set y [nv_k $x]; return [expr {$y * $K + $I}] }
+proc nv_del {x} { return [expr {$x + $::nvdel::V + 0.5}] }
+proc nv_lit {x} { upvar #0 ::nvns::K k; variable ::nvns::I; return [expr {max($k, $I) + $x}] }
+proc nv_all {x} {
+    set r {}
+    foreach p {nv_k nv_up nv_glob nv_abs nv_arr nv_absarr nv_str nv_two nv_del nv_lit ::nvns::get} { lappend r [catch {$p $x} v] $v }
+    return $r
+}
+proc nv_loop {n} {
+    set s 0.0
+    for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [nv_k $i] + [nv_up $i] + [nv_glob $i] + [nv_abs $i] + [nv_two $i] + [::nvns::get $i]}] }
+    return $s
+}
+proc nv_loop2 {n x} {
+    set s 0.0; set e 0
+    for {set i 0} {$i < $n} {incr i} { if {[catch {set s [expr {$s + [nv_k $x] + [nv_arr $x] + [nv_absarr $x] + [nv_del $i]}]} m]} { incr e; set last $m } }
+    return [list $s $e [expr {[info exists last] ? $last : {}}]]
+}
+proc nv_set {name val} { set ::nvns::$name $val }
+proc nv_unset {name} { unset ::nvns::$name }
+proc nv_arrayify {} { unset ::nvns::K; array set ::nvns::K {a 1} }
+proc nv_trace_on {name} { trace add variable ::nvns::$name read nv_trace }
+proc nv_trace_off {name} { trace remove variable ::nvns::$name read nv_trace }
+proc nv_trace_elem {} { trace add variable ::nvns::F read nv_trace }
+proc nv_trace_elem_off {} { trace remove variable ::nvns::F read nv_trace }
+proc nv_trace_unset {} { trace add variable ::nvns::K unset nv_trace }
+proc nv_trace_unset_off {} { trace remove variable ::nvns::K unset nv_trace }
+proc nv_log {} { set ::nvlog }
+proc nv_ns_delete {} { namespace delete ::nvdel }
+proc nv_ns_make {v} { namespace eval ::nvdel [list variable V $v] }
+proc nv_ns_replace {v} { catch {namespace delete ::nvdel}; namespace eval ::nvdel [list variable V $v] }
+proc nv_rename {} { rename nv_k nv_k_saved }
+proc nv_rename_back {} { rename nv_k_saved nv_k }
+proc nv_redefine {} { proc nv_k {x} { return REDEFINED } }
+proc nv_redefine_back {} { proc nv_k {x} { variable ::nvns::K; return [expr {$x * $K + 0.5}] } }

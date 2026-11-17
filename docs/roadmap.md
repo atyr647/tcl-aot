@@ -8,7 +8,7 @@ An item moves out of this file when it is measured, tested and written up there.
 1. **Integer loops: fewer overflow checks.**  Measured and not worth it: removing every overflow check gains at most 0-4% (decision 24).
 2. **String commands in loops**: done (decision 28; `str_ops` 1.4x to 4.8x).
 3. **Keys of arrays**: done for integer and literal keys (decision 25).
-4. **Calls into procs that need a frame** (global, namespace and `upvar` variables).  The interpreter's call costs about 900 instructions more than it
+4. **Calls into procs that need a frame** (global, namespace and `upvar` variables).  Procs that only *read* namespace variables are done (decision 57); procs that write them, or use `info exists`, `incr`, arrays of their own on them, or other levels, still go through the interpreter.  The interpreter's call costs about 900 instructions more than it
    needs to.  Building the call frame directly and running the compiled body in it, without the stub bytecode and its second dispatch, is possible with
    Tcl's exported frame functions but must reproduce argument binding, error messages and error info exactly.
 5. **Namespace and global arrays** (`nn::fill`: 2.1x counted in instructions of one cold run, 3.9x in wall time of the best of five).  These stay in Tcl's hash table

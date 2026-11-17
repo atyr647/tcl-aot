@@ -1519,6 +1519,83 @@ static int tbc_t_variable(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name) 
     return tbc_linkvars(interp, loc, idx, o) ? 1 : 0;
 }
 
+/* ---- variables of namespaces read without a call frame (a proc that only reads them is called directly) ----
+ * A proc whose only dealings with the frame are `variable name`, `upvar #0 target name` and `global name` (links made by name, once) and reads of the variables so linked,
+ * or `$::ns::name` of a literal absolute name, runs when compiled code calls it with no frame of its own (inframe 0): its typed code works on a private array of locals in
+ * which each link is a link variable to the namespace variable, so the helpers above (tbc_tld, tbc_tald...) follow it as they follow a link of a real frame.  What
+ * the interpreter does in a call is the same for a variable that is there, set, with no trace: anything else (the variable is missing or unset, has a trace, is an array
+ * where a scalar is read, a resolver is in the way) hands over, and the call is made the ordinary way before anything has happened (the proc has changed nothing).
+ * Finding the variable costs a lookup by name; the result is kept at the call site (TbcNvSite), valid while the Var is the one the name still leads to:
+ *   - the site holds a reference on the Var (VarHashRefCount), so Tcl cannot free it or make a new one for the name while it is held: `unset` leaves the entry (undefined),
+ *     a later `set` finds the same Var;
+ *   - when its namespace is deleted the Var is marked VAR_DEAD_HASH (and no longer found by name), which the site looks at on each use;
+ *   - another interpreter, or the same address after an interpreter was deleted (tbc_nv_epoch), starts again;
+ *   - a variable resolver (interpreter wide, or of the global namespace or the variable's namespace) switches the whole thing off. */
+typedef struct { Var *var; Interp *ip; unsigned epoch; } TbcNvSite;
+#define TBC_NV_VARIABLE 0   /* `variable name`, in the namespace nsname */
+#define TBC_NV_UPVAR 1      /* `upvar #0 target name` (level is the literal "#0") */
+#define TBC_NV_NSUPVAR 2    /* `namespace upvar ns target name`, and `global`, which is that with the namespace :: (level is the namespace's name) */
+#define TBC_NV_ABS 3        /* `$::ns::name` (a read: nothing is created) */
+TBC_SHARED unsigned tbc_nv_epoch;
+static Interp *tbc_nv_ip;
+static void tbc_nv_gone(ClientData cd, Tcl_Interp *interp) { (void) cd; (void) interp; tbc_nv_epoch++; tbc_nv_ip = NULL; }
+TBC_INLINE int tbc_nv_noresolvers(Interp *ip, Var *v) {
+    Namespace *ns = ((TclVarHashTable *) ((VarInHash *) v)->entry.tablePtr)->nsPtr;
+    return !ip->resolverPtr && !ip->globalNsPtr->varResProc && (!ns || !ns->varResProc);
+}
+static Var *tbc_nv_slow(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *nsname, Tcl_Obj *level, Tcl_Obj *name) {
+    Interp *ip = (Interp *) interp;
+    Var *o = NULL, *vp;
+    Namespace *sv;
+    Tcl_Namespace *ns;
+    CallFrame *fr, *svf;
+    if (ip->resolverPtr || ip->globalNsPtr->varResProc) return NULL;
+    switch (kind) {
+    case TBC_NV_VARIABLE:
+        if (!(ns = Tcl_FindNamespace(interp, nsname, NULL, 0))) break;
+        sv = ip->varFramePtr->nsPtr; ip->varFramePtr->nsPtr = (Namespace *) ns;
+        o = TclObjLookupVarEx(interp, name, NULL, TCL_NAMESPACE_ONLY, "access", 1, 1, &vp);
+        ip->varFramePtr->nsPtr = sv;
+        if (o) TclSetVarNamespaceVar(o);
+        break;
+    case TBC_NV_UPVAR:
+        if (TclObjGetFrame(interp, level, &fr) == -1 || fr == ip->varFramePtr) break;
+        svf = ip->varFramePtr; ip->varFramePtr = fr;
+        o = TclObjLookupVarEx(interp, name, NULL, 0, "access", 1, 1, &vp);
+        ip->varFramePtr = svf;
+        break;
+    case TBC_NV_NSUPVAR:
+        if (TclGetNamespaceFromObj(interp, level, &ns) != TCL_OK) break;
+        sv = ip->varFramePtr->nsPtr; ip->varFramePtr->nsPtr = (Namespace *) ns;
+        o = TclObjLookupVarEx(interp, name, NULL, TCL_NAMESPACE_ONLY | TCL_AVOID_RESOLVERS, "access", 1, 1, &vp);
+        ip->varFramePtr->nsPtr = sv;
+        break;
+    default:
+        o = TclObjLookupVarEx(interp, name, NULL, 0, "read", 0, 1, &vp);
+    }
+    Tcl_ResetResult(interp);
+    if (!o || !TclIsVarInHash(o) || TclIsVarDeadHash(o) || !tbc_nv_noresolvers(ip, o)) return NULL;
+    if (tbc_nv_ip != ip) { Tcl_CallWhenDeleted(interp, tbc_nv_gone, NULL); tbc_nv_ip = ip; tbc_nv_epoch++; }
+    if (s->var && s->epoch == tbc_nv_epoch && s->var != o) { Var *old = s->var; VarHashRefCount(old)--; TclCleanupVar(old, NULL); s->var = NULL; }
+    if (s->var != o) { VarHashRefCount(o)++; s->var = o; }
+    s->ip = ip; s->epoch = tbc_nv_epoch;
+    return o;
+}
+/* the namespace variable of the site, or NULL (the caller hands over) */
+TBC_INLINE Var *tbc_nv_get(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *nsname, Tcl_Obj *level, Tcl_Obj *name) {
+    Var *v = s->var;
+    if (TBC_LIKELY(v && s->ip == (Interp *) interp && s->epoch == tbc_nv_epoch && !TclIsVarDeadHash(v) && tbc_nv_noresolvers((Interp *) interp, v))) return v;
+    return tbc_nv_slow(interp, s, kind, nsname, level, name);
+}
+/* make the private local slot a link to the namespace variable of the site (what `variable` leaves in a frame); 0 = hand over */
+TBC_INLINE int tbc_nv_link(Tcl_Interp *interp, Var *slot, TbcNvSite *s, int kind, const char *nsname, Tcl_Obj *level, Tcl_Obj *name) {
+    Var *v = tbc_nv_get(interp, s, kind, nsname, level, name);
+    if (TBC_UNLIKELY(!v)) return 0;
+    slot->flags = VAR_LINK;
+    slot->value.linkPtr = v;
+    return 1;
+}
+
 /* an error ended an instruction: add "while executing ... (procedure ...)" lines to the error info exactly as the bytecode executor does
  * (TclLogCommandInfo), from the command's position in the body (srcOff, srcLen; srcOff < 0: none) and the instruction's operands */
 static void tbc_logerr(Tcl_Interp *interp, int pcoff, int srcOff, int srcLen, Tcl_Obj **tos) {

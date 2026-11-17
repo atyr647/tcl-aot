@@ -517,6 +517,8 @@ proc prepare {P} {
     array set pst {}
     set callees {}
     set pure 1
+    # pureL: pure but for the links to namespace variables (`variable`, `upvar #0`, `global`, with literal names) and the reads of qualified literal names; linkOps: those instructions
+    set pureL 1; set linkOps {}
     # "caller-safe": nothing this proc does can reach the variables of the frame that called it (no upvar/uplevel/eval beyond its own frame, only
     # built-ins that stay in their own frame, only callees that are themselves caller-safe).  A typed caller can call such a proc through the
     # interpreter and keep its variables in C locals.
@@ -544,20 +546,39 @@ proc prepare {P} {
         }
         if {$op in {evalStk exprStk tailcall invokeReplace invokeExpanded}} { set csafe 0 }
         if {$op in {evalStk exprStk invokeReplace invokeExpanded}} { set yres 0 }
-        if {$op in {yield yieldToInvoke}} { set csafe 0; set pure 0; set hasYield 1 }
+        if {$op in {yield yieldToInvoke}} { set csafe 0; set pure 0; set pureL 0; set hasYield 1 }
         if {$op eq "upvar"} {
             set lv [lindex $st end-1]
             if {$lv eq "-" || [lindex [dict get $bc literals] $lv] ni {0 #0}} { set csafe 0 }
         }
         # instructions that reach variables by name or link them to other frames make the proc impure
-        if {$op in {upvar nsupvar variable infoLevelNumber infoLevelArgs currentNamespace} || ([string match *Stk $op] && $op ne "returnStk") || [string match *StkImm $op]} { set pure 0 }
+        if {$op in {upvar nsupvar variable}} {
+            set pure 0
+            # (literal names, and "#0" or an absolute namespace: found once and kept, see tbc_nv_get)
+            set lits [dict get $bc literals]; set okL 0
+            switch $op {
+                variable { set nmI [lindex $st end]; if {$nmI ne "-"} { lappend linkOps [list $pc variable]; set okL 1 } }
+                upvar - nsupvar {
+                    set lvI [lindex $st end-1]; set nmI [lindex $st end]
+                    if {$lvI ne "-" && $nmI ne "-"} {
+                        set lvT [lindex $lits $lvI]
+                        if {($op eq "upvar" && $lvT eq "#0") || ($op eq "nsupvar" && [string match ::* $lvT])} { lappend linkOps [list $pc $op]; set okL 1 }
+                    }
+                }
+            }
+            if {!$okL} { set pureL 0 }
+        } elseif {$op in {loadStk loadArrayStk}} {
+            set pure 0
+            set nmI [lindex $st [expr {$op eq "loadStk" ? "end" : "end-1"}]]
+            if {$nmI eq "-" || ![string match ::* [lindex [dict get $bc literals] $nmI]] || [string match *(* [lindex [dict get $bc literals] $nmI]]} { set pureL 0 }
+        } elseif {$op in {infoLevelNumber infoLevelArgs currentNamespace} || ([string match *Stk $op] && $op ne "returnStk") || [string match *StkImm $op]} { set pure 0; set pureL 0 }
         # the string operations the executor does in place stand for commands of the `string` ensemble: the module's guard watches them (replacement, traces), like a call by name
         if {[dict exists $::tbcStrOps $op]} { lappend bins [dict get $::tbcStrOps $op] }
         if {$op in {invokeStk1 invokeStk4}} {
             set n [lindex $a 0]; set q [expr {[llength $st] - $n}]
             set c [lindex $st $q]
             if {$c eq "-"} {
-                set pure 0; set csafe 0; set yres 0
+                set pure 0; set pureL 0; set csafe 0; set yres 0
             } else {
                 set nm [lindex [dict get $bc literals] $c]
                 set cmdAt($pc) $nm
@@ -622,10 +643,10 @@ proc prepare {P} {
                     if {[string match tcl::string::* $b] || [string match tcl::list::* $b] || [isMathBuiltin $b]} {
                         # the string ensemble's own implementations and the math functions never use the caller's variables
                     } elseif {$b eq "dict"} {
-                        if {$sub ni {size keys values get exists create merge replace remove}} { set pure 0 }
+                        if {$sub ni {size keys values get exists create merge replace remove}} { set pure 0; set pureL 0 }
                     } elseif {$b ni $::tbcPureBuiltins && !([dict exists $::tbcPureArity $b] && [dict get $::tbcPureArity $b] == $n)} {
                         # (`scan $s $fmt` with no variable names returns what it scanned and sets nothing: pure, as `format` is)
-                        set pure 0
+                        set pure 0; set pureL 0
                     }
                 }
             }
@@ -758,6 +779,22 @@ proc prepare {P} {
     set fv [lmap v $fv {expr {$v in $rv ? [continue] : $v}}]
     set PI($P,fvars) [lsort -integer -unique $fv]
     if {[llength $fv]} { set pure 0 }
+    # A proc that only reads namespace variables (pureL, links made by name, every variable in the frame one of those links and only read) is called directly, with no frame:
+    # tbc_nv_link makes the links in a private array of locals (decision 57).  Its callers see it as pure.
+    set nrd [expr {$pureL && !$pure && !$hasYield}]
+    if {$nrd} {
+        set ltg {}
+        foreach lo $linkOps { lappend ltg [operand [lindex $ins([lindex $lo 0]) 1 0]] }
+        foreach v $fv { if {$v < $nargs || $v ni $ltg} { set nrd 0 } }
+        foreach pc $reach {
+            lassign $ins($pc) op a
+            if {$op in {variable upvar nsupvar loadScalar1 loadScalar4 loadArray1 loadArray4 loadStk loadArrayStk}} continue
+            foreach v [concat {*}[usedef $op $a]] { if {$v in $fv} { set nrd 0 } }
+        }
+        if {[info exists scanVar]} { set nrd 0 }
+    }
+    set PI($P,nrd) $nrd
+    if {$nrd} { set pure 1 }
     set PI($P,csafe) $csafe; set PI($P,ysafe) [expr {$yres && !$hasYield}]; set PI($P,yres) [expr {$yres && $hasYield}]; set PI($P,hasYield) $hasYield; set PI($P,bins) [lsort -unique $bins]
     foreach {cpc cnm} [array get cmdAt] { set PI($P,cmdAt,$cpc) $cnm }
     set PI($P,callees) [lsort -unique $callees]; set PI($P,pure) $pure; set PI($P,mustBoxNamed) [lsort -unique $mustBoxNamed]
@@ -2083,6 +2120,27 @@ proc stepT0 {key pc in} {
             lassign $k pre kx fake rel
             return [R fall [lreplace $in $top $top I] "\{ $pre int r_ = tbc_texist(loc_, $v, $kx); if (TBC_UNLIKELY(r_ < 0)) goto D$pc;$rel si$top = r_; \}"]
         }
+        loadStk {
+            # `$::ns::name`: a read of a literal absolute name; the variable is found once and kept (tbc_nv_get), and anything unusual hands over
+            set e [lindex $in $top]
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+            if {[kd $e] ne "L" || [lt $e] eq ""} { return $dead }
+            set nmt [lindex $PI($P,lits) [lt $e]]
+            if {![string match ::* $nmt] || [string match *(* $nmt]} { return $dead }
+            return [R fall [lreplace $in $top $top B] "\{ static TbcNvSite nvs_; Var *vp_ = tbc_nv_get(interp, &nvs_, TBC_NV_ABS, NULL, NULL, L_[cident $P]_[lt $e]); if (TBC_UNLIKELY(!vp_)) goto D$pc; TBC_FOLLOW(vp_); if (TBC_UNLIKELY(!TclIsVarDirectReadable(vp_))) goto D$pc; s$top = vp_->value.objPtr; Tcl_IncrRefCount(s$top); \}"]
+        }
+        loadArrayStk {
+            set pn [expr {$top - 1}]
+            set en [lindex $in $pn]; set e [lindex $in $top]
+            if {[kd $e] eq "U" || [kd $en] eq "U"} { return [R fall [lreplace $in $pn $top U] ""] }
+            if {[kd $en] ne "L" || [lt $en] eq ""} { return $dead }
+            set nmt [lindex $PI($P,lits) [lt $en]]
+            if {![string match ::* $nmt] || [string match *(* $nmt]} { return $dead }
+            set ak [akey $P $top $e]
+            if {$ak eq ""} { return $dead }
+            lassign $ak pre kx fake rel
+            return [R fall [list {*}[lrange $in 0 [expr {$pn-1}]] B] "\{ $pre static TbcNvSite nvs_; Var *vp_ = tbc_nv_get(interp, &nvs_, TBC_NV_ABS, NULL, NULL, L_[cident $P]_[lt $en]); Var tl_\[1\]; Tcl_Obj *o_; if (TBC_UNLIKELY(!vp_)) goto D$pc; tl_\[0\].flags = VAR_LINK; tl_\[0\].value.linkPtr = vp_; o_ = tbc_tald(tl_, 0, $kx); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_IncrRefCount(o_);$rel s$pn = o_; \}"]
+        }
         upvar - nsupvar - variable {
             set v [operand [lindex $a 0]]
             if {[kap $key $v] ne "F"} { return $dead }
@@ -2116,9 +2174,22 @@ proc stepT0 {key pc in} {
             set code "\{ $pre"
             if {$op eq "variable"} {
                 append code " if (TBC_UNLIKELY($call)) goto [fl $key $st];$rel \}"
-                return [R fall [lrange $in 0 end-1] $code]
+            } else {
+                append code " $lpre int r_ = $call;$lrel if (TBC_UNLIKELY(r_)) goto [fl $key $st];$rel \}"
             }
-            append code " $lpre int r_ = $call;$lrel if (TBC_UNLIKELY(r_)) goto [fl $key $st];$rel \}"
+            # called with no frame (a proc that only reads namespace variables, see tbc_nv_link): the link goes into the private locals, and anything unusual hands over
+            if {$PI($P,nrd) && [kd $en] eq "L"} {
+                set nsq [namespace qualifiers $P]; if {$nsq eq ""} { set nsq :: }
+                set nmx L_[cident $P]_[lt $en]
+                switch $op {
+                    variable { set nvc "tbc_nv_link(interp, &loc_\[$v\], &nvs_, TBC_NV_VARIABLE, [cstring $nsq], NULL, $nmx)" }
+                    upvar - nsupvar {
+                        if {[kd [lindex $in [expr {$d-2}]]] ne "L"} { return $dead }
+                        set nvc "tbc_nv_link(interp, &loc_\[$v\], &nvs_, [expr {$op eq "upvar" ? "TBC_NV_UPVAR" : "TBC_NV_NSUPVAR"}], NULL, L_[cident $P]_[lt [lindex $in [expr {$d-2}]]], $nmx)"
+                    }
+                }
+                set code "if (!inframe) \{ static TbcNvSite nvs_; if (TBC_UNLIKELY(!$nvc)) goto D$pc; \} else $code"
+            }
             return [R fall [lrange $in 0 end-1] $code]
         }
         default { return $dead }
@@ -4633,7 +4704,16 @@ proc emitVariant {key recursive {resume 0}} {
     } else {
         set fn "static [rettype $rk] V_${cid}_${sig}(Tcl_Interp *interp, int rem, int inframe[expr {[llength $plist] ? ", " : ""}][join $plist {, }])\n\{\n"
     }
+    if {$PI($P,nrd) && !$resume} {
+        # a proc that only reads namespace variables, called with no frame (inframe 0): private locals for the links (the variables the frame would have)
+        set fvl $PI($P,fvars)
+        set mx 0; foreach v $fvl { if {$v >= $mx} { set mx [expr {$v + 1}] } }
+        set loczero ""
+        foreach v $fvl { append loczero " floc_\[$v\].flags = 0; floc_\[$v\].value.objPtr = NULL;" }
+        append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var floc_\[[expr {max($mx,1)}]\];\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : floc_;\n    if (!inframe) \{$loczero\}\n    (void) rem; (void) loc_;\n"
+    } else {
     append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
+    }
     if {[hasEp $P]} { append fn [expr {$resume ? "    int ep_ = tbc_epb, nse_ = tbc_nseb;\n" : "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0;\n"}] }
     if {[needRv $P]} { append fn "    int rv_ = $resume, ck_ = 0; (void) rv_; (void) ck_;\n" }
     for {set v 0} {$v < $nv} {incr v} {
