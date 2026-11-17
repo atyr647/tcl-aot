@@ -1106,10 +1106,37 @@ TBC_INLINE int tbc_arg_int(Tcl_Obj *o, int64_t *w) {
     if ((t == NULL || t == tbcString) && o->bytes != NULL) return tbc_parse_canon(o->bytes, o->length, w);
     return 0;
 }
+/* A double that has a string form (a list element read from text, a value printed once) can be held unboxed when that text is the one Tcl prints for the value: boxing
+ * it again gives an object whose text, made when someone asks for it, is the same.  Whether a text is canonical depends only on the text, so the answer is cached by the
+ * text (a small table per thread, the whole text compared: no hash collision can give a wrong answer).  It also depends on tcl_precision, which makes Tcl print
+ * doubles differently: a write trace on that variable turns the acceptance off for good (tbc_cc_off), and a text is checked against what Tcl prints now. */
+typedef struct { uint64_t bits; unsigned char len, ok; char text[30]; } TbcCanonSlot;
+TBC_SHARED int tbc_cc_off;
+TBC_SHARED __thread TbcCanonSlot tbc_cc[512];
+static __attribute__((noinline)) int tbc_dbl_text_canon(Tcl_Obj *o, double d) {
+    const char *b = o->bytes;
+    int n = o->length, i;
+    uint64_t h = 0xcbf29ce484222325ULL, bits;
+    TbcCanonSlot *s;
+    if (tbc_cc_off || n < 1 || n > 29) return 0;
+    for (i = 0; i < n; i++) { h ^= (unsigned char) b[i]; h *= 0x100000001b3ULL; }
+    memcpy(&bits, &d, sizeof bits);
+    s = &tbc_cc[(h ^ (h >> 29)) & 511];
+    if (s->len == n && s->bits == bits && memcmp(s->text, b, (size_t) n) == 0) return s->ok;
+    {
+        char buf[TCL_DOUBLE_SPACE];
+        Tcl_PrintDouble(NULL, d, buf);
+        s->ok = ((int) strlen(buf) == n && memcmp(buf, b, (size_t) n) == 0);
+        s->len = (unsigned char) n; s->bits = bits; memcpy(s->text, b, (size_t) n);
+    }
+    return s->ok;
+}
 TBC_INLINE int tbc_arg_dbl(Tcl_Obj *o, double *d) {
-    if (o->typePtr == tbcDouble && o->bytes == NULL && o->internalRep.doubleValue == o->internalRep.doubleValue) {
-        *d = o->internalRep.doubleValue;
-        return 1;
+    if (o->typePtr == tbcDouble && o->internalRep.doubleValue == o->internalRep.doubleValue) {
+        if (o->bytes == NULL || TBC_LIKELY(tbc_dbl_text_canon(o, o->internalRep.doubleValue))) {
+            *d = o->internalRep.doubleValue;
+            return 1;
+        }
     }
     return 0;
 }

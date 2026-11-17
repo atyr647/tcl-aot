@@ -36,3 +36,5 @@ tm_loop I
 tm_loop_d DI ID
 tm_int_loop I
 tm_not_math I D
+cd_helper DD DI ID
+cd_store B

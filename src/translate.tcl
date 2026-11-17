@@ -2697,7 +2697,7 @@ proc resumable {P {key ""}} {
 
 # failure label (releasing the boxed slots of state `st`)
 proc fl {key st} {
-    global FM FRM PI
+    global FM FRM FMK FRMK PI
     lassign [keysplit $key] P sig
     set m [maskOf $st]
     if {[resumable $P $key] && [info exists ::stepPC]} {
@@ -2705,16 +2705,19 @@ proc fl {key st} {
         # whole call over in the boxed code: it goes on there at this instruction (the boxed code then repeats the failing step, which raises the
         # error with its error info)
         set pc $::stepPC
+        if {![info exists FRM($key,$pc,$m)]} { lappend FRMK($key) $pc,$m }
         set FRM($key,$pc,$m) $st
         return FR${pc}_$m
     }
+    if {![info exists FM($key,$m)]} { lappend FMK($key) $m }
     set FM($key,$m) 1
     return F$m
 }
 # the failure chain that starts the whole call over (used where nothing can have changed yet)
 proc flAll {key st} {
-    global FM
+    global FM FMK
     set m [maskOf $st]
+    if {![info exists FM($key,$m)]} { lappend FMK($key) $m }
     set FM($key,$m) 1
     return F$m
 }
@@ -3723,7 +3726,7 @@ proc liteWeight {op} {
 }
 
 proc analyze {key} {
-    global VK PI variants
+    global VK VKPCS PI variants
     lassign [keysplit $key] P sig
     set ::curWpol [wpolK $key]
     set nvar [llength $PI($P,vnames)]
@@ -3800,8 +3803,9 @@ proc analyze {key} {
         set VK($key,kap) $nk
         set VK($key,ekap) $nek
     }
-    foreach k [array names VK [globEsc $key],in,*] { unset VK($k) }
-    foreach k [array names IN] { set VK($key,in,$k) $IN($k) }
+    if {[info exists VKPCS($key)]} { foreach k $VKPCS($key) { unset VK($key,in,$k) } }
+    set VKPCS($key) [array names IN]
+    foreach k $VKPCS($key) { set VK($key,in,$k) $IN($k) }
     set rk $VK($key,ret)
     foreach r $rets { set rk [jk $rk [expr {$r eq "L" ? "B" : $r}]] }
     if {$rk eq "W"} { set rk B }
@@ -4685,7 +4689,7 @@ proc resumePrologue {key} {
 }
 
 proc emitVariant {key recursive {resume 0}} {
-    global VK PI FM FRM typedMode initName
+    global VK PI FM FRM FMK FRMK typedMode initName
     lassign [keysplit $key] P sig
     set ::curWpol [wpolK $key]
     set cid [cident $P]
@@ -4693,8 +4697,9 @@ proc emitVariant {key recursive {resume 0}} {
     set rk $VK($key,ret); if {$rk in {- U}} { set rk B }
     set nv [llength $PI($P,vnames)]; set maxd $PI($P,maxd)
     set maxd2 [expr {$maxd + 1}]
-    array unset FM [globEsc $key],*
-    array unset FRM [globEsc $key],*
+    # (the entries of this variant are found through FMK and FRMK, its own lists: a glob over the whole array for every variant takes time quadratic in the size of the module)
+    if {[info exists FMK($key)]} { foreach m $FMK($key) { unset FM($key,$m) }; unset FMK($key) }
+    if {[info exists FRMK($key)]} { foreach m $FRMK($key) { unset FRM($key,$m) }; unset FRMK($key) }
     # parameters
     set plist {}
     for {set v 0} {$v < $PI($P,nargs)} {incr v} { lappend plist "[ctype [string index $sig $v]] a$v" }
@@ -4824,14 +4829,14 @@ proc emitVariant {key recursive {resume 0}} {
     }
     append fn $stubs
     # resume stubs of a proc with variables in the frame (see `fl`)
-    foreach fk [lsort [array names FRM [globEsc $key],*]] {
+    foreach fk [lsort [lmap s [expr {[info exists FRMK($key)] ? $FRMK($key) : {}}] {string cat $key , $s}]] {
         lassign [split [string range $fk [string length "$key,"] end] ,] fpc fm
         append fn "FR${fpc}_$fm: ; TBC_HIT([cstring "R:$key:$fpc"]); [enterG $key $fpc $FRM($fk) "" [flushSet $P $fpc]]\n"
     }
 
     # ---- failure chains, exit
     set masks {}
-    foreach k [array names FM [globEsc $key],*] { lappend masks [string range $k [string length "$key,"] end] }
+    if {[info exists FMK($key)]} { set masks $FMK($key) }
     foreach m [lsort -unique $masks] {
         set bits [expr {"0x$m"}]
         append fn "F$m: ;"
@@ -4947,8 +4952,7 @@ while 1 {
 foreach key $variants { set edges($key) {} }
 foreach key $variants {
     lassign [keysplit $key] P sig
-    foreach pc [array names VK [globEsc $key],in,*] {
-        set pc [string range $pc [string length "$key,in,"] end]
+    foreach pc [expr {[info exists VKPCS($key)] ? $VKPCS($key) : {}}] {
         set r [stepT $key $pc $VK($key,in,$pc)]
         foreach c [dict get $r calls] { lappend edges($key) [lindex $c 0]/[lindex $c 1] }
     }

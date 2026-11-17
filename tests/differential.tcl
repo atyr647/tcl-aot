@@ -675,6 +675,17 @@ foreach m $lxm { foreach i $lxi { foreach j {0 1 end x} { lappend calls [list lx
     lappend calls [list lx_const $m] [list lx_end $m] }
 foreach n {0 1 3} { lappend calls [list lx_loop {{1 2 3} {4 5 6} {7 8 9}} $n] [list lx_dbl {{1.5 2 3} {4 5.5 6} {7 8 9.25}} $n] }
 lappend calls {lx_loop {{1 2} {3 4}} 3} {lx_dbl {{1 2} {3 4}} 3} {lx_loop {{1 2} {3 x}} 2}
+# decision 61: doubles with a string form: canonical text (held unboxed) and every other text (handed over), as arguments, stored list elements, kept elements, with tcl_precision changed
+# (the calls that write tcl_precision come last in the list: the module stops accepting texts of doubles for good at the first one)
+set cdprec {}
+set cdlists {{0.35 2.5} {2.50 1.5} {1e3 0.1} {0.1 0.2} {3.0 1.5} {0.30000000000000004 1.0e-5} {123456789.123 0.0001} {1.7976931348623157e+308 5e-324} {-0.0 0.0} {.5 5.} {+1.5 -1.5}
+    {0.5 0.50} {1.0 1} {1_0 2.5} {Inf 1.5} {inf 1.5} {0x10 1.5} {1.5 abc} {1.5} {} {2.5 0.1 0.25 7.0 3.14159265358979}}
+# (a script, not a proc call: the interpreter itself parses the elements, which gives doubles that keep their text; compiled code reads a number from an element without making it one)
+foreach l $cdlists {
+    set pre "set cdl [list $l]; foreach cdv \$cdl {catch {expr {\$cdv + 0.0}}}; "
+    lappend calls "${pre}cd_via \$cdl" "${pre}cd_store \$cdl" "${pre}cd_keep \$cdl"
+    lappend cdprec "${pre}cd_prec \$cdl 3" "${pre}cd_prec \$cdl 17" "${pre}cd_prec \$cdl 0"
+}
 # Phase A, blocker 1: procs that only read namespace variables (nv_*): the usual case, then each change of the variables that the interpreter notices (and compiled code must)
 lappend calls {nv_reset} {nv_all 2} {nv_all 1.5} {nv_all 3} {nv_all a} {nv_loop 5} {nv_loop2 3 3} {nv_loop2 3 b}
 lappend calls {nv_set K 4} {nv_all 2} {nv_loop 3} {nv_set K 4.5} {nv_all 2} {nv_set K abc} {nv_all 2} {nv_set K 0x10} {nv_all 2} {nv_set K 3.0} {nv_all 2}
@@ -692,6 +703,7 @@ foreach x {0 1 2 3 b a x abc {} 1e3 0x10 -1 9223372036854775807} { lappend calls
 lappend calls {nv_reset} {nv_all 2} {nv_loop 3}
 lappend calls {mm_redef}
 
+lappend calls {*}$cdprec
 # TBC_SMALL=1: leave out the calls that loop long (for runs under valgrind)
 if {[info exists ::env(TBC_SMALL)]} { set calls [lmap c $calls { if {[regexp {(^|[ \{])(1000|3000|6000|10000|30000|100000|1000000|900|1500)($|[ \}])} $c]} { continue }; set c }] }
 proc runall {} {

@@ -2288,3 +2288,33 @@ proc nv_rename {} { rename nv_k nv_k_saved }
 proc nv_rename_back {} { rename nv_k_saved nv_k }
 proc nv_redefine {} { proc nv_k {x} { return REDEFINED } }
 proc nv_redefine_back {} { proc nv_k {x} { variable ::nvns::K; return [expr {$x * $K + 0.5}] } }
+
+# Decision 61: a double that has a string form is held unboxed when its text is the one Tcl prints for it (a list element read from text, an argument printed once), and
+# is not when it is anything else (2.50, 1e3, .5, 0.10, 1_0): the text must come back as it was.  The elements are made doubles with their text first (expr shimmers them).
+proc cd_helper {x y} { return [list $x $y [expr {$x * $y + 1.0}] [expr {$x < $y}]] }
+proc cd_via {l} {
+    foreach v $l { catch {expr {$v + 0.0}} }
+    set c cd_helper
+    return [$c [lindex $l 0] [lindex $l 1]]
+}
+proc cd_store {l} {
+    foreach v $l { catch {expr {$v + 0.0}} }
+    set s 0.0; set d 0.0; set n [llength $l]
+    for {set i 0} {$i < $n} {incr i} { set d [lindex $l $i]; set s [expr {$s + $d * 2.0}] }
+    return [list $s $d]
+}
+proc cd_keep {l} {
+    foreach v $l { catch {expr {$v + 0.0}} }
+    set a 0.0; set best 1e30
+    foreach v $l { set d [expr {$v + 0.0}]; set e $v; if {$d < $best} { set best $d; set a $e } }
+    return [list $a $best]
+}
+proc cd_prec {l p} {
+    foreach v $l { catch {expr {$v + 0.0}} }
+    set x [lindex $l 0]; set y [lindex $l 1]
+    set r [list $x [expr {$x + $y}]]
+    set ::tcl_precision $p
+    lappend r $x [expr {$x + $y}] [cd_helper $x $y]
+    set ::tcl_precision 0
+    return $r
+}

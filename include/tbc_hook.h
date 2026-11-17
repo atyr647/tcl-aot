@@ -2661,6 +2661,13 @@ static void tbc_capture_env(void) {
     if (after && atoi(after) > 0) Tcl_CreateTimerHandler(atoi(after), tbc_capture_timer, NULL);
 }
 
+/* tcl_precision decides how Tcl prints a double: once the program writes it, the text of a double is no longer known to be canonical (tbc_dbl_text_canon) */
+static char *tbc_prec_trace(ClientData cd, Tcl_Interp *interp, const char *n1, const char *n2, int flags) {
+    (void) cd; (void) interp; (void) n1; (void) n2; (void) flags;
+    tbc_cc_off = 1;
+    return NULL;
+}
+
 static void tbc_install(Tcl_Interp *interp) {
     static int done;
     tbc_reg_init();
@@ -2679,6 +2686,7 @@ static void tbc_install(Tcl_Interp *interp) {
     tbc_mf_setup(interp);
     if (getenv("TBC_EAGER") && getenv("TBC_EAGER")[0] == '1') tbc_eager = 1;
     tbc_capture_env();
+    Tcl_TraceVar2(interp, "tcl_precision", NULL, TCL_GLOBAL_ONLY | TCL_TRACE_WRITES | TCL_TRACE_UNSETS, tbc_prec_trace, NULL);
     {
         Tcl_CmdInfo ci;
         if (Tcl_GetCommandInfo(interp, "::proc", &ci) && ci.isNativeObjectProc && ci.objProc == Tcl_ProcObjCmd) {
