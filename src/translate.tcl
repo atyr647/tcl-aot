@@ -1275,8 +1275,11 @@ proc jk {a b} {
 # on every run through that branch.  The slot becomes X (no value, no code: boxed as an empty object if a fall-back ever needs it).
 proc deadTop {P st s} {
     global PI
-    if {[llength $st] == 0 || [kd [lindex $st end]] ni {A M Z}} { return $st }
+    if {[llength $st] == 0 || [kd [lindex $st end]] ni {A M Z I D W L B}} { return $st }
     if {[lindex $PI($P,ins,$s) 0] ne "pop"} { return $st }
+    # (numbers, literals and objects too, not only the views of local vectors: the value that a statement leaves for the pop was boxed to join the other branch's, an
+    # allocation and a release for nothing.  A proc that yields keeps its states: the value a `yield` leaves is what a resume gives back to typed code)
+    if {[kd [lindex $st end]] ni {A M Z} && $PI($P,hasYield)} { return $st }
     return [lreplace $st end end X]
 }
 proc jstate {a b} { lmap x $a y $b { jd $x $y } }
@@ -1332,11 +1335,17 @@ proc boxc {P p e} {
 }
 # conversion on an edge from state `from` to state `to`
 proc edgec {P from to {s ""}} {
-    if {$s ne ""} { set from [deadTop $P $from $s] }
+    set pre ""
+    if {$s ne ""} {
+        set d [deadTop $P $from $s]
+        # (an object that the `pop` at the target is going to throw away is released here: no other path to the pop need hold one)
+        if {$d ne $from && [kd [lindex $from end]] eq "B"} { set pre "Tcl_DecrRefCount(s[expr {[llength $from] - 1}]); " }
+        set from $d
+    }
     set ::boxMode edge
     set c [edgec1 $P $from $to]
     set ::boxMode copy
-    return $c
+    return $pre$c
 }
 set boxMode copy
 set DCNAMES {}
@@ -1561,6 +1570,13 @@ proc stepT0 {key pc in} {
                 default {
                     if {$k eq "B"} {
                         set c "Tcl_IncrRefCount(s$top); if (l$v) Tcl_DecrRefCount(l$v); l$v = s$top;"
+                    } elseif {$k in {I D W} && [lt $e] eq ""} {
+                        # a number into a variable that holds an object: written into the object it holds when only the variable refers to it (tbc_st_dbl, tbc_st_int)
+                        switch $k {
+                            I { set c "tbc_st_int(&l$v, si$top);" }
+                            D { set c "tbc_st_dbl(&l$v, sd$top);" }
+                            W { set c "if (sw$top) tbc_st_dbl(&l$v, sd$top); else tbc_st_int(&l$v, si$top);" }
+                        }
                     } else {
                         set c "\{ Tcl_Obj *n_ = [boxe $P $top $e]; if (l$v) Tcl_DecrRefCount(l$v); l$v = n_; \}"
                     }

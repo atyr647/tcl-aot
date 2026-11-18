@@ -1049,6 +1049,21 @@ static Tcl_Obj *tbc_bscan(Tcl_Obj *data, int type, int uns) {
     return res;
 }
 TBC_INLINE Tcl_Obj *tbc_newdbl(double d) { Tcl_Obj *o = Tcl_NewDoubleObj(d); Tcl_IncrRefCount(o); return o; }
+/* A number stored in a local that holds an object (a variable that is a number on some paths and something else on others).  When the object is a number of the same
+ * kind that nothing else refers to (its only reference is the local's) and it has no string form, the new value is written into it: nothing can see the object, and an
+ * allocation and a release are saved.  Any other case is the allocation and release of a new object, as before. */
+TBC_INLINE void tbc_st_dbl(Tcl_Obj **lp, double d) {
+    Tcl_Obj *o = *lp;
+    if (o && o->refCount == 1 && o->typePtr == tbcDouble && !o->bytes) { o->internalRep.doubleValue = d; return; }
+    *lp = tbc_newdbl(d);
+    if (o) Tcl_DecrRefCount(o);
+}
+TBC_INLINE void tbc_st_int(Tcl_Obj **lp, int64_t w) {
+    Tcl_Obj *o = *lp;
+    if (o && o->refCount == 1 && o->typePtr == tbcInt && !o->bytes && sizeof(long) == 8) { o->internalRep.longValue = (long) w; return; }
+    *lp = tbc_newint(w);
+    if (o) Tcl_DecrRefCount(o);
+}
 
 static void tbc_depth_error(Tcl_Interp *interp) {
     Tcl_SetObjResult(interp, Tcl_NewStringObj("too many nested evaluations (infinite loop?)", -1));

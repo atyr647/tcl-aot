@@ -2455,3 +2455,13 @@ proc ld_mixed {rec flag} { set x 0; if {$flag} { lassign $rec a b } else { set x
 proc ld_nested {rec f g} { set a 0; set c 0; set e 0; if {$f} { if {$g} { lassign $rec a b } else { lassign $rec c d } } else { lassign $rec e f2 }; return [list $a $c $e] }
 proc ld_while {rec n} { set i 0; while {$i < $n} { incr i; if {$i % 2} { lassign $rec a b } else { lassign $rec b a } }; return [list $i $a $b] }
 proc ld_rest {rec flag} { if {$flag} { set r [lassign $rec a b] } else { set r [lassign $rec c d] }; return $r }
+# decision 69: the value of an `if` or `switch` statement is thrown away by the `pop` at the merge: numbers, literals and objects are not boxed to join each other (dt_*)
+proc dt_nums {a f} { set x 0; if {$f} { set x [expr {$a * 2.5}] } else { set x [expr {$a + 1}] }; return $x }
+proc dt_mix {a f} { set x {}; if {$f == 1} { set x [expr {$a * 2.5}] } elseif {$f == 2} { set x "t$a" } elseif {$f == 3} { set x [list $a $a] } else { set x $a }; return $x }
+proc dt_noelse {a f} { set x $a; if {$f} { set x [expr {$x * 3}] }; return $x }
+proc dt_lit {a f} { set x 0; if {$f} { set x 1.5 } else { set x 0x10 }; return [list $x $a] }
+proc dt_sw {a f} { set x 0; switch $f { 1 { set x [expr {$a + 0.5}] } 2 { set x abc } default { set x [lindex $a 0] } }; return $x }
+proc dt_loop {n} { set s 0.0; set l {}; for {set i 0} {$i < $n} {incr i} { if {$i % 3 == 0} { set v [expr {$i * 0.5}]; set s [expr {$s + $v}] } elseif {$i % 3 == 1} { set w [list $i $i] } else { set u "a$i" } }; return [list $s [llength $l]] }
+proc dt_nested {a f g} { set x 0; if {$f} { if {$g} { set x [expr {$a * 2.5}] } else { set x $a } } else { set x [expr {$a + 1}] }; return $x }
+proc dt_catch {a f} { set r [catch { if {$f} { set x [expr {$a * 2.5}] } else { set x [lindex $a 0] } } m]; return [list $r $m] }
+proc dt_leak {n} { set k 0; for {set i 0} {$i < $n} {incr i} { if {$i & 1} { set l [list $i $i] } else { set s "x$i" }; if {$i & 2} { set d [expr {$i * 0.5}] } else { set e [string repeat y 5] }; incr k }; return $k }
