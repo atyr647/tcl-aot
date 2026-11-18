@@ -1159,6 +1159,13 @@ TBC_INLINE int tbc_wload_canon(Tcl_Obj *o, int *tag, int64_t *iv, double *dv) {
 
 /* ---- lists ---- */
 
+/* the elements of a list object that is a list already (a foreach step: the list is private to the loop and cannot change), else Tcl's own function (which makes it one; the loop
+ * has checked that it can be) */
+TBC_INLINE void tbc_list_elems(Tcl_Interp *interp, Tcl_Obj *list, int *n, Tcl_Obj ***v) {
+    if (TBC_LIKELY(list->typePtr == tbcList)) { *n = ListRepPtr(list)->elemCount; *v = &ListRepPtr(list)->elements; }
+    else (void) TclListObjGetElements(interp, list, n, v);
+}
+
 /* lindex with an integer index; the result carries a reference.  NULL on error. */
 TBC_INLINE Tcl_Obj *tbc_lindex_i(Tcl_Interp *interp, Tcl_Obj *list, int64_t i) {
     int n;

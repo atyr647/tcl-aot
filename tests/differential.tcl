@@ -700,6 +700,17 @@ foreach d {"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11
 }
 foreach str {"12 34 abc" "12 x abc" "" "1.5,ff" "1.5,zz" "-3 +4 q" "0x10 5 w" " 7  8  z " "99999999999999999999 1 a"} { lappend calls [list bs_scan $str] }
 lappend calls {bs_texel x 0 1} [list bs_texel [binary format c* {1 2 3 4 5 6 7 8}] 0.2 2]
+# decision 65: `set ::ns::name value` (ss_*): values of every kind, a variable that is missing, only declared, traced, unset, an array, in a namespace that is deleted and made again, linked
+foreach v {5 2.5 abc {} {a b} 0x10 1e3 9223372036854775807} { lappend calls [list ss_set $v] [list ss_val $v] }
+foreach x {2 1.5 abc 0x10} { foreach n {0 1 3} { lappend calls [list ss_num $x $n] } }
+lappend calls {ss_missing} {ss_missing} {ss_declare} {ss_setD 1} {ss_setD 2.5} {ss_arr} {ss_link} {ss_set 7}
+lappend calls {ss_trace_on} {ss_set 1} {ss_num 2 3} {ss_val 4} {set sslog} {ss_trace_off} {ss_set 2} {ss_num 2 3} {set sslog}
+lappend calls {ss_unset} {ss_set 3} {ss_num 1 2} {ss_unset} {ss_val 4} {ss_set 5}
+lappend calls {ss_ns_delete} {ss_set 1} {ss_num 1 2} {ss_val 1} {ss_ns_make} {ss_set 8} {ss_num 3 2}
+# decision 65: `incr ::ns::name` (ss_incr*): integers, an incr past the limit, text, a double, an unset or missing variable, a trace
+lappend calls {ss_incr_reset} {ss_incr 0} {ss_incr 1} {ss_incr 5} {ss_incr_val 3} {ss_incr_val -7} {ss_incr_val 0x10} [list ss_incr_val 2.5] [list ss_incr_val abc]
+lappend calls {ss_incr_s} {ss_incr_big} {ss_incr_reset} {ss_incr_miss} {ss_incr_bad ::ssn::I} {ss_incr_bad ::ssn::S} {ss_incr_bad nonesuch}
+lappend calls {ss_incr_reset} {ss_trace_i_on} {ss_incr 2} {ss_incr_val 1} {set sslog} {ss_trace_i_off} {ss_incr 2} {ss_incr_reset} {ss_trace_on} {ss_incr 2} {ss_incr_val 1} {set sslog} {ss_trace_off} {ss_incr 2} {ss_incr_reset}
 # Phase A, blocker 1: procs that only read namespace variables (nv_*): the usual case, then each change of the variables that the interpreter notices (and compiled code must)
 lappend calls {nv_reset} {nv_all 2} {nv_all 1.5} {nv_all 3} {nv_all a} {nv_loop 5} {nv_loop2 3 3} {nv_loop2 3 b}
 lappend calls {nv_set K 4} {nv_all 2} {nv_loop 3} {nv_set K 4.5} {nv_all 2} {nv_set K abc} {nv_all 2} {nv_set K 0x10} {nv_all 2} {nv_set K 3.0} {nv_all 2}

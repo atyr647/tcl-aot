@@ -2133,6 +2133,34 @@ proc stepT0 {key pc in} {
             if {![string match ::* $nmt] || [string match *(* $nmt]} { return $dead }
             return [R fall [lreplace $in $top $top B] "\{ static TbcNvSite nvs_; Var *vp_ = tbc_nv_get(interp, &nvs_, TBC_NV_ABS, NULL, NULL, L_[cident $P]_[lt $e]); if (TBC_UNLIKELY(!vp_)) goto D$pc; TBC_FOLLOW(vp_); if (TBC_UNLIKELY(!TclIsVarDirectReadable(vp_))) goto D$pc; s$top = vp_->value.objPtr; Tcl_IncrRefCount(s$top); \}"]
         }
+        storeStk {
+            # `set ::ns::name value`: a store to a literal absolute name; the variable is found once and kept (tbc_nv_get).  Anything unusual hands over before the value is boxed:
+            # the variable missing or unset, a trace on it, a link, an array, a namespace that is gone
+            set pn [expr {$top - 1}]
+            set en [lindex $in $pn]; set e [lindex $in $top]
+            if {[kd $e] eq "U" || [kd $en] eq "U"} { return [R fall [lreplace $in $pn $top U] ""] }
+            if {[kd $en] ne "L" || [lt $en] eq "" || [kd $e] ni {B I D W L}} { return $dead }
+            set nmt [lindex $PI($P,lits) [lt $en]]
+            if {![string match ::* $nmt] || [string match *(* $nmt]} { return $dead }
+            return [R fall [list {*}[lrange $in 0 [expr {$pn-1}]] B] "\{ static TbcNvSite nvs_; Var *vp_ = tbc_nv_get(interp, &nvs_, TBC_NV_ABS, NULL, NULL, L_[cident $P]_[lt $en]); if (TBC_UNLIKELY(!vp_)) goto D$pc; TBC_FOLLOW(vp_); if (TBC_UNLIKELY(!TclIsVarDirectWritable(vp_) || !vp_->value.objPtr)) goto D$pc; [boxc $P $top $e] (void) tbc_storedirect(vp_, s$top); s$pn = s$top; \}"]
+        }
+        incrStkImm - incrStk {
+            # `incr ::ns::name ?n?`: the integer in a variable that exists, has no trace and holds an integer, found once and kept (tbc_nv_get); anything else hands over before anything has changed
+            if {$op eq "incrStkImm"} { set pn $top; set imm [lindex $a 0]; set e "" } else { set pn [expr {$top - 1}]; set e [lindex $in $top] }
+            set en [lindex $in $pn]
+            if {[kd $en] eq "U" || ($e ne "" && [kd $e] eq "U")} { return [R fall [lreplace $in $pn $top U] ""] }
+            if {[kd $en] ne "L" || [lt $en] eq ""} { return $dead }
+            set nmt [lindex $PI($P,lits) [lt $en]]
+            if {![string match ::* $nmt] || [string match *(* $nmt]} { return $dead }
+            set ge ""; set rel ""
+            if {$e eq ""} { set xe "INT64_C($imm)" } else {
+                if {[kd $e] ni {I B}} { return $dead }
+                lassign [operandOf $P $pc $top $e] ce ge xe
+                if {$ce ne "I"} { return $dead }
+                if {[kd $e] eq "B"} { set rel " Tcl_DecrRefCount(s$top);" }
+            }
+            return [R fall [list {*}[lrange $in 0 [expr {$pn-1}]] I] "\{ static TbcNvSite nvs_; Var *vp_ = tbc_nv_get(interp, &nvs_, TBC_NV_ABS, NULL, NULL, L_[cident $P]_[lt $en]); Var tl_\[1\]; int64_t w_; if (TBC_UNLIKELY(!vp_)) goto D$pc; $ge tl_\[0\].flags = VAR_LINK; tl_\[0\].value.linkPtr = vp_; if (TBC_UNLIKELY(!tbc_tincr(tl_, 0, $xe, &w_))) goto D$pc;$rel si$pn = w_; \}"]
+        }
         loadArrayStk {
             set pn [expr {$top - 1}]
             set en [lindex $in $pn]; set e [lindex $in $top]
@@ -2425,7 +2453,7 @@ proc stepForeachStep {key pc in d a} {
     set c "\{ if (fit_$stepPc < fmax_$stepPc) \{ long it_ = fit_$stepPc;"
     for {set i 0} {$i < $nl} {incr i} {
         set vars [lindex $vl $i]; set nv [llength $vars]
-        append c " \{ Tcl_Obj **el_; int ll_; (void) TclListObjGetElements(interp, s[expr {$d0 + $i}], &ll_, &el_);"
+        append c " \{ Tcl_Obj **el_; int ll_; tbc_list_elems(interp, s[expr {$d0 + $i}], &ll_, &el_);"
         set j 0
         foreach var $vars {
             if {[kap $key $var] eq "F"} {
@@ -4298,7 +4326,7 @@ proc genG {key pc d} {
             set d0 [expr {$d - $nl - 2}]
             set c "\{ Tcl_Obj *c_ = s[expr {$d-2}]; long it_ = PTR2INT(c_->internalRep.twoPtrValue.ptr1); if (it_ < PTR2INT(c_->internalRep.twoPtrValue.ptr2)) \{ c_->internalRep.twoPtrValue.ptr1 = INT2PTR(it_ + 1);"
             for {set i 0} {$i < $nl} {incr i} {
-                append c " \{ Tcl_Obj **el_; int ll_; TclListObjGetElements(interp, s[expr {$d0+$i}], &ll_, &el_);"
+                append c " \{ Tcl_Obj **el_; int ll_; tbc_list_elems(interp, s[expr {$d0+$i}], &ll_, &el_);"
                 set j 0
                 foreach var [lindex $vl $i] {
                     append c " \{ long ix_ = it_ * [llength [lindex $vl $i]] + $j; Tcl_Obj *v_ = ix_ >= ll_ ? NULL : el_\[ix_\], *r_; if (!v_) \{ v_ = Tcl_NewObj(); Tcl_IncrRefCount(v_); r_ = tbc_setloc(interp, loc_, $var, v_, TCL_LEAVE_ERR_MSG); Tcl_DecrRefCount(v_); \} else r_ = tbc_setloc(interp, loc_, $var, v_, TCL_LEAVE_ERR_MSG); if (!r_) goto @E@; \}"

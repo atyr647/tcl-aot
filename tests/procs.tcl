@@ -2389,3 +2389,32 @@ proc bs_reuse {data} {
     binary scan $data @9cu r
     return [list $r [fw_vars]]
 }
+
+# Phase A3, decision 65: a store to a variable by its literal absolute name (`set ::ns::name value`, instruction storeStk) is done in typed code for a variable that exists and has no trace
+namespace eval ::ssn { variable A 0; variable B {}; variable C 1.5 }
+set sslog {}
+proc ss_set {v} { set ::ssn::A $v; set ::ssn::B [list $v $v]; return [list $::ssn::A $::ssn::B] }
+proc ss_num {x n} { for {set i 0} {$i < $n} {incr i} { set ::ssn::A [expr {$x * $i + 0.5}]; set ::ssn::C [expr {$i * 2}] }; return [list $::ssn::A $::ssn::C] }
+proc ss_val {x} { set y [set ::ssn::A $x]; return [list $y $::ssn::A] }
+proc ss_missing {} { set ::ssn::NEW 5; set ::ssn::NEW 6; return $::ssn::NEW }
+proc ss_log {args} { lappend ::sslog $args }
+proc ss_trace_on {} { trace add variable ::ssn::A write ss_log }
+proc ss_trace_off {} { trace remove variable ::ssn::A write ss_log }
+proc ss_unset {} { unset ::ssn::A }
+proc ss_declare {} { namespace eval ::ssn { variable D } }
+proc ss_setD {v} { set ::ssn::D $v; return [info exists ::ssn::D] }
+proc ss_arr {} { array set ::ssn::AR {a 1}; catch {set ::ssn::AR 5} m; return $m }
+proc ss_ns_delete {} { namespace delete ::ssn }
+proc ss_ns_make {} { namespace eval ::ssn { variable A 0; variable B {}; variable C 1.5 } }
+proc ss_link {} { upvar #0 ::ssn::B lk; set ::ssn::B 9; return $lk }
+# the same for `incr ::ns::name ?n?` (incrStk, incrStkImm)
+namespace eval ::ssn { variable I 0; variable S abc; variable F 1.5; variable H 0x10 }
+proc ss_incr {n} { for {set i 0} {$i < $n} {incr i} { incr ::ssn::I; incr ::ssn::I 5; incr ::ssn::I $i; incr ::ssn::I -2 }; return $::ssn::I }
+proc ss_incr_val {k} { set a [incr ::ssn::I $k]; set b [incr ::ssn::I]; return [list $a $b $::ssn::I] }
+proc ss_incr_bad {name} { return [catch {incr $name} m]$m }
+proc ss_incr_s {} { return [list [catch {incr ::ssn::S} m1] $m1 [catch {incr ::ssn::F} m2] $m2 [catch {incr ::ssn::H} m3] $m3 $::ssn::H] }
+proc ss_incr_big {} { set ::ssn::I 9223372036854775800; return [list [catch {incr ::ssn::I 7} m] $m [catch {incr ::ssn::I 8} m2] $m2 [catch {incr ::ssn::I 1} m3] $m3] }
+proc ss_incr_miss {} { return [list [catch {incr ::ssn::NOPE} m] $m [catch {incr ::nonsuch::x} m2] $m2] }
+proc ss_incr_reset {} { set ::ssn::I 0 }
+proc ss_trace_i_on {} { trace add variable ::ssn::I write ss_log }
+proc ss_trace_i_off {} { trace remove variable ::ssn::I write ss_log }
