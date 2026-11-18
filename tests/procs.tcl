@@ -2493,3 +2493,35 @@ proc lf_unset {} { unset ::lfn::L }
 proc lf_setv {v} { set ::lfn::L $v }
 proc lf_arr {} { unset ::lfn::L; array set ::lfn::L {a 1} }
 set lflog {}
+# decision 72: a callee that returns a list of numbers and a caller that takes it apart, with the components unboxed (yt_*)
+proc yt_pair {x} { return [list $x [expr {$x * 2.5}]] }
+proc yt_tri {a b c} { return [list [expr {$a + $b}] [expr {$b * $c}] [expr {$a - $c}]] }
+proc yt_lit {f} { if {$f} { return {0.0 0.0} }; return [list [expr {$f * 1.5}] [expr {$f + 1.0}]] }
+proc yt_litint {f} { if {$f} { return {0 0} }; return [list [expr {$f * 3}] [expr {$f + 1}]] }
+proc yt_mixed {f} { if {$f} { return [list 1 2] }; return abc }
+proc yt_wide {i x} { return [list $i [expr {$i * 0.5}] $x [expr {$x + 1}] [expr {$i + $x}]] }
+proc yt_obj {l} { return [list [lindex $l 0] [lindex $l 1]] }
+proc yt_two {x} { if {$x > 0} { return [list [expr {$x * 2}] [expr {$x + 0.5}]] } else { return [list [expr {$x - 2.5}] 7] } }
+proc yt_rec {n} { if {$n <= 0} { return [list 0 1.5] }; lassign [yt_rec [expr {$n - 1}]] a b; return [list [expr {$a + $n}] [expr {$b * 2.0}]] }
+proc yt_use {x} { lassign [yt_pair $x] a b; return [expr {$a + $b}] }
+proc yt_use3 {a b c} { lassign [yt_tri $a $b $c] p q r; return [list $p $q $r] }
+proc yt_few {x} { lassign [yt_tri $x 2 3] p; return $p }
+proc yt_many {x} { lassign [yt_pair $x] a b c d; return [list $a $b [info exists c] [info exists d]] }
+proc yt_idx {x} { return [list [lindex [yt_pair $x] 1] [lindex [yt_pair $x] 0]] }
+proc yt_idx2 {x} { return [list [catch {lindex [yt_pair $x] 5} m] $m [lindex [yt_pair $x] end] [lindex [yt_pair $x] end-1] [lindex [yt_pair $x] -1]] }
+proc yt_len {x} { return [list [llength [yt_pair $x]] [string length [yt_pair $x]] [yt_pair $x]] }
+proc yt_pass {x} { return [yt_pair $x] }
+proc yt_pass2 {x} { return [yt_two $x] }
+proc yt_set {x} { set r [yt_pair $x]; lappend r z; return [list $r [lindex $r 0]] }
+proc yt_for {x} { set s 0.0; foreach v [yt_pair $x] { set s [expr {$s + $v}] }; return $s }
+proc yt_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { lassign [yt_pair $i] a b; lassign [yt_tri $i 2 3] p q r; set s [expr {$s + $a + $b + $p + $q + $r}] }; return $s }
+proc yt_branch {x f} { if {$f} { lassign [yt_pair $x] a b } else { lassign [yt_tri $x 1 2] a b c }; return [list $a $b] }
+proc yt_dupuse {x} { set l [list [yt_pair $x] [yt_pair $x]]; return $l }
+proc yt_rest {x} { set r [lassign [yt_pair $x] a]; return [list $a $r] }
+proc yt_cmp {x} { return [expr {[yt_pair $x] eq "1 2.5"}] }
+proc yt_lit_use {f} { lassign [yt_lit $f] a b; lassign [yt_litint $f] c d; return [list $a $b $c $d] }
+proc yt_w {i x} { lassign [yt_wide $i $x] a b c d e; return [list $a $b $c $d $e] }
+proc yt_obj_use {l} { lassign [yt_obj $l] a b; return [list $a $b] }
+proc yt_mixed_use {f} { lassign [yt_mixed $f] a b; return [list $a $b] }
+proc yt_ovf {a b} { return [list [expr {$a * $b}] [expr {$a + $b}]] }
+proc yt_ovf_use {a b} { lassign [yt_ovf $a $b] p q; return [list $p $q] }

@@ -1266,6 +1266,7 @@ proc jk {a b} {
     if {$a eq "F" || $b eq "F"} { return F }
     if {$a in {- U}} { return $b }
     if {$b in {- U}} { return $a }
+    if {[string match Y:* $a] && [string match Y:* $b]} { return [jy $a $b] }
     if {$::curWpol && $a in {I D W} && $b in {I D W}} { return W }
     if {$::curWpol && (($a eq "S" && $b in {I D W}) || ($b eq "S" && $a in {I D W}))} { return W }
     # S: a boxed value that is loaded from an array or a list into a variable that is used as a number (see specStore): an integer variable if it is stored integers
@@ -1290,6 +1291,50 @@ proc jstate {a b} { lmap x $a y $b { jd $x $y } }
 
 proc ctype {k} { switch $k { I {return int64_t} D {return double} default {return "Tcl_Obj *"} } }
 proc svar {k p} { switch $k { I {return si$p} D {return sd$p} default {return s$p} } }
+# Y:<kinds>: a fixed-shape list of numbers, held unboxed (decision 72).  The kinds are one letter a component, I (integer), D (double) or W (either, tagged).  Between a `list`
+# and the `return` that follows it, and across a direct call of a callee that returns one, the slot holds the components in the C structure ty<slot>_<kinds>
+# (type tbc_Y_<kinds>), and the callee returns that structure.  Boxed (a list object) only when something that does not understand it needs the value.
+proc ykinds {e} { string range $e 2 end }
+proc yvar {p K} { return ty${p}_$K }
+# the C expression of component k of the structure y (as a value): for kind W the three fields are read by the caller
+proc yfield {y k c} { return $y.c$k$c }
+# component kinds of a literal list that is a list of canonical numbers, else "" (the numbers' text is what boxing them again gives)
+proc litTuple {text} {
+    if {[catch {llength $text} n] || $n < 1 || $n > 12} { return "" }
+    set K ""
+    foreach x $text {
+        if {[regexp {^-?(0|[1-9][0-9]*)$} $x] && $x ne "-0" && [string is wideinteger -strict $x] && $x >= -9223372036854775808 && $x <= 9223372036854775807} { append K I; continue }
+        if {[string is double -strict $x] && ![regexp {[^0-9eE.+-]} $x]} {
+            set dv [expr {double($x)}]
+            if {[string equal $dv $x] && $dv == $dv && abs($dv) < 1.7e308} { append K D; continue }
+        }
+        return ""
+    }
+    if {[join $text " "] ne $text || [string length $K] < 2} { return "" }
+    return $K
+}
+proc jy {a b} {
+    if {$a eq $b} { return $a }
+    set A [ykinds $a]; set B [ykinds $b]
+    if {[string length $A] != [string length $B]} { return B }
+    set R ""
+    foreach x [split $A ""] y [split $B ""] { if {$x eq $y} { append R $x } else { append R W } }
+    return Y:$R
+}
+# C text of the structure type and the function that boxes it, for the kinds K
+proc ydefs {K} {
+    set n [string length $K]
+    set fl ""; set el ""; set ds ""
+    for {set k 0} {$k < $n} {incr k} {
+        switch [string index $K $k] {
+            I { append fl " int64_t c${k}i;"; append el "e\[$k\] = tbc_newint(y->c${k}i); " }
+            D { append fl " double c${k}d;"; append el "e\[$k\] = tbc_newdbl(y->c${k}d); " }
+            W { append fl " int c${k}w; int64_t c${k}i; double c${k}d;"; append el "e\[$k\] = y->c${k}w ? tbc_newdbl(y->c${k}d) : tbc_newint(y->c${k}i); " }
+        }
+        append ds " Tcl_DecrRefCount(e\[$k\]);"
+    }
+    return "typedef struct \{$fl \} tbc_Y_$K;\nstatic Tcl_Obj *tbc_ylist_${K}(const tbc_Y_${K} *y) \{ Tcl_Obj *e\[$n\], *r; ${el}r = Tcl_NewListObj($n, e); Tcl_IncrRefCount(r);$ds return r; \}\n"
+}
 
 # C expression giving an owned boxed object for slot p (described by e)
 proc boxe {P p e} {
@@ -1311,6 +1356,7 @@ proc boxe {P p e} {
             return "({ Tcl_Obj *c_ = Tcl_NewObj(); c_->internalRep.twoPtrValue.ptr1 = INT2PTR(fit_[lt $e]); c_->internalRep.twoPtrValue.ptr2 = INT2PTR(fmax_[lt $e]); Tcl_IncrRefCount(c_); c_; })"
         }
         K { if {[lt $e] eq "2"} { return "tbc_newpair(ka$p, kj$p)" }; return "tbc_newkey(kb$p, kl$p)" }
+        Y { return "tbc_ylist_[ykinds $e](&[yvar $p [ykinds $e]])" }
         W { return "(sw$p ? tbc_newdbl(sd$p) : tbc_newint(si$p))" }
         N { return "tbc_ivec_list(&sv$p, 1)" }
         X { return "({ Tcl_Obj *c_ = Tcl_NewObj(); Tcl_IncrRefCount(c_); c_; })" }
@@ -1440,7 +1486,10 @@ proc stepT0 {key pc in} {
     if {$op in {expandStart expandStkTop invokeExpanded expandDrop}} { return $dead }
     if {$op ni {pop listIndex listIndexImm listLength lsetList storeScalar1 storeScalar4 lappendScalar1 lappendScalar4 foreach_start foreach_step foreach_end invokeStk1 invokeStk4 verifyDict dictFirst dictExists dictIncrImm dictGet done}} {
         set np [lindex [effect $op $a] 0]
-        for {set k [expr {$d - $np}]} {$k < $d} {incr k} { if {[kd [lindex $in $k]] in {A N M Q}} { return $dead } }
+        for {set k [expr {$d - $np}]} {$k < $d} {incr k} {
+            set kk [kd [lindex $in $k]]
+            if {$kk in {A N M Q} || ($kk eq "Y" && $op ni {dup listRangeImm})} { return $dead }
+        }
     }
     switch -- $op {
         nop { return [R fall $in ""] }
@@ -1482,6 +1531,7 @@ proc stepT0 {key pc in} {
             switch [kd $e] {
                 I { set c "si$d = si$top;" } D { set c "sd$d = sd$top;" } B { set c "s$d = s$top; Tcl_IncrRefCount(s$d);" }
                 W { set c "sw$d = sw$top; si$d = si$top; sd$d = sd$top;" }
+                Y { set c "[yvar $d [ykinds $e]] = [yvar $top [ykinds $e]];" }
                 default { set c "" }
             }
             return [R fall [list {*}$in $e] $c]
@@ -1548,7 +1598,7 @@ proc stepT0 {key pc in} {
                 }
                 if {$kv ne "B"} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
             }
-            set sk [expr {$k eq "L" || $k in {A N M Q} ? "B" : $k}]
+            set sk [expr {$k eq "L" || $k in {A N M Q Y} ? "B" : $k}]
             if {$k eq "B" && [specStore $P $pc $v]} {
                 if {[kap $key $v] eq "W"} {
                     return [R fall $in "if (TBC_UNLIKELY(!tbc_wload_canon(s$top, &wt$v, &i$v, &d$v))) goto D$pc;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" stores [list [list $v S]]]
@@ -1654,6 +1704,38 @@ proc stepT0 {key pc in} {
             set e [lindex $in $top]
             set rel ""
             for {set k 0} {$k < $top} {incr k} { if {[kd [lindex $in $k]] eq "B"} { append rel " Tcl_DecrRefCount(s$k);" } }
+            if {[kd $e] eq "Y" || ([kd $e] eq "L" && [litTuple [lindex $PI($P,lits) [lt $e]]] ne "")} {
+                # a tuple of numbers (decision 72): returned in a structure when every return of the proc gives one, boxed when the others do not
+                set rk $VK($key,ret)
+                if {[kd $e] eq "Y"} {
+                    set K [ykinds $e]; set y [yvar $top $K]; set src $e
+                    for {set i 0} {$i < [string length $K]} {incr i} { set Sw($i) "$y.c${i}w"; set Si($i) "$y.c${i}i"; set Sd($i) "$y.c${i}d" }
+                } else {
+                    set K [litTuple [lindex $PI($P,lits) [lt $e]]]; set y ""; set src Y:$K; set i 0
+                    foreach x [lindex $PI($P,lits) [lt $e]] { 
+                        if {[string index $K $i] eq "I"} { set Sw($i) 0; set Si($i) [c_int $x]; set Sd($i) 0.0 } else { set Sw($i) 1; set Si($i) 0; set Sd($i) [c_dbl $x] }
+                        incr i
+                    }
+                }
+                if {[string match Y:* $rk] && [string length [ykinds $rk]] == [string length $K]} {
+                    set T [ykinds $rk]; set c ""
+                    for {set i 0} {$i < [string length $K]} {incr i} {
+                        switch [string index $T $i] {
+                            I { append c " rv.c${i}i = $Si($i);" }
+                            D { append c " rv.c${i}d = $Sd($i);" }
+                            W {
+                                switch [string index $K $i] {
+                                    I { append c " rv.c${i}w = 0; rv.c${i}i = $Si($i);" }
+                                    D { append c " rv.c${i}w = 1; rv.c${i}d = $Sd($i);" }
+                                    W { append c " rv.c${i}w = $Sw($i); rv.c${i}i = $Si($i); rv.c${i}d = $Sd($i);" }
+                                }
+                            }
+                        }
+                    }
+                    return [R term {} "$c$rel rc = TCL_OK; goto ret;" ret $src]
+                }
+                return [R term {} "rv = [boxe $P $top $e];$rel rc = TCL_OK; goto ret;" ret $src]
+            }
             if {[kd $e] in {A M N Q}} {
                 # returning a vector or map: it becomes a list or dict (a copy: the local is released on the way out)
                 return [R term {} "rv = [boxe $P $top $e];$rel rc = TCL_OK; goto ret;" ret B]
@@ -1794,6 +1876,21 @@ proc stepT0 {key pc in} {
             if {[string match -* $ix]} { return $dead }
             if {$ix eq "end"} { set idx "(int64_t) av_n_ - 1 - [expr {$kk eq "" ? 0 : $kk}]" } else { set idx $ix }
             if {[kd $el] eq "U"} { return [R fall [lreplace $in $pl $pl U] ""] }
+            if {[kd $el] eq "Y"} {
+                # an element of a tuple held unboxed (decision 72): a constant index inside it; any other index is the boxed code's
+                set K [ykinds $el]
+                if {![string is integer -strict $ix] || $ix >= [string length $K]} { return $dead }
+                set y [yvar $pl $K]; set c [string index $K $ix]
+                switch $c {
+                    I { return [R fall [lreplace $in $pl $pl I] "si$pl = $y.c${ix}i;"] }
+                    D { return [R fall [lreplace $in $pl $pl D] "sd$pl = $y.c${ix}d;"] }
+                    W {
+                        if {$::curWpol} { return [R fall [lreplace $in $pl $pl W] "sw$pl = $y.c${ix}w; si$pl = $y.c${ix}i; sd$pl = $y.c${ix}d;"] }
+                        return [R fall [lreplace $in $pl $pl B] "s$pl = ($y.c${ix}w ? tbc_newdbl($y.c${ix}d) : tbc_newint($y.c${ix}i));"]
+                    }
+                }
+                return $dead
+            }
             if {[kd $el] eq "A"} {
                 set av [lt $el]
                 set idx [string map [list av_n_ av$av.n] $idx]
@@ -1816,6 +1913,28 @@ proc stepT0 {key pc in} {
         list {
             set n [lindex $a 0]; set q [expr {$d - $n}]
             if {"U" in [lrange $in $q end]} { return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] U] ""] }
+            # `return [list a b c]` of numbers: the components stay unboxed up to the return (decision 72)
+            set nx $PI($P,next,$pc)
+            if {$n >= 2 && $n <= 12 && !$PI($P,hasYield) && [info exists PI($P,ins,$nx)] && [lindex $PI($P,ins,$nx) 0] eq "done"} {
+                set sh 0
+                foreach p $PI($P,reach) { if {$p != $pc && $nx in $PI($P,succ,$p)} { set sh 1; break } }
+                set K ""
+                for {set k $q} {$k < $d && !$sh} {incr k} {
+                    set c [kd [lindex $in $k]]
+                    if {$c in {I D} || ($c eq "W" && $::curWpol)} { append K $c } else { set sh 1 }
+                }
+                if {!$sh} {
+                    set y [yvar $q $K]; set c ""; set i 0
+                    for {set k $q} {$k < $d} {incr k; incr i} {
+                        switch [string index $K $i] {
+                            I { append c " $y.c${i}i = si$k;" }
+                            D { append c " $y.c${i}d = sd$k;" }
+                            W { append c " $y.c${i}w = sw$k; $y.c${i}i = si$k; $y.c${i}d = sd$k;" }
+                        }
+                    }
+                    return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] Y:$K] $c]
+                }
+            }
             set pre ""; set slots {}; set rel ""
             for {set k $q} {$k < $d} {incr k} { append pre [boxc $P $k [lindex $in $k]] " "; lappend slots s$k; append rel " Tcl_DecrRefCount(s$k);" }
             return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] B] "$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; Tcl_Obj *r_ = Tcl_NewListObj($n, ov_); Tcl_IncrRefCount(r_);$rel s$q = r_; \}"]
@@ -1967,6 +2086,11 @@ proc stepT0 {key pc in} {
             }
             # `lassign $rec a b c d` leaves the rest of the list for its own result and the next instruction throws it away: a list of 176 numbers was copied (172 of them) for
             # every call.  Only whether the value is a list is looked at (the answer of `lrange` is an error exactly when it is not one); the slot keeps the list, which the pop releases.
+            if {$op eq "listRangeImm" && [kd [lindex $in $top]] eq "Y"} {
+                # (the rest of a tuple that `lassign` throws away: nothing to do; any other use of it is the boxed code's)
+                if {[deadResult $P $pc]} { return [R fall $in ""] }
+                return $dead
+            }
             if {$op eq "listRangeImm" && [kd [lindex $in $top]] eq "B" && [deadResult $P $pc]} {
                 return [R fall $in "\{ int n_; if (TBC_UNLIKELY(Tcl_ListObjLength(NULL, s$top, &n_) != TCL_OK)) goto [fl $key $in]; \}"]
             }
@@ -3166,7 +3290,17 @@ proc stepInvoke {key pc in d n} {
             if {$rk in {- U}} { set outk U } else { set outk $rk }
             set rtype [ctype [expr {$outk eq "U" ? "B" : $outk}]]
             set rvar [svar [expr {$outk eq "U" ? "B" : $outk}] $q]
-            set c "if (TBC_UNLIKELY(!tbc_valid_$cid[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}])) \{ tbc_st = 3; goto C$pc; \} \{ $rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]); if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $rvar = r_; \}"
+            set asg "$rvar = r_;"
+            if {[string match Y:* $outk]} {
+                # a callee that returns a tuple: the slot keeps the components when everything that reads it understands them (dup, an element, the rest thrown away, a return), else the list is made here
+                set yK [ykinds $outk]
+                set users [slotUsers $P $pc $q]
+                set aware [llength $users]
+                foreach u $users { if {[lindex $u 0] ni {pop dup listIndexImm listRangeImm done}} { set aware 0; break } }
+                set rtype tbc_Y_$yK
+                if {$aware} { set rvar [yvar $q $yK]; set asg "$rvar = r_;" } else { set asg "s$q = tbc_ylist_${yK}(&r_);"; set outk B }
+            }
+            set c "if (TBC_UNLIKELY(!tbc_valid_$cid[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}])) \{ tbc_st = 3; goto C$pc; \} \{ $rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]); if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $asg \}"
             # post-call stub: error, or a boxed result because the callee fell back to its generic code
             set nextpc $PI($P,next,$pc)
             # a callee that had to leave typed mode reports it (tbc_st 3): the call is then made the ordinary way, with boxed arguments
@@ -4535,7 +4669,8 @@ proc emitResume {P} {
     set pts [expr {$re ne "" ? [resumePoints $re] : {}}]
     if {$re ne ""} {
         set rk $VK($re,ret); if {$rk in {- U}} { set rk B }
-        switch $rk {
+        switch -glob $rk {
+            Y:* { set fin "[rettype $rk] r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_Obj *o_ = tbc_ylist_[ykinds $rk](&r_); Tcl_SetObjResult(interp, o_); Tcl_DecrRefCount(o_); code = TCL_OK; \}" }
             I { set fin "int64_t r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); code = TCL_OK; \}" }
             D { set fin "double r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); code = TCL_OK; \}" }
             default { set fin "Tcl_Obj *r_ = V_${cid}_RE(interp, tbc_maxdepth - iPtr->numLevels + TBC_REMK, pc, stk, n + 1); if (tbc_st) code = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, r_); Tcl_DecrRefCount(r_); code = TCL_OK; \}" }
@@ -4581,7 +4716,8 @@ proc osrFin {P gk pc d} {
     set rk $VK($gk,ret); if {$rk in {- U}} { set rk B }
     set nulls [string repeat ", NULL" $PI($P,nargs)]
     set call "V_${cid}_[lindex [keysplit $gk] 1](interp, tbc_maxdepth - ((Interp *) interp)->numLevels + TBC_REMK, 1$nulls)"
-    switch $rk {
+    switch -glob $rk {
+        Y:* { return "[rettype $rk] r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_Obj *o_ = tbc_ylist_[ykinds $rk](&r_); Tcl_SetObjResult(interp, o_); Tcl_DecrRefCount(o_); rcg_ = TCL_OK; \}" }
         I { return "int64_t r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); rcg_ = TCL_OK; \}" }
         D { return "double r_ = $call; if (tbc_st) rcg_ = tbc_finish(interp); else \{ Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); rcg_ = TCL_OK; \}" }
     }
@@ -4695,7 +4831,7 @@ proc emitG {P} {
 }
 
 # ================================================================== emitting one variant
-proc rettype {rk} { ctype [expr {$rk in {- U} ? "B" : $rk}] }
+proc rettype {rk} { if {[string match Y:* $rk]} { return tbc_Y_[ykinds $rk] }; ctype [expr {$rk in {- U} ? "B" : $rk}] }
 
 # the instructions after the yields of P at which the generic variant `key` has a typed state
 proc resumePoints {key} {
@@ -4842,9 +4978,9 @@ proc emitVariant {key recursive {resume 0}} {
         set mx 0; foreach v $fvl { if {$v >= $mx} { set mx [expr {$v + 1}] } }
         set loczero ""
         foreach v $fvl { append loczero " floc_\[$v\].flags = 0; floc_\[$v\].value.objPtr = NULL;" }
-        append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var floc_\[[expr {max($mx,1)}]\];\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : floc_;\n    if (!inframe) \{$loczero\}\n    (void) rem; (void) loc_;\n"
+        append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = [expr {[string match Y:* $rk] ? "{0}" : "0"}];\n    Var floc_\[[expr {max($mx,1)}]\];\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : floc_;\n    if (!inframe) \{$loczero\}\n    (void) rem; (void) loc_;\n"
     } else {
-    append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = 0;\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
+    append fn "    int rc = TCL_ERROR;\n    [rettype $rk] rv = [expr {[string match Y:* $rk] ? "{0}" : "0"}];\n    Var *loc_ = inframe ? ((Interp *) interp)->varFramePtr->compiledLocals : NULL;\n    (void) rem; (void) loc_;\n"
     }
     if {[hasEp $P]} { append fn [expr {$resume ? "    int ep_ = tbc_epb, nse_ = tbc_nseb;\n" : "    int ep_ = TBC_EPNOW(interp), nse_ = inframe ? TBC_NSNOW(interp) : 0;\n"}] }
     if {[needRv $P]} { append fn "    int rv_ = $resume, ck_ = 0; (void) rv_; (void) ck_;\n" }
@@ -4991,6 +5127,7 @@ proc emitVariant {key recursive {resume 0}} {
         if {[string first "ka$k" $fn] >= 0} { append decls "    int64_t ka$k = 0, kj$k = 0; (void) ka$k; (void) kj$k;\n" }
     }
     foreach m [lsort -unique [regexp -all -inline {\msvd_\d+\M} $fn]] { append decls "    int $m = 0;\n" }
+    foreach m [lsort -unique [regexp -all -inline {\mty\d+_[IDW]+\M} $fn]] { regexp {ty\d+_([IDW]+)} $m -> yk; append decls "    tbc_Y_$yk $m;\n" }
     set fn [string map [list @@VECDECLS@@ $decls] $fn]
     # a variant that was entered from the boxed code, and every hand-over from it, must not make the boxed code enter typed code again (see osrAttempt)
     # (not when the hand-over is at an instruction that is in no loop: control then only goes forward from it, and the boxed code may enter typed code at a later loop head - a proc
@@ -5111,7 +5248,7 @@ if {$typedMode} {
     }
 }
 if {[info commands ::tbc::fingerprint] eq ""} { error "translate.tcl must run under tcl-aot-sh, a tclsh with tbc::fingerprint linked in (tools/translator-shell.c)" }
-set out "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: [llength $translatable] procs, [llength $variants] typed variants.\n * Do not edit. */\n#include \"tbc_hook.h\"\n\n/*@@DC@@*/\n"
+set out "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: [llength $translatable] procs, [llength $variants] typed variants.\n * Do not edit. */\n#include \"tbc_hook.h\"\n\n/*@@Y@@*/\n/*@@DC@@*/\n"
 foreach P $translatable {
     set cid [cident $P]
     append out "static int tbc_valid_$cid = 0;\n"
@@ -5154,6 +5291,7 @@ set outAfterG [string length $out]
 
 proc entryCall {cid s cargs rk ind} {
     set call "V_${cid}_${s}(interp, tbc_maxdepth - ((Interp *) interp)->numLevels + TBC_REMK, 1[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }])"
+    if {[string match Y:* $rk]} { return "${ind}\{ [rettype $rk] r_ = $call; if (tbc_st) return tbc_finish(interp); \{ Tcl_Obj *o_ = tbc_ylist_[ykinds $rk](&r_); Tcl_SetObjResult(interp, o_); Tcl_DecrRefCount(o_); \} return TCL_OK; \}\n" }
     switch $rk {
         I { return "${ind}\{ int64_t r_ = $call; if (tbc_st) return tbc_finish(interp); Tcl_SetObjResult(interp, Tcl_NewWideIntObj(r_)); return TCL_OK; \}\n" }
         D { return "${ind}\{ double r_ = $call; if (tbc_st) return tbc_finish(interp); Tcl_SetObjResult(interp, Tcl_NewDoubleObj(r_)); return TCL_OK; \}\n" }
@@ -5268,13 +5406,17 @@ if {[llength $refusedProcs]} { append out "    tbc_register_refused(tbc_refused_
 append out "#ifdef TBC_COV\n    Tcl_CreateObjCommand(interp, \"::tbc_coverage\", tbc_cov_cmd, NULL, NULL);\n    Tcl_CreateObjCommand(interp, \"::tbc::hot\", tbc_hot_cmd, NULL, NULL);\n#endif\n"
 append out "    return TCL_OK;\n\}\n"
 
+# the structure types and boxing functions of the tuples of numbers (decision 72)
+set ytext ""
+foreach {yall yk} [regexp -all -inline {tbc_Y_([IDW]+)} $out] { dict set ytypes $yk 1 }
+if {[info exists ytypes]} { foreach yk [lsort [dict keys $ytypes]] { append ytext [ydefs $yk] } }
 set dcDecl ""; set dcExtern ""; set dcDef ""
 dict for {nm id} $DCNAMES { append dcDecl "static Command *tbc_$id;\n"; append dcExtern "extern Command *tbc_$id;\n"; append dcDef "Command *tbc_$id;\n" }
 if {$splitN > 0} {
     # the same code in several files: what is shared between them has external linkage and is declared in a header; the typed code and the boxed code are
     # in files of their own (so that they can be compiled at different optimisation levels, and in parallel)
     set base [file rootname $outFile]; set tail [file tail $base]
-    set hdr "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: the shared declarations of the split module $initName. Do not edit. */\n#ifndef TBC_[string toupper [cident $initName]]_H\n#define TBC_[string toupper [cident $initName]]_H\n#include \"tbc_hook.h\"\n\n"
+    set hdr "/* Generated by tcl-aot (translate.tcl) from [file tail $srcFile]: the shared declarations of the split module $initName. Do not edit. */\n#ifndef TBC_[string toupper [cident $initName]]_H\n#define TBC_[string toupper [cident $initName]]_H\n#include \"tbc_hook.h\"\n\n/*@@Y@@*/\n"
     foreach P $translatable {
         set cid [cident $P]
         append hdr "extern int tbc_valid_$cid;\n"
@@ -5287,6 +5429,7 @@ if {$splitN > 0} {
     foreach P $translatable { append hdr [gproto $P] }
     dict for {P gk} $REKEY { append hdr "[rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
     append hdr "\n#endif\n"
+    set hdr [string map [list "/*@@Y@@*/" $ytext] $hdr]
     set f [open $base.h w]; puts -nonewline $f $hdr; close $f
     # the files of the typed code and of the boxed code: contiguous runs of procs of about equal size
     proc splitGroups {texts n} {
@@ -5312,6 +5455,7 @@ if {$splitN > 0} {
             }
             # the definitions have external linkage here (they are declared in the header); the static helper tables inside functions keep theirs
             set txt [string map {"\nstatic int V_" "\nint V_" "\nstatic int64_t V_" "\nint64_t V_" "\nstatic double V_" "\ndouble V_" "\nstatic Tcl_Obj * V_" "\nTcl_Obj * V_" "\nstatic int G_" "\nint G_"} $txt]
+            set txt [regsub -all {\nstatic (tbc_Y_[IDW]+) V_} $txt "\n\\1 V_"]
             set fname ${base}_${kind}${i}.c
             set f [open $fname w]; puts -nonewline $f $txt; close $f
             lappend files $fname
@@ -5328,7 +5472,7 @@ if {$splitN > 0} {
     set f [open $outFile w]; puts -nonewline $f $init; close $f
     puts "tcl-aot: split into [llength $files] code files + $base.h + $outFile"
 } else {
-    set out [string map [list "/*@@DC@@*/" $dcDecl] $out]
+    set out [string map [list "/*@@DC@@*/" $dcDecl "/*@@Y@@*/" $ytext] $out]
     set f [open $outFile w]; puts -nonewline $f $out; close $f
 }
 puts "tcl-aot: [llength $translatable] of [llength $procNames] procs compiled, [llength $variants] variants"

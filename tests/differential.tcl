@@ -706,6 +706,17 @@ lappend calls {lf_reset} {lf_unset} {lf_var 1 2} {lf_unset} {lf_val 3} {lf_reset
 lappend calls {lf_reset} {lf_arr} {lf_var 1 2} {lf_reset} {lf_arr} {lf_app 1 2} {lf_reset}
 lappend calls {lf_trace_w} {lf_var 1 3} {lf_val 7} {set lflog} {lf_reset} {lf_trace_r} {lf_var 1 3} {lf_val 7} {lf_num 2} {set lflog} {lf_reset}
 lappend calls [list lf_call 1 0] [list lf_upv nosuch 1 2] [list lf_upa nosuch 1 2]
+# decision 72: tuples of numbers returned and taken apart unboxed (yt_*): integers, doubles, text, hex, limits, literals, a callee that also returns text, errors, overflow
+set ytv {0 1 -1 3 2.5 -2.5 0x10 1e3 abc {} 9223372036854775807 -9223372036854775808 4611686018427387904 Inf}
+foreach x $ytv {
+    foreach p {yt_pair yt_two yt_use yt_few yt_many yt_idx yt_idx2 yt_len yt_pass yt_pass2 yt_set yt_for yt_dupuse yt_rest yt_cmp yt_lit yt_litint yt_lit_use yt_mixed yt_mixed_use} { lappend calls [list $p $x] }
+    foreach f {0 1} { lappend calls [list yt_branch $x $f] }
+    foreach y {2 0.5 abc} { lappend calls [list yt_wide $x $y] [list yt_w $x $y] }
+    foreach y {2 -3 0.5 9223372036854775807} { lappend calls [list yt_tri $x $y 3] [list yt_use3 $x $y 3] [list yt_ovf $x $y] [list yt_ovf_use $x $y] }
+}
+foreach n {0 1 2 5 12} { lappend calls [list yt_loop $n] }
+foreach n {0 1 2 5 30 -3 2.5 abc} { lappend calls [list yt_rec $n] }
+foreach l {{1 2} {1.5 2.5} {a b} {1} {} {0x10 0.5} {{1 2} 3}} { lappend calls [list yt_obj $l] [list yt_obj_use $l] }
 # lindex with several indices (lx_*)
 set lxm [list {{a b c} {d e f} {g h i}} {{1 2} {3 4}} {} "a \{b" {{1 {2 3}} {4 5}} {a b c} 5 {{x y} {} {z}} "\{a b\} \{c"]
 set lxi {0 1 2 -1 5 end end-1 1+1 0x1 a " 1" 1.5 {} {1 2} 9223372036854775807}
@@ -810,7 +821,7 @@ puts "attached: [llength [tbc::attached]] of [llength [info commands t_*]]"
 set B [runall]
 puts "attached after the calls: [llength [tbc::attached]]"
 # procs that must run compiled (a refused proc would run interpreted and match trivially): the constructs that were once refused
-set mustAttach {::nv_k ::nv_up ::nv_glob ::nv_abs ::nv_arr ::nv_absarr ::nv_str ::nv_two ::nv_del ::nv_lit ::nv_all ::nv_loop ::nv_loop2 ::nvns::get ::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop ::ld_if ::ld_noelse ::ld_last ::ld_last1 ::ld_used ::ld_switch ::ld_loop ::ld_break ::ld_continue ::ld_catch ::ld_shared ::ld_mixed ::ld_nested ::ld_while ::ld_rest ::dt_nums ::dt_mix ::dt_noelse ::dt_lit ::dt_sw ::dt_loop ::dt_nested ::dt_catch ::dt_leak ::wl_mul ::wl_expr ::wl_lidx ::wl_cmp ::wl_ns ::wl_dbl ::wl_neg ::lf_var ::lf_app ::lf_glob ::lf_upv ::lf_upa ::lf_call ::lf_val ::lf_shared ::lf_num
+set mustAttach {::nv_k ::nv_up ::nv_glob ::nv_abs ::nv_arr ::nv_absarr ::nv_str ::nv_two ::nv_del ::nv_lit ::nv_all ::nv_loop ::nv_loop2 ::nvns::get ::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop ::ld_if ::ld_noelse ::ld_last ::ld_last1 ::ld_used ::ld_switch ::ld_loop ::ld_break ::ld_continue ::ld_catch ::ld_shared ::ld_mixed ::ld_nested ::ld_while ::ld_rest ::dt_nums ::dt_mix ::dt_noelse ::dt_lit ::dt_sw ::dt_loop ::dt_nested ::dt_catch ::dt_leak ::wl_mul ::wl_expr ::wl_lidx ::wl_cmp ::wl_ns ::wl_dbl ::wl_neg ::lf_var ::lf_app ::lf_glob ::lf_upv ::lf_upa ::lf_call ::lf_val ::lf_shared ::lf_num ::yt_pair ::yt_two ::yt_rec ::yt_use ::yt_use3 ::yt_few ::yt_many ::yt_idx ::yt_idx2 ::yt_len ::yt_pass ::yt_pass2 ::yt_set ::yt_for ::yt_loop ::yt_branch ::yt_dupuse ::yt_rest ::yt_cmp ::yt_lit ::yt_litint ::yt_mixed ::yt_wide ::yt_obj ::yt_lit_use ::yt_w ::yt_obj_use ::yt_mixed_use ::yt_ovf ::yt_ovf_use
     ::tl_dictfor_break ::tl_dictfor_ret ::tl_dictfor_err ::tl_dictfor_catch {::tw_odd?} {::tw_star*} {::tw_br[a]} {::tw with space} {::tw"quote} {::tw\back} {::tw;semi} ::tw_caller ::tb_try1 ::tb_try2 ::tb_try3 ::tb_catch1 ::tb_try4 ::tb_try5}
 foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } }
 if {[info exists ::notCompiled]} { puts "$::notCompiled procs that must run compiled do not" ; exit 1 }

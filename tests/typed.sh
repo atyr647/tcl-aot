@@ -216,6 +216,19 @@ if ! grep -q "Tcl_ListObjLength(NULL" "$tmp/a_v1.c"; then echo "typed: FAILED, t
 if [ "$(grep -c '::lrange' "$tmp/a_v1.c")" != 1 ]; then echo "typed: FAILED, lassign calls lrange where its result is thrown away (or does not where it is used)"; exit 1; fi
 echo "typed: lassign does not copy the rest of the list that it throws away (also at the merge of an if/else), and does when the value is used: ok"
 
+# a callee that returns `[list a b]` of numbers and a caller that takes it apart with lassign or lindex keep the components unboxed: the typed code makes no list (the function that
+# boxes a tuple is in the header, for the places that need the value as an object)
+cat > "$tmp/y.tcl" <<'TCL'
+proc ty_pair {x} { return [list $x [expr {$x * 2.5}] [expr {$x + 1}]] }
+proc ty_use {x} { lassign [ty_pair $x] a b c; return [expr {$a + $b + $c}] }
+proc ty_idx {x} { return [expr {[lindex [ty_pair $x] 1] * 2}] }
+TCL
+"$TCLSH" src/translate.tcl "$tmp/y.tcl" "$tmp/y.c" Tupletest -split 1 >"$tmp/y.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/y.log"; exit 1; }
+# (the only list left is the one of the variant that takes an object: its components are objects)
+if [ "$(grep -c "Tcl_NewListObj" "$tmp/y_v1.c")" -gt 1 ]; then echo "typed: FAILED, the typed code of a tuple of numbers makes a list"; exit 1; fi
+if ! grep -q "tbc_Y_" "$tmp/y_v1.c"; then echo "typed: FAILED, no tuple type in the typed code"; exit 1; fi
+echo "typed: a list of numbers returned by a callee and taken apart by the caller is not made (decision 72): ok"
+
 # `lindex $m $i $j` and `lindex $m {1 2}` take the elements one at a time in typed code: they were calls of the command lindex with boxed operands (10 times slower than
 # `lindex [lindex $m $i] $j`, which has its own instruction)
 cat > "$tmp/x.tcl" <<'TCL'
