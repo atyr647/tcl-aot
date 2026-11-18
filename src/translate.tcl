@@ -2133,6 +2133,50 @@ proc stepT0 {key pc in} {
             if {![string match ::* $nmt] || [string match *(* $nmt]} { return $dead }
             return [R fall [lreplace $in $top $top B] "\{ static TbcNvSite nvs_; Var *vp_ = tbc_nv_get(interp, &nvs_, TBC_NV_ABS, NULL, NULL, L_[cident $P]_[lt $e]); if (TBC_UNLIKELY(!vp_)) goto D$pc; TBC_FOLLOW(vp_); if (TBC_UNLIKELY(!TclIsVarDirectReadable(vp_))) goto D$pc; s$top = vp_->value.objPtr; Tcl_IncrRefCount(s$top); \}"]
         }
+        storeArrayStk - incrArrayStk - incrArrayStkImm - existArrayStk {
+            # `set ::ns::arr(key) v`, `incr ::ns::arr(key) ?n?`, `info exists ::ns::arr(key)`: the array is found once and kept (tbc_nv_get), made the target of a private link, and the element
+            # code of the arrays that live in a frame does the rest; the array must exist and be an array, anything unusual hands over before anything has changed
+            switch $op {
+                storeArrayStk { set pn [expr {$d-3}]; set pk [expr {$d-2}]; set pv [expr {$d-1}]; set ev [lindex $in $pv] }
+                incrArrayStk { set pn [expr {$d-3}]; set pk [expr {$d-2}]; set pv [expr {$d-1}]; set ev [lindex $in $pv] }
+                incrArrayStkImm { set pn [expr {$d-2}]; set pk [expr {$d-1}]; set pv ""; set ev "" }
+                existArrayStk { set pn [expr {$d-2}]; set pk [expr {$d-1}]; set pv ""; set ev "" }
+            }
+            set en [lindex $in $pn]; set ek [lindex $in $pk]
+            set base [lrange $in 0 [expr {$pn-1}]]
+            if {"U" in [list [kd $en] [kd $ek] [expr {$ev eq "" ? "I" : [kd $ev]}]]} { return [R fall [list {*}$base U] ""] }
+            if {[kd $en] ne "L" || [lt $en] eq ""} { return $dead }
+            set nmt [lindex $PI($P,lits) [lt $en]]
+            if {![string match ::* $nmt] || [string match *(* $nmt]} { return $dead }
+            set k [akey $P $pk $ek]
+            if {$k eq ""} { return $dead }
+            lassign $k pre kx fake rel
+            set head "$pre static TbcNvSite nvs_; Var *vp_ = tbc_nv_get(interp, &nvs_, TBC_NV_ABS, NULL, NULL, L_[cident $P]_[lt $en]); Var tl_\[1\]; if (TBC_UNLIKELY(!vp_)) goto D$pc; TBC_FOLLOW(vp_); if (TBC_UNLIKELY(!TclIsVarArray(vp_))) goto D$pc; tl_\[0\].flags = VAR_LINK; tl_\[0\].value.linkPtr = vp_;"
+            switch $op {
+                storeArrayStk {
+                    set ok [fvalue $P $pv $ev "tbc_tast(interp, tl_, 0, $kx, $fake, @V@)" "tbc_tasti(interp, tl_, 0, $kx, $fake, @I@)"]
+                    if {$ok eq ""} { return $dead }
+                    lassign $ok vpre call vrel
+                    switch [kd $ev] {
+                        I { set mv "si$pn = si$pv;" } D { set mv "sd$pn = sd$pv;" } B { set mv "s$pn = s$pv;" } default { set mv "" }
+                    }
+                    return [R fall [list {*}$base $ev] "\{ $head $vpre if (TBC_UNLIKELY(!($call))) \{$vrel goto D$pc; \}$vrel$rel $mv \}"]
+                }
+                incrArrayStk {
+                    if {[kd $ev] ni {I B}} { return $dead }
+                    lassign [operandOf $P $pc $pv $ev] ci gi xi
+                    if {$ci ne "I"} { return $dead }
+                    set irel ""; if {[kd $ev] eq "B"} { set irel " Tcl_DecrRefCount(s$pv);" }
+                    return [R fall [list {*}$base I] "\{ $head int64_t w_; $gi if (TBC_UNLIKELY(!tbc_tainc(interp, tl_, 0, $kx, $fake, $xi, &w_))) goto D$pc;$irel$rel si$pn = w_; \}"]
+                }
+                incrArrayStkImm {
+                    return [R fall [list {*}$base I] "\{ $head int64_t w_; if (TBC_UNLIKELY(!tbc_tainc(interp, tl_, 0, $kx, $fake, INT64_C([lindex $a 0]), &w_))) goto D$pc;$rel si$pn = w_; \}"]
+                }
+                existArrayStk {
+                    return [R fall [list {*}$base I] "\{ $head int r_ = tbc_texist(tl_, 0, $kx); if (TBC_UNLIKELY(r_ < 0)) goto D$pc;$rel si$pn = r_; \}"]
+                }
+            }
+        }
         storeStk {
             # `set ::ns::name value`: a store to a literal absolute name; the variable is found once and kept (tbc_nv_get).  Anything unusual hands over before the value is boxed:
             # the variable missing or unset, a trace on it, a link, an array, a namespace that is gone

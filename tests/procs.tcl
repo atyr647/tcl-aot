@@ -2418,3 +2418,24 @@ proc ss_incr_miss {} { return [list [catch {incr ::ssn::NOPE} m] $m [catch {incr
 proc ss_incr_reset {} { set ::ssn::I 0 }
 proc ss_trace_i_on {} { trace add variable ::ssn::I write ss_log }
 proc ss_trace_i_off {} { trace remove variable ::ssn::I write ss_log }
+
+# element operations on an array by its literal absolute name (storeArrayStk, incrArrayStk, incrArrayStkImm, existArrayStk)
+namespace eval ::san { variable T; array set T {a 1 b 2.5 c abc}; variable S scalar }
+proc sa_set {k v} { set ::san::T($k) $v; return [list [info exists ::san::T($k)] $::san::T($k)] }
+proc sa_loop {n} { for {set i 0} {$i < $n} {incr i} { set ::san::T($i) [expr {$i * 1.5}]; incr ::san::T(a); incr ::san::T(a) $i; incr ::san::T($i) }; return [list $::san::T(a) [array size ::san::T]] }
+proc sa_exists {k} { return [list [info exists ::san::T($k)] [info exists ::san::T(zz)]] }
+proc sa_incr {k n} { return [catch {incr ::san::T($k) $n} m]$m }
+proc sa_scalar {} { return [catch {set ::san::S(x) 1} m]$m }
+proc sa_missing {} { return [list [catch {set ::san::NOARR(x) 1} m] $m [catch {incr ::san::NOARR2(x)} m2] $m2 [info exists ::san::NOARR3(x)]] }
+proc sa_trace_on {} { trace add variable ::san::T(a) write sa_log }
+proc sa_trace_off {} { trace remove variable ::san::T(a) write sa_log }
+proc sa_atrace_on {} { trace add variable ::san::T write sa_log }
+proc sa_atrace_off {} { trace remove variable ::san::T write sa_log }
+proc sa_rtrace_on {} { trace add variable ::san::T read sa_log }
+proc sa_rtrace_off {} { trace remove variable ::san::T read sa_log }
+proc sa_log {args} { lappend ::salog $args }
+proc sa_unset {} { unset ::san::T }
+proc sa_make {} { array set ::san::T {a 1 b 2.5 c abc} }
+proc sa_elunset {k} { unset ::san::T($k) }
+set salog {}
+proc sa_reset {} { foreach n {T NOARR NOARR2 NOARR3} { catch {unset ::san::$n} }; array set ::san::T {a 1 b 2.5 c abc}; set ::salog {}; trace remove variable ::san::T write sa_log; return }

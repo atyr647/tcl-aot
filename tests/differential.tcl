@@ -711,6 +711,14 @@ lappend calls {ss_ns_delete} {ss_set 1} {ss_num 1 2} {ss_val 1} {ss_ns_make} {ss
 lappend calls {ss_incr_reset} {ss_incr 0} {ss_incr 1} {ss_incr 5} {ss_incr_val 3} {ss_incr_val -7} {ss_incr_val 0x10} [list ss_incr_val 2.5] [list ss_incr_val abc]
 lappend calls {ss_incr_s} {ss_incr_big} {ss_incr_reset} {ss_incr_miss} {ss_incr_bad ::ssn::I} {ss_incr_bad ::ssn::S} {ss_incr_bad nonesuch}
 lappend calls {ss_incr_reset} {ss_trace_i_on} {ss_incr 2} {ss_incr_val 1} {set sslog} {ss_trace_i_off} {ss_incr 2} {ss_incr_reset} {ss_trace_on} {ss_incr 2} {ss_incr_val 1} {set sslog} {ss_trace_off} {ss_incr 2} {ss_incr_reset}
+# decision 66: elements of a namespace array by its literal absolute name (sa_*): values, keys, increments, missing and scalar variables, traces on an element, on the array, for reads, unset and made again
+lappend calls {sa_reset}
+foreach k {a b c new 7 {} {a b}} { lappend calls [list sa_set $k 5] [list sa_set $k 2.5] [list sa_set $k xyz] [list sa_exists $k] [list sa_incr $k 3] [list sa_incr $k 0x10] [list sa_incr $k abc] [list sa_incr $k 2.5] }
+lappend calls {sa_loop 0} {sa_loop 1} {sa_loop 5} {sa_scalar} {sa_missing} {sa_reset} {sa_elunset a} {sa_exists a} {sa_set a 1} {sa_incr a 1} {sa_make} {sa_loop 3}
+lappend calls {sa_trace_on} {sa_set a 3} {sa_set b 3} {sa_incr a 1} {sa_loop 2} {set salog} {sa_trace_off} {sa_set a 4} {set salog}
+lappend calls {sa_atrace_on} {sa_set a 5} {sa_incr b 1} {sa_exists a} {set salog} {sa_atrace_off} {sa_set a 6}
+lappend calls {sa_rtrace_on} {sa_exists a} {sa_set a 7} {sa_incr a 1} {set salog} {sa_rtrace_off} {sa_exists a}
+lappend calls {sa_unset} {sa_set a 1} {sa_exists a} {sa_incr a 1} {sa_missing} {sa_make} {sa_set a 2} {sa_loop 2} {sa_reset}
 # Phase A, blocker 1: procs that only read namespace variables (nv_*): the usual case, then each change of the variables that the interpreter notices (and compiled code must)
 lappend calls {nv_reset} {nv_all 2} {nv_all 1.5} {nv_all 3} {nv_all a} {nv_loop 5} {nv_loop2 3 3} {nv_loop2 3 b}
 lappend calls {nv_set K 4} {nv_all 2} {nv_loop 3} {nv_set K 4.5} {nv_all 2} {nv_set K abc} {nv_all 2} {nv_set K 0x10} {nv_all 2} {nv_set K 3.0} {nv_all 2}
