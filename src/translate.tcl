@@ -1750,6 +1750,12 @@ proc stepT0 {key pc in} {
                 }
                 return [R fall [lreplace $in $top $top I] "$c si$top = 0;" stores [list [list $v Z]]]
             }
+            if {[kap $key $v] eq "F"} {
+                if {$k eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                if {$k in {A N M Q}} { return $dead }
+                set st [lreplace $in $top $top B]
+                return [R fall $st "[boxc $P $top $e] \{ Tcl_Obj *r_ = tbc_tappend(interp, loc_, $v, s$top); if (TBC_UNLIKELY(!r_)) goto [fl $key $st]; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(s$top); s$top = r_; \}"]
+            }
             if {[kap $key $v] ni {B -}} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
             switch $k {
                 I { if {[lt $e] ne ""} { set c "tbc_append_bytes(&l$v, [cstring [lindex $PI($P,lits) [lt $e]]], [cbytes [lindex $PI($P,lits) [lt $e]]]);" } else { set c "tbc_append_i(&l$v, si$top);" } }
@@ -1867,6 +1873,12 @@ proc stepT0 {key pc in} {
                     return [R fall [lreplace $in $top $top A:$v] "if (TBC_UNLIKELY(!tbc_ivec_push(&av$v, $val))) goto D$pc;" stores [list [list $v A]]]
                 }
                 return [R dead {} "goto D$pc;" stores [list [list $v B]]]
+            }
+            if {[kap $key $v] eq "F"} {
+                # a variable of the frame (global, upvar, variable): lappend by Tcl's own routine when it is a plain variable that holds a list; anything else is done by the boxed code
+                if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] ""] }
+                set st [lreplace $in $top $top B]
+                return [R fall $st "[boxc $P $top $e] \{ Tcl_Obj *r_ = tbc_tlappend(interp, loc_, $v, s$top); if (TBC_UNLIKELY(!r_)) goto [fl $key $st]; Tcl_IncrRefCount(r_); Tcl_DecrRefCount(s$top); s$top = r_; \}"]
             }
             if {[kap $key $v] ni {B -}} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v B]]] }

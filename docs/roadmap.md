@@ -36,7 +36,7 @@ Checked at proc entry (decisions 19).  Not shown for every case: a replacement m
 
 ## Instructions typed code still hands over at
 
-`dict for`, `lmap`, `unset`, `info exists` of a plain local, `array exists`, `append` and `lappend` on frame variables, `lsort` (a comparison proc could be
+`dict for`, `lmap`, `unset`, `info exists` of a plain local, `array exists`, `append` and `lappend` on array elements and on namespace variables by literal name (on variables of the frame they are typed since decision 71), `lsort` (a comparison proc could be
 compiled to a native comparator), and `try`/`finally`.  `TBC_DEADOPS=1` lists them for your own procs.
 
 ## Not planned

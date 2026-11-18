@@ -261,6 +261,25 @@ TBC_INLINE int tbc_tset(Var *loc, int idx, Tcl_Obj *val) {
     (void) tbc_storedirect(vp, val);
     return 1;
 }
+/* lappend / append of val to compiled local idx, a variable of the frame (a link target, a namespace variable): done when it is a plain variable that has a value, no trace and
+ * (for lappend) a value that is a list; the new value (not referenced), or NULL with nothing changed, and the boxed code goes on at the same instruction and does the general
+ * thing (creating the variable, traces, errors, arrays).  The work is Tcl's own (TclPtrSetVarIdx with the flags the executor gives), so the result is the interpreter's. */
+TBC_INLINE Tcl_Obj *tbc_tlappend(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *val) {
+    Var *vp = &loc[idx];
+    Tcl_Obj *o;
+    int n;
+    TBC_FOLLOW(vp);
+    if (!TclIsVarDirectModifyable(vp)) return NULL;
+    o = vp->value.objPtr;
+    if (Tcl_ListObjLength(NULL, o, &n) != TCL_OK) return NULL;
+    return TclPtrSetVarIdx(interp, vp, NULL, NULL, NULL, val, TCL_LEAVE_ERR_MSG|TCL_APPEND_VALUE|TCL_LIST_ELEMENT, idx);
+}
+TBC_INLINE Tcl_Obj *tbc_tappend(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *val) {
+    Var *vp = &loc[idx];
+    TBC_FOLLOW(vp);
+    if (!TclIsVarDirectModifyable(vp)) return NULL;
+    return TclPtrSetVarIdx(interp, vp, NULL, NULL, NULL, val, TCL_LEAVE_ERR_MSG|TCL_APPEND_VALUE, idx);
+}
 /* store the value of variable vp as the integer w: into the object it holds when nothing else refers to it (as incr does), else into a new one */
 TBC_INLINE void tbc_putwide(Var *vp, int64_t w) {
     Tcl_Obj *o = vp->value.objPtr;

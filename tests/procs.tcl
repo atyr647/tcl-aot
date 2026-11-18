@@ -2474,3 +2474,22 @@ proc wl_cmp {a b} { if {$a * $b > 10} { return big }; return small }
 proc wl_ns {x} { variable ::wln::K; return [expr {$x * $K - $x}] }
 proc wl_dbl {a} { return [expr {$a + 1}] }
 proc wl_neg {a b} { return [expr {-$a - $b}] }
+# decision 71: `lappend` and `append` on a variable of the frame (global, variable, upvar) are typed when it is a plain variable (lf_*)
+namespace eval ::lfn { variable L {}; variable T "" }
+proc lf_var {v n} { variable ::lfn::L; for {set i 0} {$i < $n} {incr i} { lappend L $v $i }; return $L }
+proc lf_app {v n} { variable ::lfn::T; for {set i 0} {$i < $n} {incr i} { append T $v $i }; return $T }
+proc lf_glob {v} { global lfg; lappend lfg $v; lappend lfg [expr {$v}]; return $lfg }
+proc lf_upv {name v n} { upvar 1 $name x; for {set i 0} {$i < $n} {incr i} { lappend x $v }; return [llength $x] }
+proc lf_upa {name v n} { upvar 1 $name x; for {set i 0} {$i < $n} {incr i} { append x $v }; return $x }
+proc lf_call {v n} { set l {}; lf_upv l $v $n; set s ""; lf_upa s $v $n; return [list $l $s] }
+proc lf_val {v} { variable ::lfn::L; set r [lappend L $v]; return [list $r [llength $L]] }
+proc lf_shared {v} { variable ::lfn::L; set c $L; lappend L $v; return [list $c $L] }
+proc lf_num {n} { variable ::lfn::L; lappend L $n [expr {$n * 2}] [expr {$n + 0.5}]; return $L }
+proc lf_reset {} { catch {trace remove variable ::lfn::L write lf_log}; catch {trace remove variable ::lfn::L read lf_log}; catch {unset ::lfn::L}; set ::lfn::L {}; set ::lfn::T ""; catch {unset ::lfg}; set ::lflog {}; return }
+proc lf_log {args} { lappend ::lflog $args }
+proc lf_trace_w {} { trace add variable ::lfn::L write lf_log }
+proc lf_trace_r {} { trace add variable ::lfn::L read lf_log }
+proc lf_unset {} { unset ::lfn::L }
+proc lf_setv {v} { set ::lfn::L $v }
+proc lf_arr {} { unset ::lfn::L; array set ::lfn::L {a 1} }
+set lflog {}
