@@ -692,6 +692,14 @@ foreach {x y} {2 3 1.5 2 2.5 0.5 0x10 3 4 0 3 0.0 abc 2 2.50 3 1e3 1 92233720368
 }
 foreach l {{1 2 3 4 5 6 7 8} {1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5} {1 2.5 3 x 5 6 7 8} {0x1 2 3 4 5.0 6 7 8}} { foreach n {0 1 3 4 6 8} { lappend calls [list fw_list $l $n] } }
 foreach x {2 2.5 0x10 abc} { foreach n {0 1 2 3} { lappend calls [list fw_trace $x $n] {set fwlog} } }
+# decision 64: `binary scan` and `scan` with several variables (bs_*): enough data, too little, bad formats, variables that keep their old values, strings and negative offsets
+foreach d {"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18" "\xff\x80\x7f\x00\xff\x80\x7f\x00\xff\x80\x7f\x00" "" "ab" "\x01\x02\x03"} {
+    foreach u {0 0.4 0.9 -0.5 2.7 5} { foreach n {1 3 6} { lappend calls [list bs_texel $d $u $n] } }
+    lappend calls [list bs_fixed $d] [list bs_reuse $d]
+    foreach n {0 1 4 20} { lappend calls [list bs_loop $d $n] }
+}
+foreach str {"12 34 abc" "12 x abc" "" "1.5,ff" "1.5,zz" "-3 +4 q" "0x10 5 w" " 7  8  z " "99999999999999999999 1 a"} { lappend calls [list bs_scan $str] }
+lappend calls {bs_texel x 0 1} [list bs_texel [binary format c* {1 2 3 4 5 6 7 8}] 0.2 2]
 # Phase A, blocker 1: procs that only read namespace variables (nv_*): the usual case, then each change of the variables that the interpreter notices (and compiled code must)
 lappend calls {nv_reset} {nv_all 2} {nv_all 1.5} {nv_all 3} {nv_all a} {nv_loop 5} {nv_loop2 3 3} {nv_loop2 3 b}
 lappend calls {nv_set K 4} {nv_all 2} {nv_loop 3} {nv_set K 4.5} {nv_all 2} {nv_set K abc} {nv_all 2} {nv_set K 0x10} {nv_all 2} {nv_set K 3.0} {nv_all 2}

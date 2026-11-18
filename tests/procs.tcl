@@ -2357,3 +2357,35 @@ proc fw_trace {x n} {
     return [fw_vars]
 }
 proc fw_tr {args} { lappend ::fwlog $args }
+
+# Phase A3, decision 64: `binary scan` and `scan` with several variables and a format built at run time are called with the locals written to the frame and read from it again (as regexp is)
+proc bs_texel {data u n} {
+    set x [expr {int($u * 3)}]
+    set c [binary scan $data @[expr {$x * $n}]cucucucucucu r g b nx ny nz]
+    return [list $c [expr {[info exists r] ? $r + 1 : "none"}] [fw_vars]]
+}
+proc bs_fixed {data} {
+    set c [binary scan $data cu2su r s t]
+    set d [binary scan $data iuf a b]
+    return [list $c $d [fw_vars]]
+}
+proc bs_scan {s} {
+    set n [scan $s {%d %d %s} a b c]
+    set m [scan $s {%f,%x} p q]
+    return [list $n $m [fw_vars]]
+}
+proc bs_loop {data n} {
+    set acc 0.0
+    for {set i 0} {$i < $n} {incr i} {
+        binary scan $data @[expr {$i * 2}]cucu r g
+        set acc [expr {$acc + $r * 0.5 + $g / 3.0}]
+    }
+    return $acc
+}
+proc bs_reuse {data} {
+    set r 5.5
+    binary scan $data cu r
+    set r [expr {$r * 2}]
+    binary scan $data @9cu r
+    return [list $r [fw_vars]]
+}

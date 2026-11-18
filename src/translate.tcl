@@ -131,6 +131,8 @@ proc isStockMM {ns nm0} {
 proc varWriteArgs {cmd words} {
     set n [llength $words]
     set i 0
+    # `scan string format ?var...?` and `binary scan data format ?var...?` (no options): the variables are the words after the second
+    if {$cmd in {scan tcl::binary::scan}} { if {$n < 2} { return -1 }; set r {}; for {set k 2} {$k < $n} {incr k} { lappend r $k }; return $r }
     while {$i < $n} {
         set w [lindex $words $i]
         if {$w eq "" || [string index $w 0] ne "-"} break
@@ -600,7 +602,7 @@ proc prepare {P} {
                     }
                 }
                 # `regexp pat str var...` and `regsub pat str sub var`: typed code calls them with the variables stored to the frame and read from it again
-                if {[regexp {^(?:::)?(regexp|regsub)$} $nm -> rcmd]} {
+                if {[regexp {^(?:::)?(regexp|regsub|scan|tcl::binary::scan)$} $nm -> rcmd]} {
                     set ws {}
                     for {set k [expr {$q+1}]} {$k < [llength $st]} {incr k} {
                         set e [lindex $st $k]
@@ -3129,7 +3131,7 @@ proc stepInvoke {key pc in d n} {
         set r [getsVar $key $P $pc $in $d $n $q]
         if {$r ne ""} { return $r }
     }
-    if {[regexp {^(?:::)?(regexp|regsub)$} $nm0]} {
+    if {[regexp {^(?:::)?(regexp|regsub|scan|tcl::binary::scan)$} $nm0]} {
         set r [varWriteCall $key $P $pc $in $d $n $q $nm0]
         if {$r ne ""} { return $r }
     }
@@ -3176,7 +3178,7 @@ proc stepInvoke {key pc in d n} {
 proc varWriteCall {key P pc in d n q nm0} {
     global PI
     set cmd [string trimleft $nm0 :]
-    if {$cmd ni {regexp regsub}} { return "" }
+    if {$cmd ni {regexp regsub scan tcl::binary::scan}} { return "" }
     set below [lrange $in 0 [expr {$q-1}]]
     set args [lrange $in [expr {$q+1}] end]
     foreach e $args { if {[kd $e] in {A N M Q T K R F W S}} { return "" } }
