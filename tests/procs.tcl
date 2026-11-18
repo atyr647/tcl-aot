@@ -2318,3 +2318,42 @@ proc cd_prec {l p} {
     set ::tcl_precision 0
     return $r
 }
+
+# Phase A3, decision 63: numbers that are assigned on some paths only (flagged tagged-number variables) in a proc that is not pure (it calls one that writes a global): held unboxed,
+# written into the frame when the code hands over, and "unset" is still told apart from "zero".  fw_vars lists the proc's variables with their values by name (`info locals`,
+# `uplevel 0`), which reads the frame and is not a use of the variable for the compiler.
+set fwc 0; set fwlog {}
+proc fw_imp {} { global fwc; incr fwc; return $fwc }
+proc fw_vars {} { set r {}; foreach nm [lsort [uplevel 1 {info locals}]] { lappend r $nm [uplevel 1 [list set $nm]] }; return $r }
+proc fw_main {x y n} {
+    set acc 0.0
+    for {set i 0} {$i < $n} {incr i} {
+        if {$i % 3 == 0} { set a [expr {$x * $i + $y}]; set acc [expr {$acc + $a}] } else { set b [expr {$x - $y * $i}]; if {$i % 2} { set acc [expr {$acc - $b}] } }
+        if {$i == 5} { fw_imp }
+        if {$i % 4 == 2} { set c [expr {$x + 1}]; set acc [expr {$acc * $c}] }
+    }
+    return [list $acc [fw_vars]]
+}
+proc fw_late {x y n} {
+    for {set i 0} {$i < $n} {incr i} {
+        if {$i == 2} { set z [expr {$x / $y}]; fw_imp; set t [expr {$z * 2}] } else { set w [expr {$x * 1.5 + $i}]; set t [expr {$w + 1}] }
+        if {$i == 3} { set zz [expr {$t + 0.25}] }
+    }
+    return [fw_vars]
+}
+proc fw_list {l n} {
+    set acc 0
+    for {set i 0} {$i < $n} {incr i} {
+        if {$i % 2} { set p [expr {[lindex $l $i] * 2}]; set acc [expr {$acc + $p}] } else { set q [expr {[lindex $l $i] + 0.5}]; set acc [expr {$acc - $q}] }
+        if {$i == 3} { fw_imp }
+    }
+    return [list $acc [fw_vars]]
+}
+proc fw_trace {x n} {
+    for {set i 0} {$i < $n} {incr i} {
+        if {$i % 2} { set a [expr {$x * 1.5}]; set s $a } else { set b [expr {$x + $i}]; set s $b }
+        if {$i == 1} { trace add variable a write fw_tr; fw_imp }
+    }
+    return [fw_vars]
+}
+proc fw_tr {args} { lappend ::fwlog $args }

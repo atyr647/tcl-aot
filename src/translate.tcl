@@ -1347,7 +1347,7 @@ proc boxLocals {key live slots} {
     set c ""
     foreach v [lsort -integer -unique $vs] {
         switch [kap $key $v] {
-            W { append c " l$v = (wt$v ? tbc_newdbl(d$v) : tbc_newint(i$v));" }
+            W { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = (wt$v ? tbc_newdbl(d$v) : tbc_newint(i$v));" }
             I { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newint(i$v);" } D { append c " [expr {$v in [flaggedOf $P] ? "if (g$v) " : ""}]l$v = tbc_newdbl(d$v);" } A { append c " l$v = tbc_ivec_list(&av$v, 1);" } Z { append c " l$v = tbc_sb_obj(&zv$v, 1);" } M { append c " l$v = tbc_imap_dict(&mv$v, 1);" }
         }
     }
@@ -1536,7 +1536,7 @@ proc stepT0 {key pc in} {
             set sk [expr {$k eq "L" || $k in {A N M Q} ? "B" : $k}]
             if {$k eq "B" && [specStore $P $pc $v]} {
                 if {[kap $key $v] eq "W"} {
-                    return [R fall $in "if (TBC_UNLIKELY(!tbc_wload_canon(s$top, &wt$v, &i$v, &d$v))) goto D$pc;" stores [list [list $v S]]]
+                    return [R fall $in "if (TBC_UNLIKELY(!tbc_wload_canon(s$top, &wt$v, &i$v, &d$v))) goto D$pc;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" stores [list [list $v S]]]
                 }
                 if {[kap $key $v] eq "I"} {
                     # (the value is checked: anything but an integer is stored by the boxed code, which is what the hand-over does)
@@ -1552,6 +1552,7 @@ proc stepT0 {key pc in} {
                         W { set c "wt$v = sw$top; i$v = si$top; d$v = sd$top;" }
                         default { return [R dead {} "goto D$pc;" stores [list [list $v $sk]]] }
                     }
+                    if {$v in [flaggedOf $P]} { append c " g$v = 1;" }
                 }
                 I { set c "i$v = si$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
                 D { set c "d$v = sd$top;[expr {$v in [flaggedOf $P] ? " g$v = 1;" : ""}]" }
@@ -2410,7 +2411,7 @@ proc stepForeachStep {key pc in d a} {
         set x "sv$d0.p\[it_\]"
         switch $kv {
             F { set asg "\{ Tcl_Obj *v_ = tbc_newint($x); int ok_ = tbc_tset(loc_, $var, v_); Tcl_DecrRefCount(v_); if (TBC_UNLIKELY(!ok_)) goto D$pc; \}"; set st {} }
-            W { set asg "wt$var = 0; i$var = $x;"; set st [list [list $var I]] }
+            W { set asg "wt$var = 0; i$var = $x;[expr {$var in [flaggedOf $P] ? " g$var = 1;" : ""}]"; set st [list [list $var I]] }
             I - - { set asg "i$var = $x;[expr {$var in [flaggedOf $P] ? " g$var = 1;" : ""}]"; set st [list [list $var I]] }
             default { set asg "\{ Tcl_Obj *v_ = tbc_newint($x); if (l$var) Tcl_DecrRefCount(l$var); l$var = v_; \}"; set st [list [list $var B]] }
         }
@@ -3789,7 +3790,7 @@ proc analyze {key} {
         set nk $kap
         foreach s $stores { lassign $s v k; dict set nk $v [jk [dict get $nk $v] $k] }
         foreach v [mustBoxOf $P] { if {[dict get $nk $v] in {I D A M W Z}} { dict set nk $v B } }
-        foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M W Z}} { dict set nk $v B } }
+        foreach v [flaggedOf $P] { if {[dict get $nk $v] in {A M Z}} { dict set nk $v B } }
         if {$PI($P,hasYield)} { dict for {v k} $nk { if {$k in {A M Z}} { dict set nk $v B } } }
         set ekap $VK($key,ekap)
         set nek $ekap
@@ -4660,7 +4661,11 @@ proc resumePrologue {key} {
                     }
                 }
                 W {
-                    append chk " if (!vp_->value.objPtr || !tbc_wload_canon(vp_->value.objPtr, &wt$v, &i$v, &d$v)) goto giveup; \}\n"
+                    if {$v in [flaggedOf $P]} {
+                        append chk " if (vp_->value.objPtr) \{ if (!tbc_wload_canon(vp_->value.objPtr, &wt$v, &i$v, &d$v)) goto giveup; g$v = 1; \} else g$v = 0; \}\n"
+                    } else {
+                        append chk " if (!vp_->value.objPtr || !tbc_wload_canon(vp_->value.objPtr, &wt$v, &i$v, &d$v)) goto giveup; \}\n"
+                    }
                 }
                 B {
                     append chk " \}\n"
@@ -4725,7 +4730,7 @@ proc emitVariant {key recursive {resume 0}} {
     for {set v 0} {$v < $nv} {incr v} {
         append fn "    Tcl_Obj *l$v = NULL; (void) l$v;"
         switch [dict get $kap $v] { W { append fn " int64_t i$v = 0; double d$v = 0; int wt$v = 0; (void) i$v; (void) d$v; (void) wt$v;" } I { append fn " int64_t i$v = 0; (void) i$v;" } D { append fn " double d$v = 0; (void) d$v;" } A { append fn " tbc_ivec av$v = {NULL, 0};" } Z { append fn " tbc_sbuf zv$v = {NULL, 0, 0};" } M { append fn " tbc_imap mv$v; memset(&mv$v, 0, sizeof mv$v);" } R { append fn " tbc_rmap rv$v; memset(&rv$v, 0, sizeof rv$v);" } }
-        if {$v in [flaggedOf $P] && [dict get $kap $v] in {I D}} { append fn " int g$v = 0; (void) g$v;" }
+        if {$v in [flaggedOf $P] && [dict get $kap $v] in {I D W}} { append fn " int g$v = 0; (void) g$v;" }
         append fn "\n"
     }
     for {set k 0} {$k < $maxd2} {incr k} { append fn "    Tcl_Obj *s$k = NULL; int64_t si$k = 0; double sd$k = 0; (void) s$k; (void) si$k; (void) sd$k;[expr {$::curWpol ? " int sw$k = 0; (void) sw$k;" : ""}]\n" }

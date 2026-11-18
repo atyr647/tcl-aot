@@ -686,6 +686,12 @@ foreach l $cdlists {
     lappend calls "${pre}cd_via \$cdl" "${pre}cd_store \$cdl" "${pre}cd_keep \$cdl"
     lappend cdprec "${pre}cd_prec \$cdl 3" "${pre}cd_prec \$cdl 17" "${pre}cd_prec \$cdl 0"
 }
+# Phase A3, decision 63: flagged tagged numbers in a proc that is not pure (fw_*)
+foreach {x y} {2 3 1.5 2 2.5 0.5 0x10 3 4 0 3 0.0 abc 2 2.50 3 1e3 1 9223372036854775807 2 2 {}} {
+    foreach n {0 1 2 3 4 6 9} { lappend calls [list fw_main $x $y $n] [list fw_late $x $y $n] }
+}
+foreach l {{1 2 3 4 5 6 7 8} {1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5} {1 2.5 3 x 5 6 7 8} {0x1 2 3 4 5.0 6 7 8}} { foreach n {0 1 3 4 6 8} { lappend calls [list fw_list $l $n] } }
+foreach x {2 2.5 0x10 abc} { foreach n {0 1 2 3} { lappend calls [list fw_trace $x $n] {set fwlog} } }
 # Phase A, blocker 1: procs that only read namespace variables (nv_*): the usual case, then each change of the variables that the interpreter notices (and compiled code must)
 lappend calls {nv_reset} {nv_all 2} {nv_all 1.5} {nv_all 3} {nv_all a} {nv_loop 5} {nv_loop2 3 3} {nv_loop2 3 b}
 lappend calls {nv_set K 4} {nv_all 2} {nv_loop 3} {nv_set K 4.5} {nv_all 2} {nv_set K abc} {nv_all 2} {nv_set K 0x10} {nv_all 2} {nv_set K 3.0} {nv_all 2}
