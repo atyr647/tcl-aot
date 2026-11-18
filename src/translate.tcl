@@ -3513,10 +3513,25 @@ proc mmFunc {key P pc in d n q mf} {
 proc deadResult {P pc} {
     global PI
     set nx $PI($P,next,$pc)
-    if {![info exists PI($P,ins,$nx)] || [lindex $PI($P,ins,$nx) 0] ne "pop"} { return 0 }
-    foreach p $PI($P,reach) { if {$p != $pc && $nx in $PI($P,succ,$p)} { return 0 } }
-    foreach r $PI($P,ranges) { foreach k {break continue catch} { if {[dict exists $r $k] && [dict get $r $k] == $nx} { return 0 } } }
-    return 1
+    if {[info exists PI($P,ins,$nx)] && [lindex $PI($P,ins,$nx) 0] eq "pop"} {
+        set shared 0
+        foreach p $PI($P,reach) { if {$p != $pc && $nx in $PI($P,succ,$p)} { set shared 1; break } }
+        foreach r $PI($P,ranges) { foreach k {break continue catch} { if {[dict exists $r $k] && [dict get $r $k] == $nx} { set shared 1 } } }
+        if {!$shared} { return 1 }
+    }
+    # the value of an `if` or `switch` used as a statement: the branch's last command leaves it, a jump takes it to the merge point and a `pop` there throws it away.
+    # Dead when the way from here to a pop is only jumps and no-ops (nothing looks at the value on the way: a store into a variable, which keeps the value on the stack,
+    # a return or a duplicate would end the walk with "no")
+    set cur $nx
+    for {set steps 0} {$steps < 8 && [info exists PI($P,ins,$cur)]} {incr steps} {
+        switch -- [lindex $PI($P,ins,$cur) 0] {
+            pop { return 1 }
+            nop - startCommand { set cur $PI($P,next,$cur) }
+            jump1 - jump4 { set cur [lindex $PI($P,succ,$cur) 0] }
+            default { return 0 }
+        }
+    }
+    return 0
 }
 
 # is a call of the built-in command nm (first word after it: sub, or -) free of any access to variables and of callbacks into scripts?

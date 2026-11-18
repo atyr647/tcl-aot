@@ -2439,3 +2439,19 @@ proc sa_make {} { array set ::san::T {a 1 b 2.5 c abc} }
 proc sa_elunset {k} { unset ::san::T($k) }
 set salog {}
 proc sa_reset {} { foreach n {T NOARR NOARR2 NOARR3} { catch {unset ::san::$n} }; array set ::san::T {a 1 b 2.5 c abc}; set ::salog {}; trace remove variable ::san::T write sa_log; return }
+# decision 68: the value of `lassign` (the rest of the list) thrown away by a `pop` after an `if`, `switch` or loop body that merges branches (ld_*)
+proc ld_if {rec flag} { set a {}; set b {}; set c {}; set d {}; if {$flag} { lassign $rec a b } else { lassign $rec c d }; return [list $a $b $c $d] }
+proc ld_noelse {rec flag} { set a x; set b y; if {$flag} { lassign $rec a b }; return [list $a $b] }
+proc ld_last {rec flag} { if {$flag} { lassign $rec a b } else { lassign $rec c d } }
+proc ld_last1 {rec flag} { if {$flag} { lassign $rec a b } }
+proc ld_used {rec flag} { set x [if {$flag} { lassign $rec a b } else { lassign $rec c d }]; return $x }
+proc ld_switch {rec flag} { set a 0; set c 0; set e 0; switch $flag { 1 { lassign $rec a b } 2 { lassign $rec c d } default { lassign $rec e f } }; return [list $a $c $e] }
+proc ld_loop {recs} { set s 0.0; foreach r $recs { if {[lindex $r 0] > 1} { lassign $r ax ay bx by } else { lassign $r bx by ax ay }; set s [expr {$s + $ax - $by}] }; return $s }
+proc ld_break {recs} { set s 0; foreach r $recs { if {[llength $r] > 5} { lassign $r a b; break } else { lassign $r a b }; incr s }; return [list $s $a $b] }
+proc ld_continue {recs} { set s 0; foreach r $recs { if {[llength $r] > 5} { lassign $r a b; continue } else { lassign $r a b }; incr s }; return [list $s $a $b] }
+proc ld_catch {rec flag} { set a 1; set c 2; catch { if {$flag} { lassign $rec a b } else { lassign $rec c d } } m; return [list $a $c $m] }
+proc ld_shared {rec flag} { if {$flag} { lassign $rec a b } else { lassign $rec c d }; lappend rec z; return [list [llength $rec] $rec] }
+proc ld_mixed {rec flag} { set x 0; if {$flag} { lassign $rec a b } else { set x 1 }; return [list $x [info exists a]] }
+proc ld_nested {rec f g} { set a 0; set c 0; set e 0; if {$f} { if {$g} { lassign $rec a b } else { lassign $rec c d } } else { lassign $rec e f2 }; return [list $a $c $e] }
+proc ld_while {rec n} { set i 0; while {$i < $n} { incr i; if {$i % 2} { lassign $rec a b } else { lassign $rec b a } }; return [list $i $a $b] }
+proc ld_rest {rec flag} { if {$flag} { set r [lassign $rec a b] } else { set r [lassign $rec c d] }; return $r }

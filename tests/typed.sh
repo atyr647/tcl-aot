@@ -209,11 +209,12 @@ echo "typed: max and min of integers and doubles are typed, without hand-over: o
 cat > "$tmp/a.tcl" <<'TCL'
 proc ta_walls {recs p} { set best 1e30; foreach rec $recs { lassign $rec ax ay bx by; set d [expr {abs(($bx - $ax) * ($ay - $p) - ($ax - $p) * ($by - $ay))}]; if {$d < $best} { set best $d } }; return $best }
 proc ta_rest {rec} { set r [lassign $rec a]; return [list $a $r] }
+proc ta_branch {rec f} { if {$f} { lassign $rec a b } else { lassign $rec b a }; return [list $a $b] }
 TCL
 TBC_DEADOPS=1 "$TCLSH" src/translate.tcl "$tmp/a.tcl" "$tmp/a.c" Lassigntest -split 1 >"$tmp/a.log" 2>&1 || { echo "typed: translation failed"; tail -3 "$tmp/a.log"; exit 1; }
 if ! grep -q "Tcl_ListObjLength(NULL" "$tmp/a_v1.c"; then echo "typed: FAILED, the typed code of lassign still builds the rest of the list"; exit 1; fi
 if [ "$(grep -c '::lrange' "$tmp/a_v1.c")" != 1 ]; then echo "typed: FAILED, lassign calls lrange where its result is thrown away (or does not where it is used)"; exit 1; fi
-echo "typed: lassign does not copy the rest of the list that it throws away, and does when the value is used: ok"
+echo "typed: lassign does not copy the rest of the list that it throws away (also at the merge of an if/else), and does when the value is used: ok"
 
 # `lindex $m $i $j` and `lindex $m {1 2}` take the elements one at a time in typed code: they were calls of the command lindex with boxed operands (10 times slower than
 # `lindex [lindex $m $i] $j`, which has its own instruction)

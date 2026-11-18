@@ -668,6 +668,17 @@ foreach r [list {1 2 3 4} {1 2} {} {1 2 3 4 5 6 7 8 9} "a \{b" " 1 2 3 4 " {{1 2
     lappend calls [list la_dist $r 1 2] [list la_loop [list $r $r]]
 }
 lappend calls [list la_walls [list {0 0 4 0} {0 3 4 3} $long {0 0 0 4}] 1.5] {la_walls {} 1}
+# decision 68: a lassign whose rest is thrown away at the merge point of an if/switch (ld_*): short, long, invalid and shared lists, the value used, in loops, with catch, break, continue
+foreach r [list {1 2 3 4} {1 2} {} {1 2 3 4 5 6 7 8 9} "a \{b" {1.5 2.5 3.5 4.5} $long {{1 2} {3 4} 5 6}] {
+    foreach fl {0 1} {
+        foreach p {ld_if ld_noelse ld_last ld_last1 ld_used ld_catch ld_shared ld_mixed ld_rest} { lappend calls [list $p $r $fl] }
+    }
+    foreach fl {0 1 2 3} { lappend calls [list ld_switch $r $fl] }
+    foreach {f g} {0 0 0 1 1 0 1 1} { lappend calls [list ld_nested $r $f $g] }
+    foreach n {0 1 2 5} { lappend calls [list ld_while $r $n] }
+}
+lappend calls [list ld_loop [list {1 2 3 4} {2 3 4 5} $long {0 1 2 3 4 5}]] [list ld_loop [list {2 3 4 5} "a \{b"]] {ld_loop {}}
+lappend calls [list ld_break [list {1 2} {3 4} {1 2 3 4 5 6} {9 9}]] [list ld_continue [list {1 2} {3 4} {1 2 3 4 5 6} {9 9}]] {ld_break {}} {ld_continue {x}}
 # lindex with several indices (lx_*)
 set lxm [list {{a b c} {d e f} {g h i}} {{1 2} {3 4}} {} "a \{b" {{1 {2 3}} {4 5}} {a b c} 5 {{x y} {} {z}} "\{a b\} \{c"]
 set lxi {0 1 2 -1 5 end end-1 1+1 0x1 a " 1" 1.5 {} {1 2} 9223372036854775807}
@@ -772,7 +783,7 @@ puts "attached: [llength [tbc::attached]] of [llength [info commands t_*]]"
 set B [runall]
 puts "attached after the calls: [llength [tbc::attached]]"
 # procs that must run compiled (a refused proc would run interpreted and match trivially): the constructs that were once refused
-set mustAttach {::nv_k ::nv_up ::nv_glob ::nv_abs ::nv_arr ::nv_absarr ::nv_str ::nv_two ::nv_del ::nv_lit ::nv_all ::nv_loop ::nv_loop2 ::nvns::get ::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop
+set mustAttach {::nv_k ::nv_up ::nv_glob ::nv_abs ::nv_arr ::nv_absarr ::nv_str ::nv_two ::nv_del ::nv_lit ::nv_all ::nv_loop ::nv_loop2 ::nvns::get ::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop ::ld_if ::ld_noelse ::ld_last ::ld_last1 ::ld_used ::ld_switch ::ld_loop ::ld_break ::ld_continue ::ld_catch ::ld_shared ::ld_mixed ::ld_nested ::ld_while ::ld_rest
     ::tl_dictfor_break ::tl_dictfor_ret ::tl_dictfor_err ::tl_dictfor_catch {::tw_odd?} {::tw_star*} {::tw_br[a]} {::tw with space} {::tw"quote} {::tw\back} {::tw;semi} ::tw_caller ::tb_try1 ::tb_try2 ::tb_try3 ::tb_catch1 ::tb_try4 ::tb_try5}
 foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } }
 if {[info exists ::notCompiled]} { puts "$::notCompiled procs that must run compiled do not" ; exit 1 }
