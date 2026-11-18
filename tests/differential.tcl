@@ -686,6 +686,16 @@ foreach a {0 1 -3 2.5 abc {} {x y} 0x10 9223372036854775807} {
     foreach f {0 1} { lappend calls [list dt_catch $a $f] }
 }
 foreach n {0 1 2 3 7 20} { lappend calls [list dt_loop $n] [list dt_leak $n] }
+# decision 70: loop-free arithmetic helpers on objects: integers, doubles, text, hex, bignums, limits, errors (wl_*)
+set wlv {0 1 -1 7 2.5 -2.5 0x10 1e3 abc {} 9223372036854775807 -9223372036854775808 123456789012345678901234567890 Inf -0.0 .5 1_000}
+foreach a $wlv {
+    lappend calls [list wl_dbl $a] [list wl_ns $a]
+    foreach b {0 1 3 2.5 -1 abc 9223372036854775807 0x7} {
+        lappend calls [list wl_mul $a $b] [list wl_cmp $a $b] [list wl_neg $a $b]
+        foreach c {2 0.5 -3} { lappend calls [list wl_expr $a $b $c] }
+    }
+}
+foreach l {{1 2 3 4} {0.5 1.5 2.5 3.5} {1 2.5 3 4.5} {a b c d} {1 2} {} {9223372036854775807 1 2 3}} { foreach i {0 1 2 5 -1} { foreach x {2 0.5 abc} { lappend calls [list wl_lidx $l $i $x] } } }
 # lindex with several indices (lx_*)
 set lxm [list {{a b c} {d e f} {g h i}} {{1 2} {3 4}} {} "a \{b" {{1 {2 3}} {4 5}} {a b c} 5 {{x y} {} {z}} "\{a b\} \{c"]
 set lxi {0 1 2 -1 5 end end-1 1+1 0x1 a " 1" 1.5 {} {1 2} 9223372036854775807}
@@ -790,7 +800,7 @@ puts "attached: [llength [tbc::attached]] of [llength [info commands t_*]]"
 set B [runall]
 puts "attached after the calls: [llength [tbc::attached]]"
 # procs that must run compiled (a refused proc would run interpreted and match trivially): the constructs that were once refused
-set mustAttach {::nv_k ::nv_up ::nv_glob ::nv_abs ::nv_arr ::nv_absarr ::nv_str ::nv_two ::nv_del ::nv_lit ::nv_all ::nv_loop ::nv_loop2 ::nvns::get ::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop ::ld_if ::ld_noelse ::ld_last ::ld_last1 ::ld_used ::ld_switch ::ld_loop ::ld_break ::ld_continue ::ld_catch ::ld_shared ::ld_mixed ::ld_nested ::ld_while ::ld_rest ::dt_nums ::dt_mix ::dt_noelse ::dt_lit ::dt_sw ::dt_loop ::dt_nested ::dt_catch ::dt_leak
+set mustAttach {::nv_k ::nv_up ::nv_glob ::nv_abs ::nv_arr ::nv_absarr ::nv_str ::nv_two ::nv_del ::nv_lit ::nv_all ::nv_loop ::nv_loop2 ::nvns::get ::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop ::ld_if ::ld_noelse ::ld_last ::ld_last1 ::ld_used ::ld_switch ::ld_loop ::ld_break ::ld_continue ::ld_catch ::ld_shared ::ld_mixed ::ld_nested ::ld_while ::ld_rest ::dt_nums ::dt_mix ::dt_noelse ::dt_lit ::dt_sw ::dt_loop ::dt_nested ::dt_catch ::dt_leak ::wl_mul ::wl_expr ::wl_lidx ::wl_cmp ::wl_ns ::wl_dbl ::wl_neg
     ::tl_dictfor_break ::tl_dictfor_ret ::tl_dictfor_err ::tl_dictfor_catch {::tw_odd?} {::tw_star*} {::tw_br[a]} {::tw with space} {::tw"quote} {::tw\back} {::tw;semi} ::tw_caller ::tb_try1 ::tb_try2 ::tb_try3 ::tb_catch1 ::tb_try4 ::tb_try5}
 foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } }
 if {[info exists ::notCompiled]} { puts "$::notCompiled procs that must run compiled do not" ; exit 1 }

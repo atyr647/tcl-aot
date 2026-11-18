@@ -2465,3 +2465,12 @@ proc dt_loop {n} { set s 0.0; set l {}; for {set i 0} {$i < $n} {incr i} { if {$
 proc dt_nested {a f g} { set x 0; if {$f} { if {$g} { set x [expr {$a * 2.5}] } else { set x $a } } else { set x [expr {$a + 1}] }; return $x }
 proc dt_catch {a f} { set r [catch { if {$f} { set x [expr {$a * 2.5}] } else { set x [lindex $a 0] } } m]; return [list $r $m] }
 proc dt_leak {n} { set k 0; for {set i 0} {$i < $n} {incr i} { if {$i & 1} { set l [list $i $i] } else { set s "x$i" }; if {$i & 2} { set d [expr {$i * 0.5}] } else { set e [string repeat y 5] }; incr k }; return $k }
+# decision 70: loop-free helpers with arithmetic on objects and no sign of floating-point numbers use tagged numbers in the variants that take objects (wl_*)
+namespace eval ::wln { variable K 3 }
+proc wl_mul {a b} { return [expr {$a * $b + $a}] }
+proc wl_expr {a b c} { return [expr {($a + $b) * $c - $a / ($b + 1)}] }
+proc wl_lidx {l i x} { return [expr {[lindex $l $i] * $x + [lindex $l $i+1]}] }
+proc wl_cmp {a b} { if {$a * $b > 10} { return big }; return small }
+proc wl_ns {x} { variable ::wln::K; return [expr {$x * $K - $x}] }
+proc wl_dbl {a} { return [expr {$a + 1}] }
+proc wl_neg {a b} { return [expr {-$a - $b}] }

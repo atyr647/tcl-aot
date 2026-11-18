@@ -890,6 +890,7 @@ proc prepare {P} {
         }
     }
     set PI($P,wadapt) [expr {!$fl && $data && !$hasYield && [llength $PI($P,loopheads)] && ![info exists ::env(TBC_FORCE_WPOLICY)]}]
+    set PI($P,wlf) [expr {!$fl && $ar && !$intonly && !$hasYield && ![llength $PI($P,loopheads)] && ![info exists ::env(TBC_FORCE_WPOLICY)]}]
 }
 
 # Where the value that the instruction at pc pushed in slot q goes: every path from there must end at an instruction that takes the slot, and each such instruction is returned as
@@ -1244,9 +1245,12 @@ proc wpol {P} {
 }
 # the policy of one variant: the static one of the proc, or the tagged-number version of a proc that adapts (its key ends in w)
 proc wpolK {key} {
+    global PI
     lassign [keysplit $key] P sig
     # (a variant that takes a double has a sign of floating-point numbers, as a proc with a double literal has: objects read in it, list elements, variables, are numbers of either kind)
-    return [expr {[wpol $P] || [string match *w $sig] || [string first D $sig] >= 0}]
+    # (a loop-free helper that does arithmetic and has no sign of floating-point numbers, in a variant that takes an object: it has no loop for the adaptive version of decision 30 to
+    # re-enter, so the object operands it reads, which may well be doubles, are tagged numbers from the start (decision 70))
+    return [expr {[wpol $P] || [string match *w $sig] || [string first D $sig] >= 0 || ($PI($P,wlf) && [string first B $sig] >= 0)}]
 }
 proc jd {a b} {
     if {$a eq $b} { return $a }
