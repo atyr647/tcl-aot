@@ -798,6 +798,13 @@ lappend calls {set ::trj {}; trace add execution ::tcl::binary::scan enter {lapp
 lappend calls {set ::trj {}; trace add execution binary enter {lappend ::trj}; set r [fs_listloop 3]; trace remove execution binary enter {lappend ::trj}; list $r [llength $::trj]}
 lappend calls {set ::trj {}; trace add variable ::fs_tv write {lappend ::trj}; set r [fs_loop 3]; trace remove variable ::fs_tv write {lappend ::trj}; list $r [llength $::trj]}
 lappend calls {rename ::tcl::binary::scan fs_scan_o; proc ::tcl::binary::scan {args} { uplevel 1 {set r 55}; return 1 }; set a [list [fs_f32 1.5] [fs_scan [binary format f 2.5]]]; rename ::tcl::binary::scan {}; rename fs_scan_o ::tcl::binary::scan; set a}
+# decision 77: lappend with several values typed; typed code entered again at a loop head (a dead or unset table array, an integer vector from the frame); caller-safe procs whose callees use `upvar 1`
+foreach n {0 1 2 5 40} { lappend calls [list lp_multi $n] [list lp_mixed $n] [list lp_unset $n] [list lp_shared $n] [list lp_result $n] [list lp_base {a b} $n] [list lp_base "a \{b" $n] [list lp_base {} $n] [list lp_base 5 $n] }
+foreach n {0 1 2 3} { lappend calls [list lp_self $n] }
+lappend calls {lp_pre} {lp_multi} {lp_multi 1 2} {lp_base x}
+foreach n {0 1 2 5 30} { lappend calls [list rs_main $n] [list rs_mklev $n] [list cs_outer $n] [list cs_outer2 $n] [list cs_outer3 $n] }
+foreach h {{} {rs_adddl} {rs_baddl} {rs_oddl} {rs_adddl; rs_oddl} {set dl {5 6}} {set dl 7} {unset dl} {set dl "1 2 \{"} {set dl {1.5 2}} {set dl { 5 6 }}} { foreach n {0 1 4 12} { lappend calls [list rs_adj $n $h] } }
+lappend calls {rs_main 2.5} {rs_mklev 2.5} {rs_up nosuch} {cs_outer 2.5}
 # decision 65: `set ::ns::name value` (ss_*): values of every kind, a variable that is missing, only declared, traced, unset, an array, in a namespace that is deleted and made again, linked
 foreach v {5 2.5 abc {} {a b} 0x10 1e3 9223372036854775807} { lappend calls [list ss_set $v] [list ss_val $v] }
 foreach x {2 1.5 abc 0x10} { foreach n {0 1 3} { lappend calls [list ss_num $x $n] } }

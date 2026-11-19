@@ -2584,3 +2584,59 @@ proc fs_listloop {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [e
 proc fs_chain {x} { return [fs_f32 [fs_f32a [expr {$x * 1.0000001}]]] }
 proc fs_keep {x} { set r $x; binary scan [binary format f $x] f r; return [list $r $x] }
 proc fs_ret_unset {d} { binary scan $d f r; return $r }
+
+# decision 77: `lappend var a b c` typed (lp_*); typed code entered again at a loop head with a table array that is dead or unset and an integer vector read from the frame (rs_*);
+# a proc whose callee links to variables of its caller by `upvar 1` is caller-safe (cs_*)
+proc lp_multi {n} { set o {}; for {set i 0} {$i < $n} {incr i} { lappend o $i [expr {$i * 2}] x$i }; return $o }
+proc lp_mixed {n} { set o {a}; for {set i 0} {$i < $n} {incr i} { lappend o [expr {$i + 0.5}] "b c" {} {*}[list $i $i] }; return [list [llength $o] $o] }
+proc lp_unset {n} { for {set i 0} {$i < $n} {incr i} { lappend acc $i [expr {$i * $i}] }; return $acc }
+proc lp_base {b n} { for {set i 0} {$i < $n} {incr i} { lappend b $i x }; return $b }
+proc lp_shared {n} { set a {1 2}; set b $a; for {set i 0} {$i < $n} {incr i} { lappend a $i $i }; return [list $a $b] }
+proc lp_self {n} { set a {1}; for {set i 0} {$i < $n} {incr i} { lappend a $a $a }; return $a }
+proc lp_result {n} { set a {}; set r {}; for {set i 0} {$i < $n} {incr i} { set r [lappend a $i $i] }; return [list $a $r] }
+proc lp_pre {} { set o {x y}; lappend o 1 2 3; return $o }
+proc rs_up {name} { upvar 1 $name arr; set s 0; foreach k [array names arr] { incr s $arr($k) }; return $s }
+proc rs_makelev {} { upvar 1 lev lev; set lev(99) 5; return 1 }
+proc rs_adddl {} { upvar 1 dl dl; lappend dl 7 8; return 1 }
+proc rs_baddl {} { upvar 1 dl dl; set dl "a \{b"; return 1 }
+proc rs_oddl {} { upvar 1 dl dl; lappend dl 0x10 007 -0; return 1 }
+proc rs_main {n} {
+    for {set i 0} {$i < $n} {incr i} { set cq($i,0) $i }
+    set t [rs_up cq]
+    set dl {}
+    for {set i 0} {$i < $n} {incr i} { lappend dl [expr {$i * $t}] }
+    for {set i 0} {$i < $n} {incr i} { set lev($i) [lindex $dl $i] }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $lev($i) }
+    return [list $t $s [llength $dl]]
+}
+proc rs_mklev {n} {
+    for {set i 0} {$i < $n} {incr i} { set cq($i,0) $i }
+    set t [rs_up cq]
+    rs_makelev
+    set dl {}
+    for {set i 0} {$i < $n} {incr i} { lappend dl [expr {$i + $t}] }
+    for {set i 0} {$i < $n} {incr i} { set lev($i) [lindex $dl $i] }
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $lev($i) }
+    return [list $t $s $lev(99) [array size lev]]
+}
+proc rs_adj {n h} {
+    for {set i 0} {$i < $n} {incr i} { set cq($i,0) $i }
+    set t [rs_up cq]
+    set dl {}
+    $h
+    for {set i 0} {$i < $n} {incr i} { lappend dl [expr {$i * 3 + $t}] }
+    set s 0
+    for {set i 0} {$i < [llength $dl]} {incr i} { incr s [lindex $dl $i] }
+    return [list $t $s [llength $dl]]
+}
+proc cs_inner {nm} { upvar 1 $nm v; incr v; return $v }
+proc cs_mid {} { set x 5; cs_inner x; cs_inner x; return $x }
+proc cs_outer {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [cs_mid]; lappend l $i $i }; return [list $x $s [llength $l]] }
+proc cs_inner2 {nm} { upvar 2 $nm v; incr v; return $v }
+proc cs_mid2 {} { set x 5; cs_inner2 x; return $x }
+proc cs_outer2 {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [cs_mid2] }; return [list $x $s] }
+proc cs_inner3 {nm} { upvar $nm v; set v [expr {$v * 2}]; return $v }
+proc cs_mid3 {n} { set x $n; set s 0; for {set i 0} {$i < 3} {incr i} { incr s [cs_inner3 x] }; return [list $x $s] }
+proc cs_outer3 {n} { set y 7; set t 0; for {set i 0} {$i < $n} {incr i} { incr t [lindex [cs_mid3 $i] 1] }; return [list $y $t] }

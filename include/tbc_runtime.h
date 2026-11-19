@@ -1428,6 +1428,15 @@ static int tbc_lappend(Tcl_Interp *interp, Tcl_Obj **pv, Tcl_Obj *elem) {
     return 0;
 }
 
+/* lappend var a b c (decision 77): the elements of the list lst appended to the list in *pv (made if unset, copied if shared); 1 on an error, nothing changed */
+static int tbc_lappendl(Tcl_Interp *interp, Tcl_Obj **pv, Tcl_Obj *lst) {
+    Tcl_Obj *o = *pv;
+    if (!o) { o = Tcl_NewListObj(0, NULL); Tcl_IncrRefCount(o); *pv = o; }
+    else if (Tcl_IsShared(o)) { Tcl_Obj *d = Tcl_DuplicateObj(o); Tcl_IncrRefCount(d); Tcl_DecrRefCount(o); o = d; *pv = o; }
+    if (Tcl_ListObjAppendList(interp, o, lst) != TCL_OK) { Tcl_SetErrorCode(interp, "TCL", "WRITE", "VARNAME", NULL); return 1; }
+    return 0;
+}
+
 /* Typed int vector: a list local that provably holds only integers and never leaves the proc is kept as a raw int64 array.  It is
  * turned into a real Tcl list (tbc_ivec_list) the moment typed code gives up (deoptimisation), so Tcl semantics are unchanged. */
 typedef struct { int64_t *p; int64_t n; int64_t cap; } tbc_ivec;
@@ -1462,6 +1471,24 @@ static tbc_ivec tbc_ivec_copy(const tbc_ivec *a) {
     if (a->n) memcpy(c.p, a->p, (size_t) a->n * sizeof(int64_t));
     c.n = a->n; c.cap = a->n ? a->n : 1;
     return c;
+}
+/* Entering typed code at a loop head (decision 77): is o a list of integers in their canonical text (so that the list made of the vector reads the same)?  tbc_ivec_import then takes them. */
+static int tbc_ivec_check(Tcl_Obj *o) {
+    int n, i;
+    Tcl_Obj **e;
+    int64_t w;
+    if (Tcl_ListObjGetElements(NULL, o, &n, &e) != TCL_OK) return 0;
+    for (i = 0; i < n; i++) if (!tbc_arg_int(e[i], &w)) return 0;
+    return 1;
+}
+static void tbc_ivec_import(tbc_ivec *a, Tcl_Obj *o) {
+    int n, i;
+    Tcl_Obj **e;
+    (void) Tcl_ListObjGetElements(NULL, o, &n, &e);
+    a->p = (int64_t *) malloc((size_t) (n ? n : 1) * sizeof(int64_t));
+    if (!a->p) Tcl_Panic("tcl-aot: out of memory");
+    a->n = n; a->cap = n ? n : 1;
+    for (i = 0; i < n; i++) (void) tbc_arg_int(e[i], &a->p[i]);
 }
 /* A list object (one reference) with the vector's contents; take != 0 releases the vector. */
 static Tcl_Obj *tbc_ivec_list(tbc_ivec *a, int take) {

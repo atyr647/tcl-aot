@@ -285,7 +285,7 @@ proc effect {op a {d {}} {d0 {}}} {
         pop - verifyDict - variable { return {1 0 fall} }
         upvar - nsupvar { return {1 0 fall} }
         storeScalar1 - storeScalar4 - nop - startCommand - beginCatch4 - endCatch - unsetScalar - tryCvtToNumeric { return {0 0 fall} }
-        incrScalar1 - strlen - dictIncrImm - appendScalar1 - appendScalar4 - lappendScalar1 - lappendScalar4 { return {1 1 fall} }
+        incrScalar1 - strlen - dictIncrImm - appendScalar1 - appendScalar4 - lappendScalar1 - lappendScalar4 - lappendList { return {1 1 fall} }
         dictGet { return [list [expr {[lindex $a 0] + 1}] 1 fall] }
         add - sub - mult - div - mod - lt - le - gt - ge - eq - neq - listIndex { return {2 1 fall} }
         lsetList { return {3 1 fall} }
@@ -568,6 +568,8 @@ proc prepare {P} {
     # built-ins that stay in their own frame, only callees that are themselves caller-safe).  A typed caller can call such a proc through the
     # interpreter and keep its variables in C locals.
     set csafe 1
+    # (csafe1, decision 77: the same, but `upvar` of a literal level 1 is allowed: such a proc reaches the frame of its caller only.  A proc that calls one is caller-safe: what it reaches is its own frame)
+    set csafe1 1
     # "yield-safe": nothing this proc runs can reach a `yield` (no script is evaluated, no command whose identity is unknown is called, every proc it calls is
     # itself yield-safe).  Such a proc can run compiled inside a coroutine: a yield below compiled code would have to cross a C frame.  A proc that yields
     # itself ("resumable", yres) can too, if everything else it runs is yield-safe: its boxed code suspends through the interpreter's callbacks.
@@ -590,12 +592,13 @@ proc prepare {P} {
             reverse { set n [lindex $a 0]; set out [list {*}[lrange $st 0 end-$n] {*}[lreverse [lrange $st end-[expr {$n-1}] end]]] }
             default { set out [list {*}[lrange $st 0 [expr {[llength $st] - $pops - 1}]] {*}[lrepeat $pushes -]] }
         }
-        if {$op in {evalStk exprStk tailcall invokeReplace invokeExpanded}} { set csafe 0 }
+        if {$op in {evalStk exprStk tailcall invokeReplace invokeExpanded}} { set csafe 0; set csafe1 0 }
         if {$op in {evalStk exprStk invokeReplace invokeExpanded}} { set yres 0 }
-        if {$op in {yield yieldToInvoke}} { set csafe 0; set pure 0; set pureL 0; set hasYield 1 }
+        if {$op in {yield yieldToInvoke}} { set csafe 0; set csafe1 0; set pure 0; set pureL 0; set hasYield 1 }
         if {$op eq "upvar"} {
             set lv [lindex $st end-1]
             if {$lv eq "-" || [lindex [dict get $bc literals] $lv] ni {0 #0}} { set csafe 0 }
+            if {$lv eq "-" || [lindex [dict get $bc literals] $lv] ni {0 #0 1}} { set csafe1 0 }
         }
         # instructions that reach variables by name or link them to other frames make the proc impure
         if {$op in {upvar nsupvar variable}} {
@@ -624,7 +627,7 @@ proc prepare {P} {
             set n [lindex $a 0]; set q [expr {[llength $st] - $n}]
             set c [lindex $st $q]
             if {$c eq "-"} {
-                set pure 0; set pureL 0; set csafe 0; set yres 0
+                set pure 0; set pureL 0; set csafe 0; set csafe1 0; set yres 0
             } else {
                 set nm [lindex [dict get $bc literals] $c]
                 set cmdAt($pc) $nm
@@ -686,7 +689,7 @@ proc prepare {P} {
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
                         lappend bins $nm
                     } else {
-                        set csafe 0; set yres 0
+                        set csafe 0; set csafe1 0; set yres 0
                     }
                     set w2 [expr {$n > 1 ? [lindex $st [expr {$q+1}]] : "-"}]
                     set sub [expr {$w2 eq "-" ? "-" : [lindex [dict get $bc literals] $w2]}]
@@ -847,7 +850,7 @@ proc prepare {P} {
     }
     set PI($P,nrd) $nrd
     if {$nrd} { set pure 1 }
-    set PI($P,csafe) $csafe; set PI($P,ysafe) [expr {$yres && !$hasYield}]; set PI($P,yres) [expr {$yres && $hasYield}]; set PI($P,hasYield) $hasYield; set PI($P,bins) [lsort -unique $bins]
+    set PI($P,csafe) $csafe; set PI($P,csafe1) $csafe1; set PI($P,ysafe) [expr {$yres && !$hasYield}]; set PI($P,yres) [expr {$yres && $hasYield}]; set PI($P,hasYield) $hasYield; set PI($P,bins) [lsort -unique $bins]
     foreach {cpc cnm} [array get cmdAt] { set PI($P,cmdAt,$cpc) $cnm }
     set PI($P,callees) [lsort -unique $callees]; set PI($P,pure) $pure; set PI($P,mustBoxNamed) [lsort -unique $mustBoxNamed]
     set PI($P,args) $args; set PI($P,nargs) $nargs; set PI($P,vnames) $vnames; set PI($P,lits) [dict get $bc literals]
@@ -1191,15 +1194,23 @@ while {$pruned} {
     }
 }
 foreach P $translatable { set PI($P,pure) [expr {$P in $pureProcs}] }
-# caller-safe procs: caller-safe themselves, and every proc they call is translated and caller-safe
-set csafeProcs [lmap P $translatable {expr {$PI($P,csafe) ? $P : [continue]}}]
+# procs that reach no frame but their own and their caller's (csafe1): caller-safe but for `upvar` of level 1, and every proc they call is in the set
+set csafe1Procs [lmap P $translatable {expr {$PI($P,csafe1) ? $P : [continue]}}]
 set pruned 1
 while {$pruned} {
     set pruned 0
-    foreach P $csafeProcs {
+    foreach P $csafe1Procs {
         foreach c $PI($P,callees) {
-            if {$c ni $csafeProcs} { set csafeProcs [lsearch -all -inline -not -exact $csafeProcs $P]; set pruned 1; break }
+            if {$c ni $csafe1Procs} { set csafe1Procs [lsearch -all -inline -not -exact $csafe1Procs $P]; set pruned 1; break }
         }
+    }
+}
+# caller-safe procs: caller-safe themselves, and every proc they call is translated and reaches at most the frame of its caller (which is this proc's own: a callee that
+# links to variables of its caller by `upvar 1` cannot reach the variables of the caller of this proc, decision 77)
+set csafeProcs [lmap P $translatable {expr {$PI($P,csafe) ? $P : [continue]}}]
+foreach P $csafeProcs {
+    foreach c $PI($P,callees) {
+        if {$c ni $csafe1Procs} { set csafeProcs [lsearch -all -inline -not -exact $csafeProcs $P]; break }
     }
 }
 # yield-safe procs: yield-safe themselves, and every proc they call is translated and yield-safe
@@ -2053,6 +2064,16 @@ proc stepT0 {key pc in} {
             if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v B]]] }
             set st [lreplace $in $top $top B]
             return [R fall $st "[boxc $P $top $e] if (tbc_lappend(interp, &l$v, s$top)) goto [fl $key $st]; Tcl_DecrRefCount(s$top); s$top = l$v; Tcl_IncrRefCount(s$top);" stores [list [list $v B]]]
+        }
+        lappendList {
+            # `lappend var a b c`: the words made into a list (list 3), then its elements appended to the local's list (decision 77)
+            set v [operand [lindex $a 0]]
+            set e [lindex $in $top]
+            if {[kd $e] in {A N M Q}} { return $dead }
+            if {[kap $key $v] ni {B -}} { return [R dead {} "goto D$pc;" stores [list [list $v B]]] }
+            if {[kd $e] eq "U"} { return [R fall [lreplace $in $top $top U] "" stores [list [list $v B]]] }
+            set st [lreplace $in $top $top B]
+            return [R fall $st "[boxc $P $top $e] if (tbc_lappendl(interp, &l$v, s$top)) goto [fl $key $st]; Tcl_DecrRefCount(s$top); s$top = l$v; Tcl_IncrRefCount(s$top);" stores [list [list $v B]]]
         }
         dictExists {
             if {[lindex $a 0] != 1} { return $dead }
@@ -3802,7 +3823,7 @@ set tbcInlineOps {nop startCommand push1 push4 pop dup over reverse add sub mult
     lsetFlat listRangeImm listIn listNotIn dictGet dictExists dictIncrImm verifyDict dictFirst dictNext tryCvtToNumeric jumpTable regexp returnImm syntax returnStk
     returnCodeBranch pushResult pushReturnCode pushReturnOpts break continue beginCatch4 endCatch infoLevelNumber infoLevelArgs currentNamespace expandStart expandStkTop
     expandDrop lmap_collect}
-set tbcVarOps {loadScalar1 loadScalar4 storeScalar1 storeScalar4 incrScalar1 incrScalar1Imm appendScalar1 appendScalar4 lappendScalar1 lappendScalar4 existScalar loadArray1
+set tbcVarOps {loadScalar1 loadScalar4 storeScalar1 storeScalar4 incrScalar1 incrScalar1Imm appendScalar1 appendScalar4 lappendScalar1 lappendScalar4 lappendList existScalar loadArray1
     loadArray4 storeArray1 storeArray4 incrArray1 incrArray1Imm appendArray1 appendArray4 lappendArray1 lappendArray4 existArray foreach_start foreach_step foreach_end}
 proc reenters {P pc {vars 0}} {
     global PI pureProcs
@@ -4916,6 +4937,25 @@ proc emitG {P} {
 proc rettype {rk} { if {[string match Y:* $rk]} { return tbc_Y_[ykinds $rk] }; ctype [expr {$rk in {- U} ? "B" : $rk}] }
 
 # the instructions after the yields of P at which the generic variant `key` has a typed state
+# Is variable v (a local, by index) used or assigned by an instruction that can be reached from pc (itself included)?  (conservative: an instruction that cannot be analysed counts)
+proc refAfter {P pc v} {
+    global PI
+    set key $P,refAfter,$pc
+    if {![info exists ::REFAFTER($key)]} {
+        set seen [dict create $pc 1]; set todo [list $pc]; set refs {}
+        while {[llength $todo]} {
+            set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
+            lassign $PI($P,ins,$c) op a
+            if {[catch {usedef $op $a} ud]} { set ::REFAFTER($key) all; break }
+            foreach x [concat {*}[lrange $ud 0 1]] { lappend refs $x }
+            if {[lindex $ud 2] eq "special"} { set ::REFAFTER($key) all; break }
+            foreach t $PI($P,succ,$c) { if {![dict exists $seen $t]} { dict set seen $t 1; lappend todo $t } }
+        }
+        if {![info exists ::REFAFTER($key)]} { set ::REFAFTER($key) [lsort -integer -unique $refs] }
+    }
+    set r $::REFAFTER($key)
+    return [expr {$r eq "all" || $v in $r}]
+}
 proc resumePoints {key} {
     global VK PI
     lassign [keysplit $key] P sig
@@ -4938,7 +4978,15 @@ proc resumePoints {key} {
             if {$inner} continue
             set ok 1
             foreach e $VK($key,in,$pc) { if {[kd $e] ni {I D B T}} { set ok 0; break } }
-            foreach v $PI($P,may,$pc) { if {[dict get $kap $v] ni {I D B F W}} { set ok 0; break } }
+            foreach v $PI($P,may,$pc) {
+                switch [dict get $kap $v] {
+                    I - D - B - F - W {}
+                    A {}
+                    R { if {[refAfter $P $pc $v]} { set ok 0; break } }
+                    default { set ok 0; break }
+                }
+            }
+            # (an array kept in a table, assigned on no path to the head and used after it: the frame must hold no such array then, see resumePrologue)
             if {$ok} { lappend pts $pc }
         }
     }
@@ -4988,6 +5036,8 @@ proc resumePrologue {key} {
                 append chk "    \{ Var *vp_ = &loc_\[$v\]; if (TBC_UNLIKELY((vp_->flags & VAR_LINK) && vp_->value.linkPtr >= loc_ && vp_->value.linkPtr < loc_ + [llength $PI($P,vnames)])) goto giveup; \}\n"
                 continue
             }
+            # (a table array assigned before the head and not used after it: typed code never looks at it, and what the frame holds stays as it is)
+            if {$k eq "R"} { continue }
             append chk "    \{ Var *vp_ = &loc_\[$v\]; if (TBC_UNLIKELY(vp_->flags & (VAR_ARRAY | VAR_LINK | VAR_TRACED_READ | VAR_TRACED_WRITE | VAR_TRACED_UNSET | VAR_TRACE_ACTIVE))) goto giveup;"
             switch $k {
                 I - D {
@@ -5010,8 +5060,18 @@ proc resumePrologue {key} {
                     append chk " \}\n"
                     append ld "    \{ Var *vp_ = &loc_\[$v\]; if (vp_->value.objPtr) \{ l$v = vp_->value.objPtr; Tcl_IncrRefCount(l$v); \} \}\n"
                 }
+                A {
+                    # (a list of integers that typed code holds as a vector: the frame must hold such a list, in canonical form; it is taken into the vector once every check has passed)
+                    append chk " if (!vp_->value.objPtr || !tbc_ivec_check(vp_->value.objPtr)) goto giveup; \}\n"
+                    append ld "    tbc_ivec_import(&av$v, loc_\[$v\].value.objPtr);\n"
+                }
                 default { append chk " goto giveup; \}\n" }
             }
+        }
+        # (a table array that no path to the head assigned but that is used after it: its frame variable must be unset, as it is when typed code starts a call)
+        foreach v $PI($P,rvars) {
+            if {$v in $PI($P,may,$nx) || ![refAfter $P $nx $v]} continue
+            append chk "    \{ Var *vp_ = &loc_\[$v\]; if (TBC_UNLIKELY(vp_->value.objPtr || (vp_->flags & (VAR_ARRAY | VAR_LINK | VAR_TRACED_READ | VAR_TRACED_WRITE | VAR_TRACED_UNSET | VAR_TRACE_ACTIVE)))) goto giveup; \}\n"
         }
         for {set p 0} {$p < [llength $st]} {incr p} {
             set e [lindex $st $p]
