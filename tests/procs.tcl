@@ -2553,3 +2553,19 @@ proc ls_idx {l} { return [lsort -index 1 $l] }
 proc ls_var {l a} { set x 0; set r [lsort -integer $l]; return [list $r $x] }
 proc ls_err {l} { return [catch {lsort -integer $l} m] }
 proc ls_pure {l} { set k 5; set r [lsort -real $l]; return [list $k $r] }
+
+# decision 75: a double literal in arithmetic is a double operand whatever its text (`6.36619772367581382433e-01` is not what Tcl prints, `1e3`, `.5`, `2.`, `2.50`):
+# products, quotients, comparisons, errors, the tagged-number policy with objects (dl_*)
+proc dl_mult {x} { return [expr {$x * 6.36619772367581382433e-01 + 0.5}] }
+proc dl_floor {x} { return [expr {floor($x * 6.36619772367581382433e-01 + 0.5)}] }
+proc dl_mix {x} { return [expr {($x * 0.5 + 1e3) / 2.0 - -2. + .5 - 2.50}] }
+proc dl_cmp {x} { if {$x * 1e3 > 2.5} { return big }; if {$x < 0.1e1} { return mid }; if {$x == 2.} { return two }; return small }
+proc dl_div {x} { return [expr {$x / 0.5 + 1 / 4.}] }
+proc dl_zero {x} { return [expr {$x / 0.0}] }
+proc dl_mod {x} { return [expr {$x % 2.0}] }
+proc dl_big {x} { return [expr {$x * 1e308 * 10.0}] }
+proc dl_neg {x} { return [expr {-$x * -0.5 + -1e-3}] }
+proc dl_text {x} { return [list [expr {$x * 2.}] 1e3 [expr {$x == 1e3}]] }
+proc dl_w {a b} { return [expr {floor($a * 6.36619772367581382433e-01 + $b * 1e-3)}] }
+proc dl_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $i * 0.5 - 1e-3 * $i + 6.36619772367581382433e-01}] }; return $s }
+proc dl_drive {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [dl_mult [expr {$i * 0.5}]] + [dl_floor [expr {$i * 0.25}]] + [dl_mix $i] + [dl_w $i 0.5]}] }; return $s }

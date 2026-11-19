@@ -696,6 +696,14 @@ foreach a $wlv {
     }
 }
 foreach l {{1 2 3 4} {0.5 1.5 2.5 3.5} {1 2.5 3 4.5} {a b c d} {1 2} {} {9223372036854775807 1 2 3}} { foreach i {0 1 2 5 -1} { foreach x {2 0.5 abc} { lappend calls [list wl_lidx $l $i $x] } } }
+# decision 75: double literals in arithmetic (dl_*): every operation on every kind of value, the literal texts that are not what Tcl prints, errors, the W policy with objects
+set dlv {0 1 -1 2 2.5 -2.5 1e3 .5 abc {} 9223372036854775807 -9223372036854775808 1e308 1e-320 -0.0 Inf 0x10 123456789012345678901234567890 2.50 1.}
+foreach a $dlv {
+    lappend calls [list dl_mult $a] [list dl_floor $a] [list dl_mix $a] [list dl_cmp $a] [list dl_div $a] [list dl_zero $a] [list dl_mod $a] [list dl_big $a] [list dl_neg $a] [list dl_text $a]
+    foreach b {0 1 0.5 -2 abc 1e3 2.50 9223372036854775807} { lappend calls [list dl_w $a $b] }
+}
+foreach n {0 1 5 100 1000} { lappend calls [list dl_loop $n] }
+lappend calls {dl_loop 2.5} {dl_loop {}}   ;# not `abc`: `$i < abc` compares as strings and every integer sorts before a letter, so that loop never ends (in the interpreter too)
 # decision 71: lappend and append on variables of the frame (lf_*): values of every kind, shared lists, a variable that is missing, an array, not a list, with read and write traces
 lappend calls {lf_reset}
 foreach v {5 2.5 abc {} {a b} {a {b c}} 0x10 "x\{y"} {

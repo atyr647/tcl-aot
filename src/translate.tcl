@@ -229,6 +229,14 @@ proc c_dbl {s} {
     if {![regexp {[.eEn]} $t]} { append t .0 }
     return $t
 }
+# decision 75: the C constant of a literal whose text is a plain decimal double (`0.5`, `1e3`, `6.36619772367581382433e-01`, `-2.`) and finite, which is the value
+# `expr` reads from the text; "" for anything else (integers, hex, inf, nan, underscores, text, overflow).  Only the operations read it: the literal keeps its text.
+proc dblLitC {s} {
+    if {![regexp {^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$} $s] || ![regexp {[.eE]} $s]} { return "" }
+    if {[catch {expr {double($s)}} v]} { return "" }
+    if {$v != $v || $v == Inf || $v == -Inf} { return "" }
+    return "([c_dbl $s])"
+}
 
 # the C constant of a double literal: the value of the object when the compiler made it (litd), else the value of its text
 proc litdbl {P n} {
@@ -3012,6 +3020,9 @@ proc operandOf {P pc p e} {
                 set iv [expr {$lit + 0}]
                 if {$iv >= -9223372036854775808 && $iv <= 9223372036854775807} { return [list I "" [c_int $iv]] }
             }
+            # a double literal is a D operand (decision 75): its text stays in the literal table for the boxed code
+            set dc [dblLitC $lit]
+            if {$dc ne ""} { return [list D "" $dc] }
             return [list X "" ""]
         }
         default { return [list X "" ""] }
@@ -3037,8 +3048,13 @@ proc stepArithW {P pc op in d} {
             }
             L {
                 lassign [operandOf $P $pc $p $e] cl gl xl
-                if {$cl ne "I"} { return [R dead {} "goto D$pc;"] }
-                set T($tag) 0; set IV($tag) $xl; set DV($tag) "((double) ($xl))"
+                if {$cl eq "D"} {
+                    # a double literal (decision 75): a double with its constant
+                    set T($tag) 1; set IV($tag) 0; set DV($tag) $xl
+                } else {
+                    if {$cl ne "I"} { return [R dead {} "goto D$pc;"] }
+                    set T($tag) 0; set IV($tag) $xl; set DV($tag) "((double) ($xl))"
+                }
             }
             U { return [R fall [list {*}$base U] ""] }
             default { return [R dead {} "goto D$pc;"] }
@@ -3221,7 +3237,8 @@ proc stepUnary {P pc op in d} {
             uplus { return [R fall [list {*}$base I] "\{ int64_t r_; $ga r_ = $xa;$rel si$p = r_; \}"] }
         }
     }
-    # a double
+    # a double (a double literal has its constant in $xa, not in the slot: the code below reads the slot, so it is not typed here, decision 75)
+    if {[kd $e] eq "L"} { return [R dead {} "goto D$pc;"] }
     switch $op {
         uminus { return [R fall [list {*}$base D] "sd$p = -sd$p;"] }
         not { return [R fall [list {*}$base I] "\{ int64_t r_; if (TBC_UNLIKELY(sd$p != sd$p)) goto D$pc; r_ = (sd$p == 0.0); si$p = r_; \}"] }
