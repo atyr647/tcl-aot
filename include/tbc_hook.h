@@ -1600,6 +1600,50 @@ static Var *tbc_nv_slow(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *
     s->ip = ip; s->epoch = tbc_nv_epoch;
     return o;
 }
+/* A call from typed code to a proc that its caller reaches through `namespace import` (decision 73).  The direct call goes to the origin proc; this record says
+ * that the word the caller wrote, looked up from the caller's namespace, still gives the import of that proc.  It holds the import's Command (a reference, so the
+ * pointer is never another command's) and the namespace's epochs, the checks Tcl makes for its own cached command names: the import deleted or renamed
+ * (CMD_IS_DELETED, cmdEpoch), a command made that shadows a global one, a path or resolver change (nsId, cmdRefEpoch, resolverEpoch).  Anything else is the slow
+ * path, which looks the word up again from the namespace; when it does not give the origin the call is made the ordinary way, by name. */
+typedef struct {
+    const char *word, *ns, *origin;
+    Interp *ip; unsigned epoch;
+    Namespace *nsp; Command *imp;
+    long nsid; int cre, rse, impEp;
+} TbcAlias;
+static int tbc_alias_slow(Tcl_Interp *interp, TbcAlias *a) {
+    Interp *ip = (Interp *) interp;
+    Namespace *ns;
+    Command *f, *t, *o;
+    if (a->ip != ip || a->epoch != tbc_nv_epoch) {
+        if (tbc_nv_ip != ip) { Tcl_CallWhenDeleted(interp, tbc_nv_gone, NULL); tbc_nv_ip = ip; tbc_nv_epoch++; }
+        a->ip = ip; a->epoch = tbc_nv_epoch; a->nsp = NULL; a->imp = NULL;
+    }
+    if (a->imp) { Command *old = a->imp; a->imp = NULL; if (--old->refCount <= 0) ckfree(old); }
+    if (ip->resolverPtr || ip->globalNsPtr->cmdResProc) return 0;
+    if (!a->nsp) {
+        Namespace *n = (Namespace *) Tcl_FindNamespace(interp, a->ns, NULL, 0);
+        if (!n) return 0;
+        n->refCount++; a->nsp = n;
+    }
+    ns = a->nsp;
+    if ((ns->flags & NS_DEAD) || ns->cmdResProc) return 0;
+    f = (Command *) Tcl_FindCommand(interp, a->word, (Tcl_Namespace *) ns, 0);
+    t = (Command *) Tcl_FindCommand(interp, a->origin, NULL, TCL_GLOBAL_ONLY);
+    if (!f || !t || (f->flags & CMD_IS_DELETED)) return 0;
+    for (o = f; ; ) { Command *x = (Command *) TclGetOriginalCommand((Tcl_Command) o); if (!x) break; o = x; }
+    if (o != t) return 0;
+    f->refCount++; a->imp = f; a->impEp = f->cmdEpoch;
+    a->nsid = ns->nsId; a->cre = ns->cmdRefEpoch; a->rse = ns->resolverEpoch;
+    return 1;
+}
+TBC_INLINE int tbc_alias_ok(Tcl_Interp *interp, TbcAlias *a) {
+    Namespace *ns = a->nsp;
+    Command *c = a->imp;
+    if (TBC_LIKELY(c && a->ip == (Interp *) interp && a->epoch == tbc_nv_epoch && ns->nsId == a->nsid && ns->cmdRefEpoch == a->cre && ns->resolverEpoch == a->rse
+            && c->cmdEpoch == a->impEp && !(c->flags & CMD_IS_DELETED))) return 1;
+    return tbc_alias_slow(interp, a);
+}
 /* the namespace variable of the site, or NULL (the caller hands over) */
 TBC_INLINE Var *tbc_nv_get(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *nsname, Tcl_Obj *level, Tcl_Obj *name) {
     Var *v = s->var;

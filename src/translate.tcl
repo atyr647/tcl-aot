@@ -155,9 +155,42 @@ proc candidates {ns nm} {
 # the proc a command word resolves to (the first candidate that exists), or "" when it is not a proc / unknown
 proc resolveProc {ns nm} {
     foreach c [candidates $ns $nm] {
-        if {[llength [info commands [globEsc $c]]]} { return [expr {[llength [info procs [globEsc $c]]] ? [string map {::::: ::} $c] : ""}] }
+        if {[llength [info commands [globEsc $c]]]} {
+            set c [string map {::::: ::} $c]
+            # a command made by `namespace import` is the proc it imports (decision 73; the run-time check is the call site's TbcAlias)
+            set o [namespace origin $c]
+            if {$o ne $c && [string trimleft $o :] ne [string trimleft $c :]} { set c $o }
+            return [expr {[llength [info procs [globEsc $c]]] ? $c : ""}]
+        }
     }
     return ""
+}
+# `lsort ?option...? list` whose options are all literal words that run no script and take no argument (decision 74: `-command` runs a script, `-index` and `-stride`
+# take one, and anything not literal could be any of them): such a call reads its list and nothing else
+proc lsortPure {optWords} {
+    foreach w $optWords { if {$w ni {-ascii -dictionary -integer -real -increasing -decreasing -unique -nocase}} { return 0 } }
+    return 1
+}
+# the import a command word is, when the first command it names is one (a call to it is a call of the origin: decision 73)
+proc importAlias {ns nm} {
+    foreach c [candidates $ns $nm] {
+        if {[llength [info commands [globEsc $c]]]} {
+            set c [string map {::::: ::} $c]
+            set o [namespace origin $c]
+            if {$o eq $c || [string trimleft $o :] eq [string trimleft $c :]} { return "" }
+            return $o
+        }
+    }
+    return ""
+}
+set ALIASES {}
+proc aliasCheck {ns nm0 nm} {
+    global ALIASES
+    set o [importAlias $ns $nm0]
+    if {$o eq ""} { return "" }
+    set key [list $nm0 $ns $nm]
+    if {![dict exists $ALIASES $key]} { dict set ALIASES $key [dict size $ALIASES] }
+    return " || !tbc_alias_ok(interp, &tbc_al_[dict get $ALIASES $key])"
 }
 proc keysplit {key} { set i [string last / $key]; list [string range $key 0 [expr {$i-1}]] [string range $key [expr {$i+1}] end] }
 proc refuse {why} { return -code error -errorcode TBC_REFUSED $why }
@@ -630,7 +663,11 @@ proc prepare {P} {
                     lappend callees $callee
                 } else {
                     set bn [string trimleft $nm :]
-                    if {[string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins || $bn in $::tbcChanBuiltins || ([dict exists $::tbcChanArity $bn] && [dict get $::tbcChanArity $bn] == $n) || ([dict exists $::tbcPureArity $bn] && [dict get $::tbcPureArity $bn] == $n)} {
+                    set lsortOK 0
+                    if {$bn eq "lsort" && $n >= 2} {
+                        set lsortOK [lsortPure [lmap e [lrange $st [expr {$q+1}] end-1] {expr {$e eq "-" ? "-" : [lindex [dict get $bc literals] $e]}}]]
+                    }
+                    if {$lsortOK || [string match tcl::array::* $bn] || [string match tcl::string::* $bn] || [string match tcl::list::* $bn] || [isMathBuiltin $bn] || $bn in $::tbcOwnFrameBuiltins || $bn in $::tbcPureBuiltins || $bn in $::tbcChanBuiltins || ([dict exists $::tbcChanArity $bn] && [dict get $::tbcChanArity $bn] == $n) || ([dict exists $::tbcPureArity $bn] && [dict get $::tbcPureArity $bn] == $n)} {
                         # (stays in its own frame, runs no script)
                         if {(![isMathBuiltin $bn] && ![string match tcl::mathfunc::* $bn]) || [regexp {^tcl::mathfunc::s?rand$} $bn]} { lappend bins $nm }
                     } elseif {[regexp {^tcl::dict::(\w+)$} $bn -> dsub] && $dsub in {size keys values get exists create merge replace remove}} {
@@ -646,7 +683,7 @@ proc prepare {P} {
                         # the string ensemble's own implementations and the math functions never use the caller's variables
                     } elseif {$b eq "dict"} {
                         if {$sub ni {size keys values get exists create merge replace remove}} { set pure 0; set pureL 0 }
-                    } elseif {$b ni $::tbcPureBuiltins && !([dict exists $::tbcPureArity $b] && [dict get $::tbcPureArity $b] == $n)} {
+                    } elseif {!$lsortOK && $b ni $::tbcPureBuiltins && !([dict exists $::tbcPureArity $b] && [dict get $::tbcPureArity $b] == $n)} {
                         # (`scan $s $fmt` with no variable names returns what it scanned and sets nothing: pure, as `format` is)
                         set pure 0; set pureL 0
                     }
@@ -3269,7 +3306,7 @@ proc stepInvoke {key pc in d n} {
         }
         if {!$hasVec && $nm ne "" && $PI($nm,argsIdx) < 0 && $omitted ne "fail" && [llength $args] + [llength $omitted] == $PI($nm,nargs)} {
             if {"U" in [lmap e $args {kd $e}]} { return [R fall [list {*}$below U] ""] }
-            set csig ""; set cargs {}
+            set csig ""; set cargs {}; set wbox ""; set wrel ""
             set pos [expr {$q+1}]
             foreach e $args {
                 switch [kd $e] {
@@ -3277,6 +3314,7 @@ proc stepInvoke {key pc in d n} {
                     D { append csig D; lappend cargs sd$pos }
                     B { append csig B; lappend cargs s$pos }
                     L { append csig B; lappend cargs L_[cident $P]_[lt $e] }
+                    W { append csig B; lappend cargs bw$pos; append wbox "Tcl_Obj *bw$pos = (sw$pos ? tbc_newdbl(sd$pos) : tbc_newint(si$pos)); "; append wrel " Tcl_DecrRefCount(bw$pos);" }
                 }
                 incr pos
             }
@@ -3300,7 +3338,7 @@ proc stepInvoke {key pc in d n} {
                 set rtype tbc_Y_$yK
                 if {$aware} { set rvar [yvar $q $yK]; set asg "$rvar = r_;" } else { set asg "s$q = tbc_ylist_${yK}(&r_);"; set outk B }
             }
-            set c "if (TBC_UNLIKELY(!tbc_valid_$cid[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}])) \{ tbc_st = 3; goto C$pc; \} \{ $rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]); if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $asg \}"
+            set c "if (TBC_UNLIKELY(!tbc_valid_$cid[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}][aliasCheck $ns $nm0 $nm])) \{ tbc_st = 3; goto C$pc; \} \{ $wbox$rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]);$wrel if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $asg \}"
             # post-call stub: error, or a boxed result because the callee fell back to its generic code
             set nextpc $PI($P,next,$pc)
             # a callee that had to leave typed mode reports it (tbc_st 3): the call is then made the ordinary way, with boxed arguments
@@ -3312,6 +3350,7 @@ proc stepInvoke {key pc in d n} {
                     D { append ov " ov_\[$j\] = tbc_newdbl(sd$pos);" }
                     B { append ov " ov_\[$j\] = s$pos; Tcl_IncrRefCount(ov_\[$j\]);" }
                     L { append ov " ov_\[$j\] = L_[cident $P]_[lt $e]; Tcl_IncrRefCount(ov_\[$j\]);" }
+                    W { append ov " ov_\[$j\] = (sw$pos ? tbc_newdbl(sd$pos) : tbc_newint(si$pos));" }
                 }
                 incr j; incr pos
             }
@@ -3375,7 +3414,8 @@ proc stepInvoke {key pc in d n} {
     }
     set sub [expr {[llength $args] ? [expr {[kd [lindex $args 0]] eq "L" ? [lindex $PI($P,lits) [lt [lindex $args 0]]] : "-"}] : "-"}]
     set nmt [string trimleft $nm0 :]
-    if {![pureBuiltin $nm0 $sub] && !([dict exists $::tbcPureArity $nmt] && [dict get $::tbcPureArity $nmt] == $n) && !([dict exists $::tbcChanArity $nmt] && [dict get $::tbcChanArity $nmt] == $n)} { return $dead }
+    set isLsort [expr {$nmt eq "lsort" && [llength $args] >= 1 && [lsortPure [lmap e [lrange $args 0 end-1] {expr {[kd $e] eq "L" ? [lindex $PI($P,lits) [lt $e]] : "-"}}]]}]
+    if {!$isLsort && ![pureBuiltin $nm0 $sub] && !([dict exists $::tbcPureArity $nmt] && [dict get $::tbcPureArity $nmt] == $n) && !([dict exists $::tbcChanArity $nmt] && [dict get $::tbcChanArity $nmt] == $n)} { return $dead }
     foreach e $args { if {[kd $e] in {A N M Q}} { return $dead } }
     set pre ""; set slots {}; set rel ""
     for {set k $q} {$k < $d} {incr k} {
@@ -5411,6 +5451,11 @@ set ytext ""
 foreach {yall yk} [regexp -all -inline {tbc_Y_([IDW]+)} $out] { dict set ytypes $yk 1 }
 if {[info exists ytypes]} { foreach yk [lsort [dict keys $ytypes]] { append ytext [ydefs $yk] } }
 set dcDecl ""; set dcExtern ""; set dcDef ""
+dict for {key id} $ALIASES {
+    lassign $key w n o
+    set init "{ [cstring $w], [cstring $n], [cstring $o] }"
+    append dcDecl "static TbcAlias tbc_al_$id = $init;\n"; append dcExtern "extern TbcAlias tbc_al_$id;\n"; append dcDef "TbcAlias tbc_al_$id = $init;\n"
+}
 dict for {nm id} $DCNAMES { append dcDecl "static Command *tbc_$id;\n"; append dcExtern "extern Command *tbc_$id;\n"; append dcDef "Command *tbc_$id;\n" }
 if {$splitN > 0} {
     # the same code in several files: what is shared between them has external linkage and is declared in a header; the typed code and the boxed code are

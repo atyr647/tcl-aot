@@ -2525,3 +2525,31 @@ proc yt_obj_use {l} { lassign [yt_obj $l] a b; return [list $a $b] }
 proc yt_mixed_use {f} { lassign [yt_mixed $f] a b; return [list $a $b] }
 proc yt_ovf {a b} { return [list [expr {$a * $b}] [expr {$a + $b}]] }
 proc yt_ovf_use {a b} { lassign [yt_ovf $a $b] p q; return [list $p $q] }
+
+# decision 73: calls of procs that the caller reaches through `namespace import` (im_*), also from the tcl::mathfunc namespace of the caller; decision 74: lsort with
+# literal options that run no script is a pure built-in (ls_*)
+namespace eval ::imx { namespace export im_sq im_pair im_sum im_mf }
+proc ::imx::im_sq {x} { return [expr {$x * $x + 0.5}] }
+proc ::imx::im_pair {x} { return [list $x [expr {$x * 2.5}]] }
+proc ::imx::im_sum {x y} { return [expr {$x + $y}] }
+proc ::imx::im_mf {x} { return [expr {$x * 3.0 - 1.0}] }
+# (tests/report.tcl sources this file with `string` hidden, and `namespace import` needs it: no imports then; that test does not call these procs)
+namespace eval ::imu::tcl::mathfunc {}
+if {[llength [info commands string]]} {
+    namespace eval ::imu { namespace import ::imx::im_sq ::imx::im_pair ::imx::im_sum }
+    namespace eval ::imu::tcl::mathfunc { namespace import ::imx::im_mf }
+}
+proc ::imu::im_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { lassign [im_pair $i] a b; set s [im_sum $s [expr {[im_sq $a] + $b}]] }; return $s }
+proc ::imu::im_one {x} { return [im_sq $x] }
+proc ::imu::im_abs {x} { return [::imx::im_sq $x] }
+proc ::imu::im_fn {x} { return [expr {im_mf($x) + sqrt(abs($x))}] }
+proc ::imu::im_fnloop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + im_mf($i) * 0.5}] }; return $s }
+proc ls_ints {l} { return [lsort -integer -unique $l] }
+proc ls_loop {n} { set t 0; for {set i 0} {$i < $n} {incr i} { set l {}; for {set j 0} {$j < 5} {incr j} { lappend l [expr {($i * 7 + $j * 3) % 11}] }; incr t [llength [lsort -integer -unique $l]]; incr t [lindex [lsort -integer -decreasing $l] 0] }; return $t }
+proc ls_opts {l f} { return [lsort $f $l] }
+proc ls_dict {l} { return [lsort -dictionary -nocase $l] }
+proc ls_cmd {l} { return [lsort -command {string compare} $l] }
+proc ls_idx {l} { return [lsort -index 1 $l] }
+proc ls_var {l a} { set x 0; set r [lsort -integer $l]; return [list $r $x] }
+proc ls_err {l} { return [catch {lsort -integer $l} m] }
+proc ls_pure {l} { set k 5; set r [lsort -real $l]; return [list $k $r] }

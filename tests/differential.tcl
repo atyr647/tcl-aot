@@ -717,6 +717,25 @@ foreach x $ytv {
 foreach n {0 1 2 5 12} { lappend calls [list yt_loop $n] }
 foreach n {0 1 2 5 30 -3 2.5 abc} { lappend calls [list yt_rec $n] }
 foreach l {{1 2} {1.5 2.5} {a b} {1} {} {0x10 0.5} {{1 2} 3}} { lappend calls [list yt_obj $l] [list yt_obj_use $l] }
+# decisions 73 and 74: calls through an import (the import deleted, redefined, replaced by a proc, forgotten; the origin redefined and renamed) and lsort with options
+foreach n {0 1 5 40} { lappend calls [list ::imu::im_loop $n] [list ::imu::im_fnloop $n] }
+foreach x {0 1 2.5 -3 abc 0x10 {}} { lappend calls [list ::imu::im_one $x] [list ::imu::im_abs $x] [list ::imu::im_fn $x] }
+lappend calls {rename ::imu::im_sq ""} {catch {::imu::im_one 3} m; set m} {catch {::imu::im_loop 3} m; set m} {::imu::im_abs 3}
+lappend calls {namespace eval ::imu { namespace import ::imx::im_sq }} {::imu::im_one 3} {::imu::im_loop 4}
+lappend calls {proc ::imu::im_sq {x} { return shadow$x }} {::imu::im_one 3} {catch {::imu::im_loop 3} m; set m}
+lappend calls {rename ::imu::im_sq ""} {namespace eval ::imu { namespace import ::imx::im_sq }} {::imu::im_one 4} {::imu::im_loop 4}
+lappend calls {proc ::imx::im_sq {x} { return [expr {$x + 100.0}] }} {::imu::im_one 3} {::imu::im_loop 5} {::imu::im_abs 3}
+lappend calls {rename ::imx::im_sq ::imx::im_sq2} {::imu::im_one 3} {::imu::im_loop 5} {rename ::imx::im_sq2 ::imx::im_sq} {::imu::im_one 3}
+lappend calls {namespace eval ::imu { namespace forget im_sum }} {catch {::imu::im_loop 3} m; set m} {namespace eval ::imu { namespace import ::imx::im_sum }} {::imu::im_loop 3}
+lappend calls {proc ::imu::im_sum {x y} { return [expr {$x + $y + 1000.0}] }} {::imu::im_loop 3} {rename ::imu::im_sum ""} {namespace eval ::imu { namespace import ::imx::im_sum }} {::imu::im_loop 3}
+lappend calls {proc ::imx::im_mf {x} { return [expr {$x - 100.0}] }} {::imu::im_fn 2} {::imu::im_fnloop 4} {rename ::imu::tcl::mathfunc::im_mf ""} {catch {::imu::im_fn 2} m; set m}
+foreach l {{3 1 2} {5 5 1 1} {} {10 9 8 7 100} {1 a 2} {0x10 3} {1.5 2} {-1 -5 -5 0}} {
+    lappend calls [list ls_ints $l] [list ls_dict $l] [list ls_cmd $l] [list ls_err $l] [list ls_pure $l] [list ls_var $l 1]
+    foreach f {-ascii -integer -real -dictionary -decreasing -unique -nocase -bogus} { lappend calls [list ls_opts $l $f] }
+}
+lappend calls {ls_idx {{a 3} {b 1} {c 2}}} {ls_idx {{a 3} {b 1 x} c}}
+foreach n {0 1 2 7 30} { lappend calls [list ls_loop $n] }
+lappend calls {rename lsort lsort_orig} {proc lsort {args} { uplevel 1 {set k 99}; return LS }} {ls_pure {2 1}} {ls_loop 3} {rename lsort ""} {rename lsort_orig lsort} {ls_pure {2 1}}
 # lindex with several indices (lx_*)
 set lxm [list {{a b c} {d e f} {g h i}} {{1 2} {3 4}} {} "a \{b" {{1 {2 3}} {4 5}} {a b c} 5 {{x y} {} {z}} "\{a b\} \{c"]
 set lxi {0 1 2 -1 5 end end-1 1+1 0x1 a " 1" 1.5 {} {1 2} 9223372036854775807}
