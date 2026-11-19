@@ -1048,6 +1048,34 @@ static Tcl_Obj *tbc_bscan(Tcl_Obj *data, int type, int uns) {
     if (size == 1) for (i = 0; i < 256; i++) if (small[i]) Tcl_DecrRefCount(small[i]);
     return res;
 }
+/* `binary scan $data f var` and `binary scan $data f* var` (decision 76): ScanNumber's 'f' (a native float of 4 bytes, widened to a double).  The first form takes the
+ * first 4 bytes: 0 when there are fewer (the scan then sets nothing and returns 0: typed code hands over).  The second is the list of every whole float in the data
+ * (none: the empty object), refcount 0, bytes that do not make a whole float ignored. */
+static int tbc_bscan_f(Tcl_Obj *data, double *out) {
+    int len;
+    float f;
+    const unsigned char *b = Tcl_GetByteArrayFromObj(data, &len);
+    if (len < 4) return 0;
+    memcpy(&f, b, sizeof f);
+    *out = (double) f;
+    return 1;
+}
+static Tcl_Obj *tbc_bscan_fl(Tcl_Obj *data) {
+    int len, n, i;
+    const unsigned char *b = Tcl_GetByteArrayFromObj(data, &len);
+    Tcl_Obj *res, **el;
+    n = len / 4;
+    if (n == 0) return Tcl_NewObj();
+    el = (Tcl_Obj **) ckalloc((size_t) n * sizeof(Tcl_Obj *));
+    for (i = 0; i < n; i++) {
+        float f;
+        memcpy(&f, b + (size_t) i * 4, sizeof f);
+        el[i] = Tcl_NewDoubleObj((double) f);
+    }
+    res = Tcl_NewListObj(n, el);
+    ckfree((char *) el);
+    return res;
+}
 TBC_INLINE Tcl_Obj *tbc_newdbl(double d) { Tcl_Obj *o = Tcl_NewDoubleObj(d); Tcl_IncrRefCount(o); return o; }
 /* A number stored in a local that holds an object (a variable that is a number on some paths and something else on others).  When the object is a number of the same
  * kind that nothing else refers to (its only reference is the local's) and it has no string form, the new value is written into it: nothing can see the object, and an

@@ -88,6 +88,8 @@ set tbcChanArity {gets 2}
 # built-ins that work on the variables of the frame they run in, and nothing else
 # the formats of `binary scan` typed code does itself: one of c s S i I, an optional u, and *
 set tbcScanFmt {^([cisSI])(u?)\*$}
+# decision 76: and `f` and `f*` (native floats)
+set tbcScanFmtF {^f(\*?)$}
 # the instructions with which the executor does `string` subcommands itself, and the commands they stand for
 set tbcStrOps {strindex ::tcl::string::index strfind ::tcl::string::first strrfind ::tcl::string::last strrange ::tcl::string::range strrangeImm ::tcl::string::range
     strreplace ::tcl::string::replace strcaseUpper ::tcl::string::toupper strcaseLower ::tcl::string::tolower strcaseTitle ::tcl::string::totitle
@@ -574,6 +576,7 @@ proc prepare {P} {
     # the built-in commands whose identity the analysis relies on (that they run no script and leave the caller's variables alone)
     set bins {}
     array unset scanVar
+    array unset scanF
     array unset cmdAt
     set pst(0) {}; set pwork {0}
     while {[llength $pwork]} {
@@ -632,6 +635,8 @@ proc prepare {P} {
                     if {$wf ne "-" && $wv ne "-"} {
                         set vi [lsearch -exact $vnames [lindex [dict get $bc literals] $wv]]
                         if {$vi >= 0 && [regexp $::tbcScanFmt [lindex [dict get $bc literals] $wf]]} { lappend scanVar($pc) $vi }
+                        # (decision 76: `f` and `f*` are typed too, with no use of the frame: a proc whose only scan is one of them stays pure)
+                        if {$vi >= 0 && [regexp $::tbcScanFmtF [lindex [dict get $bc literals] $wf]]} { lappend scanVar($pc) $vi; set scanF($pc) 1 }
                     }
                 }
                 # `scan string %c var` (typed code does it inline when var is a local): the same
@@ -691,7 +696,7 @@ proc prepare {P} {
                         # the string ensemble's own implementations and the math functions never use the caller's variables
                     } elseif {$b eq "dict"} {
                         if {$sub ni {size keys values get exists create merge replace remove}} { set pure 0; set pureL 0 }
-                    } elseif {!$lsortOK && $b ni $::tbcPureBuiltins && !([dict exists $::tbcPureArity $b] && [dict get $::tbcPureArity $b] == $n)} {
+                    } elseif {!$lsortOK && $b ni $::tbcPureBuiltins && !([dict exists $::tbcPureArity $b] && [dict get $::tbcPureArity $b] == $n) && !([info exists scanF($pc)] && $b eq "tcl::binary::scan")} {
                         # (`scan $s $fmt` with no variable names returns what it scanned and sets nothing: pure, as `format` is)
                         set pure 0; set pureL 0
                     }
@@ -3552,13 +3557,33 @@ proc binScan {key P pc in d n q} {
     set below [lrange $in 0 [expr {$q-1}]]
     lassign [lrange $in [expr {$q+1}] end] ed ef ev
     if {[kd $ef] ne "L" || [kd $ev] ne "L" || [kd $ed] ni {B L U}} { return "" }
-    if {![regexp $::tbcScanFmt [lindex $PI($P,lits) [lt $ef]] -> t u]} { return "" }
+    set fmt [lindex $PI($P,lits) [lt $ef]]
+    set isF [regexp $::tbcScanFmtF $fmt -> fstar]
+    if {!$isF && ![regexp $::tbcScanFmt $fmt -> t u]} { return "" }
     set vi [lsearch -exact $PI($P,vnames) [lindex $PI($P,lits) [lt $ev]]]
-    if {$vi < 0 || [kap $key $vi] ni {B -}} { return "" }
+    if {$vi < 0} { return "" }
+    set kv [kap $key $vi]
+    # decision 76: `f` stores a double: a variable that holds integers only (an argument that is one) is widened by the analysis (the store is a D store, this round hands over)
+    if {$isF && $fstar eq "" && $kv eq "I"} { return [R dead {} "goto D$pc;" stores [list [list $vi D]]] }
+    if {$kv ni [expr {$isF && $fstar eq "" ? {B - D W} : {B -}}]} { return "" }
     if {[kd $ed] eq "U"} { return [R fall [list {*}$below U] ""] }
     set pd [expr {$q+1}]
     set dx [expr {[kd $ed] eq "B" ? "s$pd" : "L_[cident $P]_[lt $ed]"}]
     set rel [expr {[kd $ed] eq "B" ? " Tcl_DecrRefCount(s$pd);" : ""}]
+    if {$isF && $fstar eq ""} {
+        # decision 76: `f` is one float as a double in the variable (the number scan of Tcl with no command call; a scan of fewer than 4 bytes sets nothing and returns 0, which
+        # the boxed code does: typed code hands over before the data is released and before the variable changes).  In a variable that holds an object, one that only the variable
+        # refers to is written over (tbc_st_dbl).
+        set flag [expr {$vi in [flaggedOf $P] ? " g$vi = 1;" : ""}]
+        switch $kv {
+            D { set st "d$vi = x_;$flag" }
+            W { set st "wt$vi = 1; d$vi = x_;$flag" }
+            default { set st "tbc_st_dbl(&l$vi, x_);" }
+        }
+        set c "\{ double x_; if (TBC_UNLIKELY(!tbc_bscan_f($dx, &x_))) goto D$pc;$rel $st si$q = 1; \}"
+        return [R fall [list {*}$below I] $c stores [list [list $vi D]]]
+    }
+    if {$isF} { set c "\{ Tcl_Obj *n_ = tbc_bscan_fl($dx);$rel Tcl_IncrRefCount(n_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = n_; si$q = 1; \}"; return [R fall [list {*}$below I] $c stores [list [list $vi B]]] }
     set c "\{ Tcl_Obj *n_ = tbc_bscan($dx, '$t', [expr {$u eq "u"}]);$rel Tcl_IncrRefCount(n_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = n_; si$q = 1; \}"
     return [R fall [list {*}$below I] $c stores [list [list $vi B]]]
 }

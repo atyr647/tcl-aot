@@ -776,6 +776,28 @@ foreach d {"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11
 }
 foreach str {"12 34 abc" "12 x abc" "" "1.5,ff" "1.5,zz" "-3 +4 q" "0x10 5 w" " 7  8  z " "99999999999999999999 1 a"} { lappend calls [list bs_scan $str] }
 lappend calls {bs_texel x 0 1} [list bs_texel [binary format c* {1 2 3 4 5 6 7 8}] 0.2 2]
+# decision 76: `binary scan` of f and f* typed, helpers called directly by compiled callers (values, short data, an old value kept, redefinition, rename, traces, errors)
+foreach v {0 1 -1 0.1 3.14159 16777217 1e38 3.5e38 -3.5e38 1e300 -1e300 1e-45 1e-50 1e400 Inf -Inf NaN 0x10 " 5" abc {} 9223372036854775807 100000000000000000000 -0.0 true 1.5e-39} {
+    lappend calls [list fs_f32 $v] [list fs_f32a $v] [list fs_chain $v] [list fs_keep $v] [list fs_f32l [list $v $v]] [list fs_f32l $v]
+}
+foreach d [list {} "\x01" "\x01\x02\x03" [binary format f 1.5] [binary format f 0.1]x [binary format f* {1 2 3}] [binary format f* {1 2}]ab [binary format r 2.5] [binary format f nan] [binary format f -1e38] "abcdefgh" abcd é€] {
+    lappend calls [list fs_scan $d] [list fs_scanl $d] [list fs_scan_twice $d] [list fs_ret_unset $d]
+}
+foreach n {0 1 7 100} { lappend calls [list fs_loop $n] [list fs_listloop $n] }
+lappend calls [list fs_loop_obj {0 1.5 abc}] [list fs_loop_obj {0.25 1e300 3 0x4}] [list fs_loop_obj {}] [list fs_loop 2.5] {fs_f32} {fs_f32 1 2}
+lappend calls {set a [fs_loop 5]; rename fs_f32 fs_f32_o; proc fs_f32 {x} { return [expr {$x * 2.0}] }; set b [fs_loop 5]; rename fs_f32 {}; rename fs_f32_o fs_f32; list $a $b [fs_loop 5]}
+lappend calls {set a [fs_loop 5]; rename fs_f32a fs_f32a_o; proc fs_f32a {x} { return 7 }; set b [fs_loop 5]; set c [fs_chain 2]; rename fs_f32a {}; rename fs_f32a_o fs_f32a; list $a $b $c [fs_loop 5] [fs_chain 2]}
+lappend calls {set a [fs_loop 3]; rename fs_f32 fs_f32_r; set e [catch {fs_loop 3} m]; rename fs_f32_r fs_f32; list $a $e $m [fs_loop 3]}
+lappend calls {set a [fs_listloop 3]; rename fs_f32l fs_f32l_r; set e [catch {fs_listloop 3} m]; rename fs_f32l_r fs_f32l; list $a $e $m [fs_listloop 3]}
+lappend calls {set a [fs_loop 3]; rename fs_f32 {}; set e [catch {fs_loop 3} m]; proc fs_f32 {x} { binary scan [binary format f $x] f r; return $r }; list $a $e $m [fs_loop 3]}
+lappend calls {namespace eval fsns { proc fs_f32 {x} { return NS } }; set a [fs_loop 2]; namespace eval fsns { rename fs_f32 {} }; list $a [fs_loop 2]}
+lappend calls {set ::trj {}; trace add execution fs_f32 enter {lappend ::trj}; set r [fs_loop 3]; trace remove execution fs_f32 enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add execution fs_f32l leave {lappend ::trj}; set r [fs_listloop 3]; trace remove execution fs_f32l leave {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add command fs_f32a rename {lappend ::trj}; set r [fs_loop 2]; rename fs_f32a fs_f32a_t; set r2 [catch {fs_loop 2} m]; rename fs_f32a_t fs_f32a; trace remove command fs_f32a rename {lappend ::trj}; list $r $r2 $m [llength $::trj]}
+lappend calls {set ::trj {}; trace add execution ::tcl::binary::scan enter {lappend ::trj}; set r [fs_loop 3]; trace remove execution ::tcl::binary::scan enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add execution binary enter {lappend ::trj}; set r [fs_listloop 3]; trace remove execution binary enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add variable ::fs_tv write {lappend ::trj}; set r [fs_loop 3]; trace remove variable ::fs_tv write {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {rename ::tcl::binary::scan fs_scan_o; proc ::tcl::binary::scan {args} { uplevel 1 {set r 55}; return 1 }; set a [list [fs_f32 1.5] [fs_scan [binary format f 2.5]]]; rename ::tcl::binary::scan {}; rename fs_scan_o ::tcl::binary::scan; set a}
 # decision 65: `set ::ns::name value` (ss_*): values of every kind, a variable that is missing, only declared, traced, unset, an array, in a namespace that is deleted and made again, linked
 foreach v {5 2.5 abc {} {a b} 0x10 1e3 9223372036854775807} { lappend calls [list ss_set $v] [list ss_val $v] }
 foreach x {2 1.5 abc 0x10} { foreach n {0 1 3} { lappend calls [list ss_num $x $n] } }

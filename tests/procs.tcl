@@ -2569,3 +2569,18 @@ proc dl_text {x} { return [list [expr {$x * 2.}] 1e3 [expr {$x == 1e3}]] }
 proc dl_w {a b} { return [expr {floor($a * 6.36619772367581382433e-01 + $b * 1e-3)}] }
 proc dl_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + $i * 0.5 - 1e-3 * $i + 6.36619772367581382433e-01}] }; return $s }
 proc dl_drive {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [dl_mult [expr {$i * 0.5}]] + [dl_floor [expr {$i * 0.25}]] + [dl_mix $i] + [dl_w $i 0.5]}] }; return $s }
+
+# decision 76: `binary scan $data f var` and `f* var` are typed (the number scan of Tcl's own command, no command call), and a proc whose only scan is one of them is pure, so a compiled
+# caller calls it directly (the float32 rounding of the engine's texture decoder and fire: `binary scan [binary format f $x] f x`)
+proc fs_f32 {x} { binary scan [binary format f $x] f r; return $r }
+proc fs_f32a {x} { binary scan [binary format f $x] f x; return $x }
+proc fs_f32l {l} { binary scan [binary format f* $l] f* r; return $r }
+proc fs_scan {d} { set r old; set n [binary scan $d f r]; list $n $r }
+proc fs_scanl {d} { set r old; set n [binary scan $d f* r]; list $n $r }
+proc fs_scan_twice {d} { set r first; binary scan $d f r; set a $r; binary scan [string range $d 4 end] f r; list $a $r }
+proc fs_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + [fs_f32 [expr {$i * 0.1}]] + [fs_f32a $i] + [fs_f32a [expr {$i / 3.0}]]}] }; return $s }
+proc fs_loop_obj {l} { set s 0.0; foreach e $l { set s [expr {$s + [fs_f32 $e]}] }; return $s }
+proc fs_listloop {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 0.37}] }; set t [fs_f32l $l]; set s 0.0; foreach e $t { set s [expr {$s + $e}] }; return [list $s [llength $t]] }
+proc fs_chain {x} { return [fs_f32 [fs_f32a [expr {$x * 1.0000001}]]] }
+proc fs_keep {x} { set r $x; binary scan [binary format f $x] f r; return [list $r $x] }
+proc fs_ret_unset {d} { binary scan $d f r; return $r }
