@@ -194,6 +194,24 @@ proc aliasCheck {ns nm0 nm} {
     if {![dict exists $ALIASES $key]} { dict set ALIASES $key [dict size $ALIASES] }
     return " || !tbc_alias_ok(interp, &tbc_al_[dict get $ALIASES $key])"
 }
+# the validity flags of a proc and of every proc it calls, directly or not (decision 78): the typed code that calls it, directly or through the interpreter, keeps its variables in
+# C locals on the strength of what the translator saw of all of them; once one of them is redefined that is no longer known.  Returns a C statement that runs `action` unless none
+# has been redefined (flags: 1 compiled and attached, 2 armed for its first call, 0 not the compiled definition)
+proc closureOf {P} {
+    global PI
+    set seen [list $P]; set todo $PI($P,callees)
+    while {[llength $todo]} {
+        set c [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {$c in $seen} continue
+        lappend seen $c
+        set todo [concat $todo $PI($c,callees)]
+    }
+    return $seen
+}
+proc closureGuard {P ns nm0 action} {
+    set fl [lmap c [closureOf $P] {string cat &tbc_valid_[cident $c]}]
+    return "\{ static int *const cl_\[\] = \{ [join $fl {, }], NULL \}; if (TBC_UNLIKELY(!tbc_cl_ok(cl_)[aliasCheck $ns $nm0 $P])) \{ $action \} \}"
+}
 proc keysplit {key} { set i [string last / $key]; list [string range $key 0 [expr {$i-1}]] [string range $key [expr {$i+1}] end] }
 proc refuse {why} { return -code error -errorcode TBC_REFUSED $why }
 proc fm {tmpl args} { string map $args $tmpl }
@@ -3381,7 +3399,7 @@ proc stepInvoke {key pc in d n} {
                 set rtype tbc_Y_$yK
                 if {$aware} { set rvar [yvar $q $yK]; set asg "$rvar = r_;" } else { set asg "s$q = tbc_ylist_${yK}(&r_);"; set outk B }
             }
-            set c "if (TBC_UNLIKELY(!tbc_valid_$cid[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}][aliasCheck $ns $nm0 $nm])) \{ tbc_st = 3; goto C$pc; \} \{ $wbox$rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]);$wrel if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $asg \}"
+            set c "if (TBC_UNLIKELY(tbc_valid_$cid != 1[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}][aliasCheck $ns $nm0 $nm])) \{ tbc_st = 3; goto C$pc; \} \{ $wbox$rtype r_ = V_${cid}_${csig}(interp, rem - 1, 0[expr {[llength $cargs] ? ", " : ""}][join $cargs {, }]);$wrel if (TBC_UNLIKELY(tbc_st)) goto C$pc;$rel $asg \}"
             # post-call stub: error, or a boxed result because the callee fell back to its generic code
             set nextpc $PI($P,next,$pc)
             # a callee that had to leave typed mode reports it (tbc_st 3): the call is then made the ordinary way, with boxed arguments
@@ -3412,7 +3430,7 @@ proc stepInvoke {key pc in d n} {
                     B { set cont "$edge goto T$nextpc;" }
                 }
             }
-            append stub "    \{ Tcl_Obj *r_; if (tbc_st == 3) \{ if (!inframe) \{ rc = TCL_OK; goto [fl $key $in]; \} $ov \} else \{ r_ = tbc_box; \} tbc_st = 0;$rel s$q = r_; $cont [enterG $key $nextpc [list {*}$below B] "" [flushSet $P $nextpc]] \}\n"
+            append stub "    \{ Tcl_Obj *r_; if (tbc_st == 3) \{ if (!inframe) \{ rc = TCL_OK; goto [fl $key $in]; \} [closureGuard $nm $ns $nm0 "tbc_st = 0; goto D$pc;"] $ov \} else \{ r_ = tbc_box; \} tbc_st = 0;$rel s$q = r_; $cont [enterG $key $nextpc [list {*}$below B] "" [flushSet $P $nextpc]] \}\n"
             return [R fall [list {*}$below $outk] $c calls [list [list $nm $csig]] stub $stub]
         }
     }
@@ -3436,7 +3454,8 @@ proc stepInvoke {key pc in d n} {
             lappend slots s$k; append rel " Tcl_DecrRefCount(s$k);"
         }
         set st [list {*}$below {*}[lrepeat $n B]]
-        set c "$pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = tbc_rc = r_; tbc_st = 0; [enterG $key [expr {-$pc-1}] $st "" [flushSet $P $pc]] \}$rel s$q = tbc_takeres(interp); \}"
+        # (decision 78: only while this proc and everything it calls are still the definitions the translator saw; else the boxed code makes the call, with the variables in the frame)
+        set c "[closureGuard $cp $ns $nm0 "goto D$pc;"] $pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = tbc_rc = r_; tbc_st = 0; [enterG $key [expr {-$pc-1}] $st "" [flushSet $P $pc]] \}$rel s$q = tbc_takeres(interp); \}"
         return [R fall [list {*}$below B] $c]
     }
     if {[regexp {^(?:::)?tcl::binary::scan$} $nm0]} {

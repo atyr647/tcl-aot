@@ -805,6 +805,58 @@ lappend calls {lp_pre} {lp_multi} {lp_multi 1 2} {lp_base x}
 foreach n {0 1 2 5 30} { lappend calls [list rs_main $n] [list rs_mklev $n] [list cs_outer $n] [list cs_outer2 $n] [list cs_outer3 $n] }
 foreach h {{} {rs_adddl} {rs_baddl} {rs_oddl} {rs_adddl; rs_oddl} {set dl {5 6}} {set dl 7} {unset dl} {set dl "1 2 \{"} {set dl {1.5 2}} {set dl { 5 6 }}} { foreach n {0 1 4 12} { lappend calls [list rs_adj $n $h] } }
 lappend calls {rs_main 2.5} {rs_mklev 2.5} {rs_up nosuch} {cs_outer 2.5}
+# decision 78: a caller-safe callee redefined at run time so that it reaches its caller's frame (found by decision 77): the compiled caller must not keep a stale local
+lappend calls {rename cs_inner cs_inner_o; proc cs_inner {nm} { upvar 2 $nm v; set v 1000 }; set r [cs_outer 3]; rename cs_inner {}; rename cs_inner_o cs_inner; set r}
+lappend calls {rename cs_inner cs_inner_o; proc cs_inner {nm} { uplevel 2 {set x 1000}; return 1 }; set r [cs_outer 3]; rename cs_inner {}; rename cs_inner_o cs_inner; set r}
+lappend calls {cs_outer 3} {cs_outer2 3}
+lappend calls {rename cs_inner cs_inner_o; proc cs_inner {nm} { upvar 1 $nm v; incr v; return $v }; set r [list [cs_outer 3] [cs_outer 1]]; rename cs_inner {}; rename cs_inner_o cs_inner; set r}
+proc rd_fix {} {
+    proc ::rd_leaf {} { array set a {k 1}; return $a(k) }
+    proc ::rd_gleaf {} { array set a {k 1}; return $a(k) }
+    proc ::rd_pleaf {a} { return [expr {$a + 1}] }
+    proc ::rd_swap {} { proc ::rd_leaf {} { uplevel 1 {set x 77}; return 1 } }
+}
+lappend calls {rd_outer 3} {rd_top 3} {rd_gouter 3} {rd_pouter 3} {rd_pdirect 3} {set r [rd_loop 4]; rd_fix; set r} {rd_two 3}
+foreach body {
+    {uplevel 1 {set x 77}; return 1}
+    {upvar 1 x v; set v 78; return 1}
+    {uplevel 1 {incr x 5}; return 1}
+    {uplevel 1 {unset x}; return 1}
+    {uplevel 1 {set x}; return 1}
+    {return [info level]}
+    {return [info level -1]}
+    {return [uplevel 1 {info level}]}
+    {return [uplevel 1 {info vars}]}
+    {upvar 2 x v; set v 79; return 1}
+    {uplevel 2 {set x 80}; return 1}
+    {uplevel #1 {set x 81}; return 1}
+    {uplevel #2 {set x 82}; return 1}
+    {uplevel 1 {array set a {x 1}}; return 1}
+    {return 5}
+    {error boom}
+} {
+    lappend calls "rename rd_leaf rd_leaf_o; proc rd_leaf {} {$body}; set r \[catch {rd_outer 3} m\]; set r2 \[catch {rd_top 3} m2\]; set r3 \[catch {rd_two 3} m3\]; set r4 \[catch {rd_loop 3} m4\]; rename rd_leaf {}; rename rd_leaf_o rd_leaf; rd_fix; list \$r \$m \$r2 \$m2 \$r3 \$m3 \$r4 \$m4"
+    lappend calls "rename rd_gleaf rd_gleaf_o; proc rd_gleaf {} {$body}; set r \[catch {rd_gouter 3} m\]; rename rd_gleaf {}; rename rd_gleaf_o rd_gleaf; rd_fix; list \$r \$m"
+    lappend calls "rename rd_pleaf rd_pleaf_o; proc rd_pleaf {a} {$body}; set r \[catch {list \[rd_pdirect 3\] \[rd_pouter 3\]} m\]; rename rd_pleaf {}; rename rd_pleaf_o rd_pleaf; rd_fix; list \$r \$m"
+    # the same definition made again, so that the compiled code may be used again
+    lappend calls "proc rd_leaf {} {$body}; set r \[catch {rd_outer 3} m\]; proc rd_leaf {} { array set a {k 1}; return \$a(k) }; list \$r \$m \[rd_outer 3\] \[rd_outer 2\]"
+}
+lappend calls {rd_outer 3} {rd_top 3} {rd_gouter 3} {rd_pouter 3} {rd_pdirect 3} {set r [rd_loop 4]; rd_fix; set r}
+# renamed away and back, deleted, defined again with the same text, defined in a namespace that shadows it
+lappend calls {rename rd_leaf rd_leaf_o; set r [catch {rd_outer 3} m]; rename rd_leaf_o rd_leaf; list $r $m [rd_outer 3]}
+lappend calls {rename rd_leaf rd_leaf_o; proc rd_leaf {} { uplevel 1 {set x 90}; return 1 }; set a [rd_outer 2]; rename rd_leaf {}; rename rd_leaf_o rd_leaf; list $a [rd_outer 2]}
+lappend calls {rename rd_leaf rd_leaf_o; proc rd_leaf {} { uplevel 1 {set x 91}; return 1 }; set a [rd_outer 2]; rename rd_leaf rd_leaf_x; rename rd_leaf_o rd_leaf; set b [rd_outer 2]; rename rd_leaf_x {}; list $a $b}
+lappend calls {rename rd_leaf rd_leaf_o; set r [catch {rd_outer 2} m]; proc rd_leaf {} { array set a {k 1}; return $a(k) }; rename rd_leaf_o {}; list $r $m [rd_outer 2]}
+lappend calls {set r [rd_loop 5]; rd_fix; set r} {rd_outer 3}
+lappend calls {rename rd_swap rd_swap_o; proc rd_swap {} { proc ::rd_leaf {} { uplevel 1 {set x 92}; return 1 } }; set a [rd_loop 4]; rename rd_swap {}; rename rd_swap_o rd_swap; rd_fix; list $a [rd_outer 2]}
+lappend calls {rename rd_leaf rd_leaf_o; proc rd_leaf {} { upvar 1 x v; incr v 7; return 2 }; set a [list [rd_outer 3] [rd_loop 3] [rd_top 3]]; rename rd_leaf {}; rename rd_leaf_o rd_leaf; rd_fix; list $a [rd_outer 2]}
+# traces on a callee (execution traces run in the caller's frame)
+lappend calls {set ::trj {}; trace add execution rd_leaf enter {lappend ::trj}; set r [rd_outer 3]; trace remove execution rd_leaf enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {rename rd_leaf rd_leaf_o; proc rd_leaf {} { return 3 }; set ::trj {}; trace add execution rd_leaf enter {lappend ::trj}; set r [rd_outer 3]; trace remove execution rd_leaf enter {lappend ::trj}; rename rd_leaf {}; rename rd_leaf_o rd_leaf; list $r [llength $::trj]}
+lappend calls {rename rd_leaf rd_leaf_o; proc rd_leaf {} { return 3 }; proc rd_trcb {args} { uplevel 2 {set x 93} }; trace add execution rd_leaf enter rd_trcb; set r [rd_outer 3]; trace remove execution rd_leaf enter rd_trcb; rename rd_leaf {}; rename rd_leaf_o rd_leaf; rename rd_trcb {}; list $r}
+lappend calls {proc rd_trcb {args} { uplevel 2 {set x 94} }; trace add execution rd_leaf enter rd_trcb; set r [rd_outer 3]; trace remove execution rd_leaf enter rd_trcb; rename rd_trcb {}; list $r}
+lappend calls {proc rd_trcb {args} { uplevel 2 {set x 95} }; trace add execution rd_leaf leave rd_trcb; set r [rd_outer 3]; trace remove execution rd_leaf leave rd_trcb; rename rd_trcb {}; list $r}
+lappend calls {rd_outer 3} {rd_top 3} {rd_gouter 3} {rd_pouter 3} {rd_pdirect 3} {set r [rd_loop 4]; rd_fix; set r}
 # decision 65: `set ::ns::name value` (ss_*): values of every kind, a variable that is missing, only declared, traced, unset, an array, in a namespace that is deleted and made again, linked
 foreach v {5 2.5 abc {} {a b} 0x10 1e3 9223372036854775807} { lappend calls [list ss_set $v] [list ss_val $v] }
 foreach x {2 1.5 abc 0x10} { foreach n {0 1 3} { lappend calls [list ss_num $x $n] } }

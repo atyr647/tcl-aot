@@ -2640,3 +2640,17 @@ proc cs_outer2 {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr
 proc cs_inner3 {nm} { upvar $nm v; set v [expr {$v * 2}]; return $v }
 proc cs_mid3 {n} { set x $n; set s 0; for {set i 0} {$i < 3} {incr i} { incr s [cs_inner3 x] }; return [list $x $s] }
 proc cs_outer3 {n} { set y 7; set t 0; for {set i 0} {$i < $n} {incr i} { incr t [lindex [cs_mid3 $i] 1] }; return [list $y $t] }
+# decision 78: a callee that is redefined at run time so that it reaches the variables of its caller (uplevel, upvar 2, info level); the caller keeps x in a C local
+proc rd_leaf {} { array set a {k 1}; return $a(k) }
+proc rd_outer {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_leaf] }; return [list $x $s] }
+proc rd_top {n} { set x 1; set r [rd_outer $n]; return [list $x $r] }
+proc rd_gleaf {} { array set a {k 1}; return $a(k) }
+proc rd_gmid {} { set s [rd_gleaf]; return [expr {$s + 1}] }
+proc rd_gouter {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_gmid] }; return [list $x $s] }
+proc rd_pleaf {a} { return [expr {$a + 1}] }
+proc rd_pmid {a} { return [expr {[rd_pleaf $a] * 2}] }
+proc rd_pouter {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_pmid $i] }; return [list $x $s] }
+proc rd_pdirect {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_pleaf $i] }; return [list $x $s] }
+proc rd_swap {} { proc ::rd_leaf {} { uplevel 1 {set x 77}; return 1 } }
+proc rd_loop {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_leaf]; if {$i == 1} { rd_swap } }; return [list $x $s] }
+proc rd_two {n} { set x 100; set y 200; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_leaf]; incr x; incr y 2 }; return [list $x $y $s] }

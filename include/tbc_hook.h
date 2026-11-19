@@ -26,7 +26,7 @@ typedef struct TbcEntry {
     const char *body;			/* body, verbatim */
     uint64_t fp;			/* fingerprint of the bytecode compiled from it */
     int (*fn)(Tcl_Interp *, Proc *);	/* the compiled body */
-    int *valid;				/* flag read by direct calls from other compiled procs (may be NULL) */
+    int *valid;				/* read by compiled callers (may be NULL): 1 the proc's definition is this compiled one and attached, 2 it is this definition but armed for its first call (see tbc_arm_hook), 0 it is not (redefined, renamed, removed, demoted, not defined yet).  A direct call needs 1; a caller that keeps its variables in C locals across a call needs non-zero for the callee and everything it calls (tbc_cl_ok) */
     int id;				/* number in the name of the command that runs it */
     struct TbcEntry *sameName;		/* the entry registered before this one under the same name (a module can hold several definitions of a name) */
     int ysafe;				/* nothing it runs can yield: it may run compiled inside a coroutine, as long as the procs it calls are still the compiled ones */
@@ -37,6 +37,7 @@ typedef struct TbcEntry {
     int yres;				/* it yields itself, and everything else it runs is yield-safe: its boxed code can suspend a coroutine */
     unsigned char ens;			/* bit i: it uses a subcommand of ensemble tbc_ens_names[i] (an execution trace on the ensemble is the interpreter's to run: tbc_guard_ok) */
     unsigned char lite;			/* the interpreter runs it as it is when it is called from interpreted code (no entry stub); compiled callers call the compiled code */
+    struct TbcEntry *sameBody;		/* the next entry registered with the same namespace, arguments and body under another name (decision 78: each proc has its own valid flag, so a definition is attached to the entry of its own name when there is one) */
 } TbcEntry;
 
 typedef struct TbcRec {			/* one attached proc */
@@ -1708,7 +1709,9 @@ static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
     e->id = id;
     tbc_reg_init();
     h = Tcl_CreateHashEntry(&tbc_by_body, k, &isNew);
+    e->sameBody = NULL;
     if (isNew) Tcl_SetHashValue(h, e);
+    else { TbcEntry *f = (TbcEntry *) Tcl_GetHashValue(h); while (f->sameBody) f = f->sameBody; if (f != e) f->sameBody = e; }
     ckfree(k);
     h = Tcl_CreateHashEntry(&tbc_by_name, e->name, &isNew);
     e->sameName = isNew ? NULL : (TbcEntry *) Tcl_GetHashValue(h);
@@ -1868,6 +1871,14 @@ static void tbc_invalidate_name(const char *name) {
     for (e = (TbcEntry *) Tcl_GetHashValue(h); e; e = e->sameName) if (e->valid) *e->valid = 0;
 }
 
+/* decision 78: have all these procs (the callee of a typed call and everything it calls, directly or not) the definitions the translator analysed?  Typed code that keeps variables in C
+ * locals across a call is right only if the callee cannot reach them, which was shown for those definitions; a proc redefined at run time (uplevel 1, upvar 2...) may.  An armed
+ * proc (flag 2) has the compiled body's text and attaches at its first call. */
+static inline int tbc_cl_ok(int *const *f) {
+    for (; *f; f++) if (!**f) return 0;
+    return 1;
+}
+
 /* the procs the translator refused (called from a module's Init): a definition equal to one of them is reported with the translator's reason */
 static void tbc_register_refused(const TbcRefused *t, int n) {
     int i, isNew;
@@ -2021,8 +2032,8 @@ static int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char
          * that was compiled: compiled callers may call the compiled code directly, as they do for an attached proc */
         tbc_note_def(p, fullName, TBC_DEF_TRIVIAL, why);
         if (e->valid && strcmp(fullName, e->name) == 0) {
+            if (*e->valid != 2) tbc_trace(interp, "add", "command", fullName, "rename delete", "::tbc::invalidate", 1);	/* (armed: the trace is there) */
             *e->valid = 1;
-            tbc_trace(interp, "add", "command", fullName, "rename delete", "::tbc::invalidate", 1);
         }
         return rc;
     }
@@ -2040,8 +2051,8 @@ static int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char
         Tcl_SetHashValue(rh, r);
         /* compiled callers may link directly to it while it stays under its compiled name */
         if (e->valid && strcmp(fullName, e->name) == 0) {
+            if (*e->valid != 2) tbc_trace(interp, "add", "command", fullName, "rename delete", "::tbc::invalidate", 1);	/* (armed: the trace is there) */
             *e->valid = 1;
-            tbc_trace(interp, "add", "command", fullName, "rename delete", "::tbc::invalidate", 1);
         }
     }
     return 1;
@@ -2055,6 +2066,12 @@ static void tbc_arm_hook(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *f
     if (c && c->objProc == TclObjInterpProc && c->nreProc == TclNRInterpProc) {
         d->lazyEntry = e; d->lazyProc = p;
         c->objProc = tbc_lazy_obj; c->nreProc = tbc_lazy_nre;
+        /* decision 78: this is the compiled definition (the body's text and the arguments are those of the module's), so a compiled caller that keeps its variables in C locals may
+         * call it through the interpreter (flag 2); it does not call it directly before the first call has attached the code.  The trace tells when it is renamed or deleted. */
+        if (e->valid && strcmp(fullName, e->name) == 0) {
+            *e->valid = 2;
+            tbc_trace(interp, "add", "command", fullName, "rename delete", "::tbc::invalidate", 1);
+        }
     } else {
         /* (a command that something else has taken the entry points of: no first call to wait for) */
         tbc_attach_entry(interp, p, e, fullName);
@@ -2105,6 +2122,10 @@ static void tbc_attach(Tcl_Interp *interp, Proc *p, struct Namespace *nsPtr, con
     ckfree(k);
     if (h) {
         TbcEntry *e = (TbcEntry *) Tcl_GetHashValue(h);
+        {   /* (a body that two procs of the module share: the entry of this name) */
+            TbcEntry *f;
+            for (f = e; f; f = f->sameBody) if (strcmp(f->name, fullName) == 0) { e = f; break; }
+        }
         int rc = tbc_eager ? tbc_attach_entry(interp, p, e, fullName) : 0;
         if (!tbc_eager) tbc_arm_lazy(interp, p, e, fullName, TBC_DEF_PENDING, "compiled code is attached at the proc's first call");
         else if (rc == 2) {
@@ -2211,7 +2232,7 @@ static int tbc_enter_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *c
 static int tbc_ysafe_now(const TbcEntry *e) {
     int **d;
     if (!e->ysafe && !(e->yres && tbc_nest == 0)) return 0;
-    for (d = e->ydeps; d && *d; d++) if (!**d) return 0;
+    for (d = e->ydeps; d && *d; d++) if (**d != 1) return 0;
     return 1;
 }
 /* a yield instruction of boxed code: keep the operand stack below the yielded value in a record, put the resume callback and the interpreter's activation
