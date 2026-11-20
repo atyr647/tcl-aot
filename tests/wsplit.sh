@@ -29,8 +29,11 @@ set want {}; foreach p $a q $b { lappend want [expr {$p - $q}] }
 check lc_two [lc_two $a $b] $want
 set want {}; foreach p $l { lappend want [ref_f32 [expr {$p * 0.5}]] }
 check lc_f [lc_f $l] $want
+set want [list {} {}]; set a [lrepeat 6 0.0]; set b [lrepeat 6 0]; set o 0.25
+for {set y 1} {$y < 5} {incr y} { for {set x -1} {$x <= 1} {incr x} { set k [expr {([lindex $b $y] + $y + $x) % 6}]; lset a $k [expr {[lindex $a $k] + $y * 0.5 + $x * $o}]; lset b $k [expr {[lindex $b $k] + $y}] } }
+check wx_loop [wx_loop 6] $a
 set d [tbc::hot -dict]
-foreach p {::ws_loop ::lc_d ::lc_two ::lc_f} {
+foreach p {::ws_loop ::lc_d ::lc_two ::lc_f ::wx_loop} {
     if {![dict exists $d $p]} { puts "FAILED: $p not counted"; incr bad; continue }
     if {[dict get $d $p entries] < 1} { puts "FAILED: $p did not run typed"; incr bad }
     if {[dict get $d $p handovers] > 0} { puts "FAILED: $p hands over [dict get $d $p handovers] times"; incr bad }
@@ -47,6 +50,10 @@ printf '%s\n' "$out" | grep -q '^ok$' || { printf '%s\n' "$out"; echo "wsplit: F
 TBC_REPORT=1 "$TCLSH" src/translate.tcl "$tmp/one.tcl" "$tmp/one.c" Wsone >"$tmp/translate1.log" 2>&1 || { echo "wsplit: translation of the small file failed"; exit 1; }
 if ! grep -q 'V__3a_3aws_5fsq_D(interp' "$tmp/one.c"; then echo "wsplit: FAILED: ws_loop does not call the double variant of ws_sq"; exit 1; fi
 if grep '^REPORT ::lc_' "$tmp/translate1.log" | grep -v ' 0 unsupported' | grep -q .; then echo "wsplit: FAILED: an lmap proc has an unsupported instruction"; grep '^REPORT ::lc_' "$tmp/translate1.log" | grep -v ' 0 unsupported'; exit 1; fi
+# decision 83: wx_loop reads and writes with tagged-number indices and values: no generic lset, no object made for an index
+{ sed -n '/^proc wx_loop /p' tests/procs.tcl; } > "$tmp/three.tcl"
+"$TCLSH" src/translate.tcl "$tmp/three.tcl" "$tmp/three.c" Wsthree >"$tmp/translate3.log" 2>&1 || { echo "wsplit: translation of wx_loop failed"; exit 1; }
+if ! grep -q 'tbc_lset_id(interp, lst_, si' "$tmp/three.c"; then echo "wsplit: FAILED: wx_loop takes a generic lset"; exit 1; fi
 # the index word of lset (ls_loop: `lset a $y+$x ...`) builds no string
 sed -n '/^proc ls_loop /p' tests/procs.tcl > "$tmp/two.tcl"
 "$TCLSH" src/translate.tcl "$tmp/two.tcl" "$tmp/two.c" Wstwo >"$tmp/translate2.log" 2>&1 || { echo "wsplit: translation of ls_loop failed"; exit 1; }

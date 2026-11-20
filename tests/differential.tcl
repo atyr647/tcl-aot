@@ -857,6 +857,17 @@ lappend calls {rename cs_inner cs_inner_o; proc cs_inner {nm} { upvar 2 $nm v; s
 lappend calls {rename cs_inner cs_inner_o; proc cs_inner {nm} { uplevel 2 {set x 1000}; return 1 }; set r [cs_outer 3]; rename cs_inner {}; rename cs_inner_o cs_inner; set r}
 lappend calls {cs_outer 3} {cs_outer2 3}
 lappend calls {rename cs_inner cs_inner_o; proc cs_inner {nm} { upvar 1 $nm v; incr v; return $v }; set r [list [cs_outer 3] [cs_outer 1]]; rename cs_inner {}; rename cs_inner_o cs_inner; set r}
+# decision 83: a tagged-number index and value for lindex and lset
+foreach l {{} {1} {1 2 3} {1.5 2.5 3.5} {1 2.5 3 4.5 5} {{1 2} 3 4} {a b}} { foreach {i j} {{0} {0} {1} {1} {2} {-1} {5} {0} {-1} {-2} {1.5} {1} {1} {1.5} {abc} {1} {007} {1} {9223372036854775807} {1} {-9223372036854775808} {-1} {2147483647} {1} {4294967295} {1} {{}} {1} {1e1} {0}} {
+    foreach v {7 2.5 0x10 abc {} -0.0} { lappend calls [list wx_set $l $i $j $v] }
+    lappend calls [list wx_setw $l $i [list $j]] [list wx_setw $l $i [list 2.5]] [list wx_setw $l $i [list abc]] [list wx_setint $l $i] [list wx_get $l $i] [list wx_keep $l $i]
+} }
+foreach n {0 1 2 3 5 40} { lappend calls [list wx_loop $n] }
+# decision 83: integers of up to 126 bits in 128-bit machine arithmetic
+set bgv {0 1 -1 3 4611686018427387904 9223372036854775807 9223372036854775808 -9223372036854775808 -9223372036854775809 18446744073709551615 18446744073709551616 -18446744073709551616 42535295865117307932921825928971026432 85070591730234615865843651857942052863 85070591730234615865843651857942052864 -85070591730234615865843651857942052864 170141183460469231731687303715884105728 -170141183460469231731687303715884105728 1606938044258990275541962092341162602522202993782792835301376 0x9e3779b97f4a7c15 0xbf58476d1ce4e5b9 1.5 abc {}}
+foreach a $bgv { foreach b $bgv { lappend calls [list bg_ops $a $b] [list bg_mask $a $b] } }
+foreach a $bgv { foreach n {0 1 7 23 41 45 63 64 65 100 120 121 126 127 128 200 -1 abc} { lappend calls [list bg_sh $a $n] } }
+foreach {a b c d} {1 2 3 4 18446744073709551615 1 9223372036854775808 77 0x9e3779b97f4a7c15 0xbf58476d1ce4e5b9 0x94d049bb133111eb 0x1234567890abcdef 0 0 0 0 4611686018427387904 4611686018427387904 4611686018427387904 4611686018427387904} { foreach n {0 1 5 40} { lappend calls [list bg_run $a $b $c $d $n] } }
 proc rd_fix {} {
     proc ::rd_leaf {} { array set a {k 1}; return $a(k) }
     proc ::rd_gleaf {} { array set a {k 1}; return $a(k) }

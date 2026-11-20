@@ -1335,6 +1335,77 @@ static ByteCode *tbc_mop_get(Tcl_Interp *interp, int op) {
     m->bc = bc;
     return bc;
 }
+#ifdef __SIZEOF_INT128__
+/* decision 83: integers of up to 126 bits (the generators and hashes of 64-bit unsigned arithmetic: `& 0xFFFFFFFFFFFFFFFF` after `+`, `<<`, `*`) are computed in 128-bit machine
+ * arithmetic, with no mp_int copies; the result is the same integer the bignum code gives (two's complement for the bitwise operators on negative operands, floor for >>),
+ * and anything that does not fit goes the bignum way.  1 if the number is held in *out. */
+static int tbc_get128(ClientData p, int t, __int128 *out) {
+    unsigned __int128 mag = 0;
+    const mp_int *m;
+    int i;
+    if (t == TCL_NUMBER_LONG) { *out = *(const long *) p; return 1; }
+    m = (const mp_int *) p;
+    for (i = m->used - 1; i >= 0; i--) {
+        if (mag >> (126 - MP_DIGIT_BIT)) return 0;
+        mag = (mag << MP_DIGIT_BIT) | (unsigned __int128) m->dp[i];
+    }
+    if (mag >> 126) return 0;
+    *out = m->sign == MP_NEG ? -(__int128) mag : (__int128) mag;
+    return 1;
+}
+/* the result r in place of *pa (as the interpreter's BIG_RESULT: an operand nobody else holds takes it); b is consumed */
+static void tbc_put128(Tcl_Obj **pa, Tcl_Obj *b, __int128 r) {
+    Tcl_Obj *a = *pa, *n;
+    if (r >= (__int128) INT64_MIN && r <= (__int128) INT64_MAX) {
+        if (!Tcl_IsShared(a)) Tcl_SetWideIntObj(a, (Tcl_WideInt) r);
+        else { n = Tcl_NewWideIntObj((Tcl_WideInt) r); Tcl_IncrRefCount(n); Tcl_DecrRefCount(a); *pa = n; }
+    } else {
+        mp_int br;
+        unsigned __int128 mag = r < 0 ? (unsigned __int128) 0 - (unsigned __int128) r : (unsigned __int128) r, t = mag;
+        int cnt = 0, i;
+        while (t) { cnt++; t >>= MP_DIGIT_BIT; }
+        mp_init_size(&br, cnt);
+        for (i = 0; i < cnt; i++) { br.dp[i] = (mp_digit) (mag & (((unsigned __int128) 1 << MP_DIGIT_BIT) - 1)); mag >>= MP_DIGIT_BIT; }
+        br.used = cnt;
+        br.sign = r < 0 ? MP_NEG : MP_ZPOS;
+        if (!Tcl_IsShared(a)) Tcl_SetBignumObj(a, &br);
+        else { n = Tcl_NewBignumObj(&br); Tcl_IncrRefCount(n); Tcl_DecrRefCount(a); *pa = n; }
+    }
+    Tcl_DecrRefCount(b);
+}
+/* 0 if done; -1 if the operands or the result do not fit (nothing is changed) */
+static int tbc_num128(Tcl_Obj *o, __int128 *out) {
+    ClientData p;
+    int t;
+    /* (a big integer's mp_int that TclGetNumberFromObj hands out is one per thread, valid until the next call: each number is read before the next is asked for) */
+    if (TclGetNumberFromObj(NULL, o, &p, &t) != TCL_OK || (t != TCL_NUMBER_LONG && t != TCL_NUMBER_BIG)) return 0;
+    return tbc_get128(p, t, out);
+}
+static int tbc_fast128(int op, Tcl_Obj **pa, Tcl_Obj *b) {
+    __int128 x, y, r;
+    if (!tbc_num128(*pa, &x) || !tbc_num128(b, &y)) return -1;
+    switch (op) {
+        case TBC_ADD: r = x + y; break;
+        case TBC_SUB: r = x - y; break;
+        case TBC_MULT: if (__builtin_mul_overflow(x, y, &r)) return -1; break;
+        case TBC_BAND: r = x & y; break;
+        case TBC_BOR: r = x | y; break;
+        case TBC_BXOR: r = x ^ y; break;
+        case TBC_SHL:
+            if (y < 0 || y > 120) return -1;
+            r = (__int128) ((unsigned __int128) x << (int) y);
+            if ((r >> (int) y) != x) return -1;
+            break;
+        case TBC_SHR:
+            if (y < 0) return -1;
+            r = y >= 127 ? (x < 0 ? -1 : 0) : (x >> (int) y);
+            break;
+        default: return -1;
+    }
+    tbc_put128(pa, b, r);
+    return 0;
+}
+#endif
 /* The shifts and bitwise operators on integers beyond the machine range, as ExecuteExtendedBinaryMathOp does them (the cases that are not
  * errors; those are left to the interpreter's own instruction).  0 on success (b consumed, *pa replaced), -1 if this is not one of them. */
 static int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b) {
@@ -1351,6 +1422,9 @@ static int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b) {
         shift = *(const long *) p2;
         if (shift < 0 || shift > INT_MAX) return -1;
         if (t1 == TCL_NUMBER_LONG && *(const long *) p1 == 0) return -1;
+#ifdef __SIZEOF_INT128__
+        if (tbc_fast128(op, pa, b) == 0) return 0;
+#endif
         if (Tcl_GetBignumFromObj(NULL, a, &b1) != TCL_OK) return -1;
         mp_init(&br);
         if (op == TBC_SHL) mp_mul_2d(&b1, (int) shift, &br); else mp_signed_rsh(&b1, (int) shift, &br);
@@ -1359,6 +1433,9 @@ static int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b) {
         /* (two machine integers only get here for bit operators if the operation overflowed, which they cannot; for + - * they do when the result
          * does not fit: the interpreter then does it in bignums too) */
         if (t1 != TCL_NUMBER_BIG && t2 != TCL_NUMBER_BIG && op != TBC_ADD && op != TBC_SUB && op != TBC_MULT) return -1;
+#ifdef __SIZEOF_INT128__
+        if (tbc_fast128(op, pa, b) == 0) return 0;
+#endif
         if (Tcl_GetBignumFromObj(NULL, a, &b1) != TCL_OK) return -1;
         if (Tcl_GetBignumFromObj(NULL, b, &b2) != TCL_OK) { mp_clear(&b1); return -1; }
         mp_init(&br);

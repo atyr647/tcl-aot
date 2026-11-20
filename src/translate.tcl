@@ -1949,6 +1949,11 @@ proc stepT0 {key pc in} {
                 set c "\{ Tcl_Obj *r_ = tbc_lindex_i(interp, s$pl, si$pi); if (!r_) goto $fl; Tcl_DecrRefCount(s$pl); s$pl = r_; \}"
                 return [R fall [list {*}[lrange $in 0 [expr {$pl-1}]] B] $c]
             }
+            if {[kd $ei] eq "W"} {
+                # decision 83: a tagged-number index (kind W): an integer reads as an integer index (no object made for it); a double goes the boxed way
+                set c "\{ Tcl_Obj *r_; if (!sw$pi) \{ r_ = tbc_lindex_i(interp, s$pl, si$pi); if (!r_) goto $fl; \} else \{ Tcl_Obj *io_ = tbc_newdbl(sd$pi); r_ = tbc_lindex(interp, s$pl, io_); Tcl_DecrRefCount(io_); if (!r_) goto $fl; \} Tcl_DecrRefCount(s$pl); s$pl = r_; \}"
+                return [R fall [list {*}[lrange $in 0 [expr {$pl-1}]] B] $c]
+            }
             set st [lreplace $in $pi $pi B]
             set c "[boxc $P $pi $ei] \{ Tcl_Obj *r_ = tbc_lindex(interp, s$pl, s$pi); if (!r_) goto [fl $key $st]; Tcl_DecrRefCount(s$pi); Tcl_DecrRefCount(s$pl); s$pl = r_; \}"
             return [R fall [list {*}[lrange $in 0 [expr {$pl-1}]] B] $c]
@@ -2042,6 +2047,23 @@ proc stepT0 {key pc in} {
             if {[kd $ei] eq "I" && [kd $ev] eq "D"} {
                 set fl [fl $key [list {*}[lrange $in 0 [expr {$pi-1}]] $ei $ev B]]
                 return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] B] "\{ Tcl_Obj *lst_ = s$pl, *r_; Tcl_DecrRefCount(lst_); r_ = tbc_lset_id(interp, lst_, si$pi, sd$pv); if (!r_) \{ Tcl_IncrRefCount(lst_); goto $fl; \} s$pi = r_; \}"]
+            }
+            if {[kd $ei] in {I W} && [kd $ev] in {I D W}} {
+                # decision 83: a tagged-number index or value (kind W, from arithmetic on numbers read from objects) takes the in-place write when the tag says integer
+                # (index) and writes the element over by its tag (value): no object is made for the index, and none for the value when the element can be written over.
+                # A double index (an error or Tcl's own rules) takes the boxed call.
+                switch [kd $ev] {
+                    I { set vfast "tbc_lset_ii(interp, lst_, si$pi, si$pv)"; set vbox "tbc_newint(si$pv)" }
+                    D { set vfast "tbc_lset_id(interp, lst_, si$pi, sd$pv)"; set vbox "tbc_newdbl(sd$pv)" }
+                    W { set vfast "(sw$pv ? tbc_lset_id(interp, lst_, si$pi, sd$pv) : tbc_lset_ii(interp, lst_, si$pi, si$pv))"; set vbox "(sw$pv ? tbc_newdbl(sd$pv) : tbc_newint(si$pv))" }
+                }
+                set fl [fl $key [list {*}[lrange $in 0 [expr {$pi-1}]] $ei $ev B]]
+                if {[kd $ei] eq "I"} {
+                    set call "r_ = $vfast;"
+                } else {
+                    set call "if (!sw$pi) r_ = $vfast; else \{ Tcl_Obj *io_ = tbc_newdbl(sd$pi), *vo_ = $vbox; r_ = TclLsetList(interp, lst_, io_, vo_); Tcl_DecrRefCount(io_); Tcl_DecrRefCount(vo_); \}"
+                }
+                return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] B] "\{ Tcl_Obj *lst_ = s$pl, *r_; Tcl_DecrRefCount(lst_); $call if (!r_) \{ Tcl_IncrRefCount(lst_); goto $fl; \} s$pi = r_; \}"]
             }
             set st [list {*}[lrange $in 0 [expr {$pi-1}]] [expr {[kd $ei] eq "I" ? $ei : "B"}] B B]
             set pre "[boxc $P $pv $ev]"
@@ -4219,7 +4241,7 @@ proc frameSeed {P pc in} {
 
 # Instructions that take a tagged number (W) on the stack as it is; for any other instruction the W slots it consumes are made objects on the edge into it.
 set wAware {add sub mult div mod lt le gt ge eq neq bitand bitor bitxor lshift rshift uminus uplus bitnot not jumpTrue1 jumpTrue4 jumpFalse1 jumpFalse4
-    storeScalar1 storeScalar4 pop dup done incrScalar1}
+    storeScalar1 storeScalar4 pop dup done incrScalar1 listIndex lsetList}
 proc wnorm {P out sop} {
     global PI wAware
     if {[lsearch -exact $out W] < 0} { return $out }

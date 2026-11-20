@@ -2783,3 +2783,26 @@ proc ls_call {l i j} { lset l $i+$j [ws_f32 [expr {$i * 0.1}]]; return $l }
 proc ls_loop {n} { set a [lrepeat $n 0.0]; for {set y 1} {$y < $n - 1} {incr y} { for {set x -1} {$x <= 1} {incr x} { lset a $y+$x [expr {$y * 0.5 + $x}] } }; return $a }
 proc ls_loopi {n} { set a [lrepeat $n 0]; for {set y 1} {$y < $n - 1} {incr y} { lset a $y-1 $y; lset a $y+1 [expr {$y * 3}] }; return $a }
 proc ls_keep {l i j} { set k $i+$j; lset l $k 9; return [list $k $l] }
+# decision 83: a tagged-number index (kind W: arithmetic on numbers read from objects) and a tagged-number value for lindex and lset
+proc wx_set {l i j v} { set z [expr {0.5 + 0}]; set k [expr {[lindex $i 0] + [lindex $j 0]}]; lset l $k [expr {$v * 1.5}]; return [list $k $l] }
+proc wx_setw {l i v} { set z [expr {0.5 + 0}]; set k [expr {[lindex $i 0] * 1}]; lset l $k [expr {[lindex $v 0] + 0}]; return [list $k $l] }
+proc wx_setint {l i} { set z [expr {0.5 + 0}]; set k [expr {[lindex $i 0] - 1}]; lset l $k [expr {[lindex $l 0] + 1}]; return $l }
+proc wx_get {l i} { set z [expr {0.5 + 0}]; set k [expr {[lindex $i 0] + 1}]; return [list $k [lindex $l $k]] }
+proc wx_loop {n} { set a [lrepeat $n 0.0]; set b [lrepeat $n 0]; set o 0.25; for {set y 1} {$y < $n - 1} {incr y} { for {set x -1} {$x <= 1} {incr x} { set k [expr {([lindex $b $y] + $y + $x) % $n}]; lset a $k [expr {[lindex $a $k] + $y * 0.5 + $x * $o}]; lset b $k [expr {[lindex $b $k] + $y}] } }; return $a }
+proc wx_keep {l i} { set z [expr {0.5 + 0}]; set k [expr {[lindex $i 0] + 0}]; lset l $k 9; return [list $k $l [lindex $l $k]] }
+# decision 83: integers of up to 126 bits are computed in 128-bit machine arithmetic (the 64-bit unsigned generators and hashes of programs); the same as the bignum code
+proc bg_ops {a b} { return [list [expr {$a + $b}] [expr {$a - $b}] [expr {$a * $b}] [expr {$a & $b}] [expr {$a | $b}] [expr {$a ^ $b}]] }
+proc bg_sh {a n} { return [list [expr {$a << $n}] [expr {$a >> $n}]] }
+proc bg_mask {a b} { set M 0xFFFFFFFFFFFFFFFF; return [list [expr {($a + $b) & $M}] [expr {(($a << 23) | ($a >> 41)) & $M}] [expr {($a * $b) & $M}]] }
+proc bg_run {s0 s1 s2 s3 n} {
+    set M 0xFFFFFFFFFFFFFFFF; set acc 0.0
+    for {set i 0} {$i < $n} {incr i} {
+        set x [expr {($s0 + $s3) & $M}]
+        set r [expr {((($x << 23) | ($x >> 41)) + $s0) & $M}]
+        set t [expr {($s1 << 17) & $M}]
+        set s2 [expr {$s2 ^ $s0}]; set s3 [expr {$s3 ^ $s1}]; set s1 [expr {$s1 ^ $s2}]; set s0 [expr {$s0 ^ $s3}]; set s2 [expr {$s2 ^ $t}]
+        set s3 [expr {(($s3 << 45) | ($s3 >> 19)) & $M}]
+        set acc [expr {$acc + ($r >> 11) * (1.0 / 9007199254740992.0)}]
+    }
+    return [list $acc $s0 $s1 $s2 $s3]
+}
