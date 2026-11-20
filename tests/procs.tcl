@@ -2665,3 +2665,43 @@ proc rd_pdirect {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { inc
 proc rd_swap {} { proc ::rd_leaf {} { uplevel 1 {set x 77}; return 1 } }
 proc rd_loop {n} { set x 100; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_leaf]; if {$i == 1} { rd_swap } }; return [list $x $s] }
 proc rd_two {n} { set x 100; set y 200; set s 0; for {set i 0} {$i < $n} {incr i} { incr s [rd_leaf]; incr x; incr y 2 }; return [list $x $y $s] }
+
+# decision 80: a list of integers that is read from a list object and built in a native vector (`lappend e [lindex $P ...]`, vb_lift: the lifting step of the texture decoder),
+# and `lset` of an integer into a list that writes the element over in place when nothing else holds it (vb_inplace*)
+proc vb_lift {Pvar off stride n} {
+    upvar 1 $Pvar P
+    set ne [expr {($n + 1) >> 1}]; set no [expr {$n >> 1}]
+    set e {}; set o {}
+    for {set i 0} {$i < $ne} {incr i} { lappend e [lindex $P [expr {$off + $i * $stride}]] }
+    for {set i 0} {$i < $no} {incr i} { lappend o [lindex $P [expr {$off + ($ne + $i) * $stride}]] }
+    for {set i 0} {$i < $ne} {incr i} { lset e $i [expr {[lindex $e $i] * 3 + 1}] }
+    for {set i 0} {$i < $no} {incr i} { lset o $i [expr {[lindex $o $i] - [lindex $e [expr {min($i, $ne - 1)}]]}] }
+    for {set i 0} {$i < $ne} {incr i} { lset P [expr {$off + 2 * $i * $stride}] [lindex $e $i] }
+    for {set i 0} {$i < $no} {incr i} { lset P [expr {$off + (2 * $i + 1) * $stride}] [lindex $o $i] }
+}
+proc vb_lift_w {lst off stride n} { set P $lst; set keep [lindex $P 0]; vb_lift P $off $stride $n; return [list $P $lst $keep] }
+proc vb_lift_str {lst n} { set P $lst; set s [string length $P]; vb_lift P 0 1 $n; return [list $P $s] }
+proc vb_lift_twice {lst n} { set P $lst; vb_lift P 0 1 $n; vb_lift P 0 1 $n; set Q $P; vb_lift P 0 1 $n; return [list $P $Q] }
+proc vb_drive {k n} { set P [lrepeat $n 0]; for {set i 0} {$i < $n} {incr i} { lset P $i $i }; for {set r 0} {$r < $k} {incr r} { vb_lift P 0 1 $n; vb_lift P 0 [expr {$n / 2}] 2 }; return [list [lindex $P 0] [lindex $P end] [llength $P]] }
+proc vb_inplace {n} {
+    set a [lrepeat $n 0]; set x [lindex $a 0]; set keeps {}
+    for {set r 0} {$r < 3} {incr r} {
+        for {set i 0} {$i < $n} {incr i} { lset a $i [expr {$i + $r * 100}] }
+        set y [lindex $a 1]; lset a 1 -5; lappend keeps $y
+    }
+    return [list $a $x $keeps]
+}
+proc vb_inplace_shared {n} {
+    set a [lrepeat $n 0]
+    for {set i 0} {$i < $n} {incr i} { lset a $i $i }
+    set b $a; lset a 0 99; set c [lrange $a 0 end]; lset a 1 77; lset c 1 55
+    return [list $a $b $c]
+}
+proc vb_inplace_str {l} { set s [string length $l]; lset l 0 5; lset l 0 6; return [list $l $s] }
+proc vb_inplace_elem {l} {
+    set k [lindex $l 1]; set m [list [lindex $l 2]]; set nested [list $l]
+    for {set r 0} {$r < 3} {incr r} { lset l 1 [expr {$r + 40}]; lset l 2 [expr {$r + 50}]; lset l 0 [expr {$r * 1000000000000}] }
+    return [list $l $k $m $nested]
+}
+proc vb_inplace_type {l} { for {set r 0} {$r < 2} {incr r} { lset l 0 [expr {$r + 1}]; lset l 1 [expr {$r + 2}] }; return [list $l [string is integer [lindex $l 0]] [expr {[lindex $l 0] + 0.5}] [expr {[lindex $l 1] / 4}]] }
+proc vb_inplace_err {l i} { lset l $i 5; return $l }

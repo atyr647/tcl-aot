@@ -1308,6 +1308,36 @@ TBC_INLINE Tcl_Obj *tbc_lset_i(Tcl_Interp *interp, Tcl_Obj *list, int64_t i, Tcl
     }
 }
 
+/* lset of an integer at an integer index (decision 80).  The same as tbc_lset_i with the value made here: in the in-place case the element that is replaced is written over
+ * when the list is the only one that holds it (reference count 1, an integer: nothing else can see the object, as with `incr` on an unshared integer), so a list that is updated
+ * element by element (the lifting steps of the texture decoder) makes no object and frees none after the first pass over it. */
+TBC_INLINE Tcl_Obj *tbc_lset_ii(Tcl_Interp *interp, Tcl_Obj *list, int64_t i, int64_t w) {
+    if (list->typePtr == tbcList && list->bytes == NULL && !Tcl_IsShared(list)) {
+        int n;
+        Tcl_Obj **v;
+        if (Tcl_ListObjGetElements(interp, list, &n, &v) == TCL_OK && i >= 0 && i < n) {
+            Tcl_Obj *old = v[i];
+            if (old->refCount == 1 && (old->typePtr == tbcInt || old->typePtr == tbcWide)) {
+                Tcl_SetWideIntObj(old, (Tcl_WideInt) w);
+            } else {
+                Tcl_Obj *val = tbc_newint(w);
+                v[i] = val;
+                Tcl_IncrRefCount(val);
+                Tcl_DecrRefCount(old);
+            }
+            Tcl_IncrRefCount(list);
+            return list;
+        }
+    }
+    {
+        Tcl_Obj *io = tbc_newint(i), *vo = tbc_newint(w), *r;
+        Tcl_IncrRefCount(vo);
+        r = TclLsetList(interp, list, io, vo);
+        Tcl_DecrRefCount(io); Tcl_DecrRefCount(vo);
+        return r;
+    }
+}
+
 /* ---- strings ---- */
 
 TBC_INLINE int tbc_fmt_i64(char *buf, int64_t w) {

@@ -812,6 +812,16 @@ lappend calls {rename ::tcl::binary::scan fs_scan_o; proc ::tcl::binary::scan {a
 foreach n {0 1 2 5 40} { lappend calls [list lp_multi $n] [list lp_mixed $n] [list lp_unset $n] [list lp_shared $n] [list lp_result $n] [list lp_base {a b} $n] [list lp_base "a \{b" $n] [list lp_base {} $n] [list lp_base 5 $n] }
 foreach n {0 1 2 3} { lappend calls [list lp_self $n] }
 lappend calls {lp_pre} {lp_multi} {lp_multi 1 2} {lp_base x}
+
+# decision 80: objects appended to a native vector (the lifting step), in place `lset`; lists with doubles, text, non-canonical integers, an element held elsewhere, a shared list, a string form
+set vbl {{1 2 3 4 5 6 7 8} {} {5} {1 2 3 4 5 6 7 8 9} {1 2 3.5 4 5 6 7 8} {1 2 3 abc 5 6 7 8} {1 2 3 007 5 6 7 8} {1 2 0x10 4 5 6 7 8} {1 2 3 1e3 5 6 7 8} {1 2 " 5" 4 5 6 7 8} {1 2 3 {} 5 6 7 8} {1 2 3 4 5 6 7 100000000000000000000} {9223372036854775807 2 3 4 5 6 7 8} {-1 -2 -3 -4 -5 -6 -7 -8} {1 {2 3} 3 4 5 6 7 8} {1 2 3 4}}
+foreach l $vbl { foreach n {0 1 2 3 7 8 9} { lappend calls [list vb_lift_w $l 0 1 $n] [list vb_lift_str $l $n] [list vb_lift_twice $l $n] } }
+foreach l {{1 2 3 4 5 6 7 8} {1 2 3 4 5 6 7 8 9 10 11 12}} { foreach {off stride n} {0 2 4 1 2 3 0 3 4 2 1 5 5 1 4} { lappend calls [list vb_lift_w $l $off $stride $n] } }
+lappend calls {vb_lift_w} {vb_lift_w {1 2} 0 1} {vb_lift_w "1 \{2" 0 1 2} {vb_lift_w 5 0 1 1} {vb_lift_w 5 0 1 2}
+foreach n {0 1 2 8 33} { lappend calls [list vb_inplace $n] [list vb_inplace_shared $n] }
+foreach l {{1 2 3} {007 0x10 1e3} {1 2 3.5} {a b c} {{1 2} 3 4} {1 2 3 4 5} {100000000000000000000 2 3} {-1 -2 -3} {5 5 5}} { lappend calls [list vb_inplace_str $l] [list vb_inplace_elem $l] [list vb_inplace_type $l] }
+foreach {l i} {{1 2 3} 3 {1 2 3} -1 {1 2 3} end {1 2 3} abc {} 0 {1 2 3} 1.5 {1 2 3} {0 0}} { lappend calls [list vb_inplace_err $l $i] }
+foreach {k n} {0 8 1 8 3 16 2 1 2 2 5 33} { lappend calls [list vb_drive $k $n] }
 foreach n {0 1 2 5 30} { lappend calls [list rs_main $n] [list rs_mklev $n] [list cs_outer $n] [list cs_outer2 $n] [list cs_outer3 $n] }
 foreach h {{} {rs_adddl} {rs_baddl} {rs_oddl} {rs_adddl; rs_oddl} {set dl {5 6}} {set dl 7} {unset dl} {set dl "1 2 \{"} {set dl {1.5 2}} {set dl { 5 6 }}} { foreach n {0 1 4 12} { lappend calls [list rs_adj $n $h] } }
 lappend calls {rs_main 2.5} {rs_mklev 2.5} {rs_up nosuch} {cs_outer 2.5}

@@ -2031,6 +2031,11 @@ proc stepT0 {key pc in} {
                 return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] $el] "\{ int64_t i_ = si$pi; if (TBC_UNLIKELY((uint64_t) i_ >= (uint64_t) av$av.n)) goto D$pc; av$av.p\[i_\] = si$pv; \}"]
             }
             if {[kd $el] ne "B"} { return $dead }
+            if {[kd $ei] eq "I" && [kd $ev] eq "I"} {
+                # an integer written at an integer index: no object is made for the value when the element is written over in place (decision 80)
+                set fl [fl $key [list {*}[lrange $in 0 [expr {$pi-1}]] $ei $ev B]]
+                return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] B] "\{ Tcl_Obj *lst_ = s$pl, *r_; Tcl_DecrRefCount(lst_); r_ = tbc_lset_ii(interp, lst_, si$pi, si$pv); if (!r_) \{ Tcl_IncrRefCount(lst_); goto $fl; \} s$pi = r_; \}"]
+            }
             set st [list {*}[lrange $in 0 [expr {$pi-1}]] [expr {[kd $ei] eq "I" ? $ei : "B"}] B B]
             set pre "[boxc $P $pv $ev]"
             if {[kd $ei] ne "I"} { append pre " [boxc $P $pi $ei]" }
@@ -2070,6 +2075,17 @@ proc stepT0 {key pc in} {
                     # an integer appended to a native vector (the result of lappend is the list: a view of the vector)
                     set val [expr {[lt $e] eq "" ? "si$top" : [c_int [lindex $PI($P,lits) [lt $e]]]}]
                     return [R fall [lreplace $in $top $top A:$v] "if (TBC_UNLIKELY(!tbc_ivec_push(&av$v, $val))) goto D$pc;" stores [list [list $v A]]]
+                }
+                if {[kd $e] eq "B" && "A:$v" ni [lrange $in 0 [expr {$top-1}]] && !$PI($P,floaty) && !$::curWpol} {
+                    # an object appended to a native vector (decision 80), in a proc with no sign of floating-point numbers (as an object operand of its arithmetic is taken for an integer
+                    # there, decision 41): an integer in its canonical text goes in as the number it is (the list made of the vector reads the same); anything else, or no memory, is the
+                    # boxed code's (it appends the object to the list the hand-over makes of the vector; nothing has changed before), and a proc that adapts notes a double
+                    set note [expr {$PI($P,wadapt) ? "tbc_wnote(&tbc_wp_[cident $P], s$top); " : ""}]
+                    return [R fall [lreplace $in $top $top A:$v] "\{ int64_t t_; if (TBC_UNLIKELY(!tbc_arg_int(s$top, &t_))) \{ ${note}goto D$pc; \} if (TBC_UNLIKELY(!tbc_ivec_push(&av$v, t_))) goto D$pc; Tcl_DecrRefCount(s$top); \}" stores [list [list $v A]]]
+                }
+                if {[kd $e] eq "W" && "A:$v" ni [lrange $in 0 [expr {$top-1}]]} {
+                    # (a tagged number: an integer goes in, a double is the boxed code's)
+                    return [R fall [lreplace $in $top $top A:$v] "if (TBC_UNLIKELY(sw$top || !tbc_ivec_push(&av$v, si$top))) goto D$pc;" stores [list [list $v A]]]
                 }
                 return [R dead {} "goto D$pc;" stores [list [list $v B]]]
             }
