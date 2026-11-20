@@ -790,6 +790,16 @@ lappend calls {set a [fs_loop 5]; rename fs_f32a fs_f32a_o; proc fs_f32a {x} { r
 lappend calls {set a [fs_loop 3]; rename fs_f32 fs_f32_r; set e [catch {fs_loop 3} m]; rename fs_f32_r fs_f32; list $a $e $m [fs_loop 3]}
 lappend calls {set a [fs_listloop 3]; rename fs_f32l fs_f32l_r; set e [catch {fs_listloop 3} m]; rename fs_f32l_r fs_f32l; list $a $e $m [fs_listloop 3]}
 lappend calls {set a [fs_loop 3]; rename fs_f32 {}; set e [catch {fs_loop 3} m]; proc fs_f32 {x} { binary scan [binary format f $x] f r; return $r }; list $a $e $m [fs_loop 3]}
+# decision 79: `binary format f` and `f*` typed: a double, an object, an integer, a string, NaN, Inf and the float range's edges as the pending value, its bytes, a list
+foreach v {0 0.1 -0.0 1.5 3.14159 16777217 16777215.5 1e-45 7e-46 1e-50 1.17549435e-38 3.4028235e38 3.4028236e38 3.5e38 -3.5e38 1e300 -1e300 1e-300 1e400 Inf -Inf NaN 0x10 " 5" abc {} 9223372036854775807 100000000000000000000 true 1.5e-39 2.5 -7 0} {
+    lappend calls [list f9_bytes $v] [list f9_mix $v] [list f9_int $v] [list f9_arg $v] [list f9_pair $v] [list f9_list [list $v 1.25]] [list f9_listscan [list $v $v]] [list f9_listscan $v] [list f9_loopobj [list $v 2.0]]
+}
+foreach l {{} {1 2 3} {1.5 abc} {0.1 NaN} {Inf -Inf 1e39} {-0.0 16777217 2.5} {{1 2} 3} {1 {} 2} {0x10 1e-45}} { lappend calls [list f9_list $l] [list f9_listscan $l] [list f9_loopobj $l] }
+lappend calls [list f9_two 1.5 2.25] [list f9_two abc 1] [list f9_two 1e300 -1e300] [list f9_loop 0] [list f9_loop 9] [list f9_loop 2000]
+lappend calls {set a [f9_loop 3]; rename binary binary_f9; proc binary {args} { incr ::f9n; uplevel 1 [list binary_f9 {*}$args] }; set ::f9n 0; set b [f9_loop 3]; set n $::f9n; rename binary {}; rename binary_f9 binary; list $a $b $n [f9_loop 3]}
+lappend calls {set ::trj {}; trace add execution binary enter {lappend ::trj}; set r [f9_loop 3]; trace remove execution binary enter {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set ::trj {}; trace add execution ::tcl::binary::format leave {lappend ::trj}; set r [f9_list {1 2}]; trace remove execution ::tcl::binary::format leave {lappend ::trj}; list $r [llength $::trj]}
+lappend calls {set a [catch {f9_list {1.5 2}} m1]; rename ::tcl::binary::format f9_fmt_o; proc ::tcl::binary::format {args} { return "replaced" }; set b [catch {f9_list {1.5 2}} m2]; set c [catch {f9_mix 2.5} m3]; rename ::tcl::binary::format {}; rename f9_fmt_o ::tcl::binary::format; list $a $m1 $b $m2 $c $m3 [f9_mix 2.5]}
 lappend calls {namespace eval fsns { proc fs_f32 {x} { return NS } }; set a [fs_loop 2]; namespace eval fsns { rename fs_f32 {} }; list $a [fs_loop 2]}
 lappend calls {set ::trj {}; trace add execution fs_f32 enter {lappend ::trj}; set r [fs_loop 3]; trace remove execution fs_f32 enter {lappend ::trj}; list $r [llength $::trj]}
 lappend calls {set ::trj {}; trace add execution fs_f32l leave {lappend ::trj}; set r [fs_listloop 3]; trace remove execution fs_f32l leave {lappend ::trj}; list $r [llength $::trj]}

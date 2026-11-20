@@ -1437,6 +1437,7 @@ proc boxe {P p e} {
         K { if {[lt $e] eq "2"} { return "tbc_newpair(ka$p, kj$p)" }; return "tbc_newkey(kb$p, kl$p)" }
         Y { return "tbc_ylist_[ykinds $e](&[yvar $p [ykinds $e]])" }
         W { return "(sw$p ? tbc_newdbl(sd$p) : tbc_newint(si$p))" }
+        P { return "tbc_f32_bytes(sd$p)" }
         N { return "tbc_ivec_list(&sv$p, 1)" }
         X { return "({ Tcl_Obj *c_ = Tcl_NewObj(); Tcl_IncrRefCount(c_); c_; })" }
         Z {
@@ -3458,6 +3459,10 @@ proc stepInvoke {key pc in d n} {
         set c "[closureGuard $cp $ns $nm0 "goto D$pc;"] $pre\{ Tcl_Obj *ov_\[\] = { [join $slots {, }] }; int r_; tbc_setpc(interp, $pc); r_ = Tcl_EvalObjv(interp, $n, ov_, TBC_EV); if (r_ != TCL_OK) \{ rc = tbc_rc = r_; tbc_st = 0; [enterG $key [expr {-$pc-1}] $st "" [flushSet $P $pc]] \}$rel s$q = tbc_takeres(interp); \}"
         return [R fall [list {*}$below B] $c]
     }
+    if {[regexp {^(?:::)?tcl::binary::format$} $nm0]} {
+        set r [binFormat $key $P $pc $in $d $n $q $nm0]
+        if {$r ne ""} { return $r }
+    }
     if {[regexp {^(?:::)?tcl::binary::scan$} $nm0]} {
         set r [binScan $key $P $pc $in $d $n $q]
         if {$r ne ""} { return $r }
@@ -3591,14 +3596,44 @@ proc charScan {key P pc in d n q} {
     set c "\{ int ch_, r_ = tbc_scan_c($dx, &ch_);$rel if (r_ == 1) \{ Tcl_Obj *n_ = Tcl_NewIntObj(ch_); Tcl_IncrRefCount(n_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = n_; \} si$q = r_; \}"
     return [R fall [list {*}$below I] $c stores [list [list $vi B]]]
 }
+# `binary format f X` and `binary format f* L` (decision 79): the float32 rounding of the engine's idiom `binary scan [binary format f $x] f r`.  `f` with a double or
+# an object makes a pending value, kind P: the double rounded to float32 (tbc_f32_round), which `binary scan ... f` reads back as it is (binScan); any other use gets
+# the four bytes (boxe).  `f*` with an object makes the bytes in C (tbc_f32_bytes_list).  An argument that is not a number makes the step hand over, so the boxed code
+# raises the error.  "" when the call is not of one of these forms: the generic call of the built-in then does it.
+proc binFormat {key P pc in d n q nm0} {
+    global PI
+    if {$n != 3} { return "" }
+    set below [lrange $in 0 [expr {$q-1}]]
+    lassign [lrange $in [expr {$q+1}] end] ef ea
+    if {[kd $ef] ne "L" || [kd $ea] ni {B D}} { return "" }
+    set fmt [lindex $PI($P,lits) [lt $ef]]
+    if {$fmt eq "f" } { set kout P } elseif {$fmt eq "f*" && [kd $ea] eq "B"} { set kout B } else { return "" }
+    set pa [expr {$q+2}]
+    # (the guard of every call of a built-in that is pure: an execution trace on the ensemble, or a redefinition, sends the boxed code)
+    set ei [ensIndex $nm0]
+    set guard [expr {$ei >= 0 ? "if (TBC_UNLIKELY(tbc_ens_pin\[$ei\] && (tbc_ens_pin\[$ei\]->flags & CMD_HAS_EXEC_TRACES))) goto D$pc; " : ""}]
+    append guard [depCheck $P $pc $nm0]
+    if {$fmt eq "f"} {
+        if {[kd $ea] eq "D"} {
+            set c "\{ $guard sd$q = tbc_f32_round(sd$pa); \}"
+        } else {
+            set c "\{ $guard double x_; if (TBC_UNLIKELY(!tbc_f32_obj(s$pa, &x_))) goto D$pc; Tcl_DecrRefCount(s$pa); sd$q = x_; \}"
+        }
+    } else {
+        set c "\{ $guard Tcl_Obj *o_ = tbc_f32_bytes_list(s$pa); if (TBC_UNLIKELY(!o_)) goto D$pc; Tcl_DecrRefCount(s$pa); s$q = o_; \}"
+    }
+    return [R fall [list {*}$below $kout] $c]
+}
 proc binScan {key P pc in d n q} {
     global PI
     if {$n != 4} { return "" }
     set below [lrange $in 0 [expr {$q-1}]]
     lassign [lrange $in [expr {$q+1}] end] ed ef ev
-    if {[kd $ef] ne "L" || [kd $ev] ne "L" || [kd $ed] ni {B L U}} { return "" }
+    if {[kd $ef] ne "L" || [kd $ev] ne "L" || [kd $ed] ni {B L U P}} { return "" }
     set fmt [lindex $PI($P,lits) [lt $ef]]
     set isF [regexp $::tbcScanFmtF $fmt -> fstar]
+    # (a pending float32 from `binary format f` (kind P) is read by `f` only; any other format takes its bytes, made by boxc)
+    if {[kd $ed] eq "P" && !($isF && $fstar eq "")} { return "" }
     if {!$isF && ![regexp $::tbcScanFmt $fmt -> t u]} { return "" }
     set vi [lsearch -exact $PI($P,vnames) [lindex $PI($P,lits) [lt $ev]]]
     if {$vi < 0} { return "" }
@@ -3620,7 +3655,9 @@ proc binScan {key P pc in d n q} {
             W { set st "wt$vi = 1; d$vi = x_;$flag" }
             default { set st "tbc_st_dbl(&l$vi, x_);" }
         }
-        set c "\{ double x_; if (TBC_UNLIKELY(!tbc_bscan_f($dx, &x_))) goto D$pc;$rel $st si$q = 1; \}"
+        # (decision 79: a pending float32 is the double itself, already rounded: nothing to read, nothing that can fail)
+        set get [expr {[kd $ed] eq "P" ? "double x_ = sd$pd;" : "double x_; if (TBC_UNLIKELY(!tbc_bscan_f($dx, &x_))) goto D$pc;$rel"}]
+        set c "\{ $get $st si$q = 1; \}"
         return [R fall [list {*}$below I] $c stores [list [list $vi D]]]
     }
     if {$isF} { set c "\{ Tcl_Obj *n_ = tbc_bscan_fl($dx);$rel Tcl_IncrRefCount(n_); if (l$vi) Tcl_DecrRefCount(l$vi); l$vi = n_; si$q = 1; \}"; return [R fall [list {*}$below I] $c stores [list [list $vi B]]] }

@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <limits.h>
+#include <float.h>
 #include <math.h>
 
 extern Tcl_Obj *TclLsetList(Tcl_Interp *, Tcl_Obj *listPtr, Tcl_Obj *indexArgPtr, Tcl_Obj *valuePtr);
@@ -1047,6 +1048,51 @@ static Tcl_Obj *tbc_bscan(Tcl_Obj *data, int type, int uns) {
     ckfree((char *) el);
     if (size == 1) for (i = 0; i < 256; i++) if (small[i]) Tcl_DecrRefCount(small[i]);
     return res;
+}
+/* `binary format f $x` and `binary format f* $l` in typed code (decision 79: the float32 rounding idiom of the engine, `binary scan [binary format f $x] f r`).
+ * FormatNumber's 'f' of tclBinary.c: a double beyond the float range is the end of the range with its sign (an infinity too: not an infinity), any other is
+ * the cast to float.  The object of an argument is read as FormatNumber reads it: Tcl_GetDoubleFromObj, or the double of a double object that Tcl refuses (NaN).
+ * Anything else returns 0 (the boxed code makes the call and raises its error); nothing is changed then. */
+static double tbc_f32_round(double d) {
+    float f;
+    if (fabs(d) > (double) FLT_MAX) f = (d >= 0.0) ? FLT_MAX : -FLT_MAX;
+    else f = (float) d;
+    return (double) f;
+}
+static int tbc_f32_obj(Tcl_Obj *o, double *out) {
+    double d;
+    if (Tcl_GetDoubleFromObj(NULL, o, &d) != TCL_OK) {
+        if (o->typePtr != &tclDoubleType) return 0;
+        d = o->internalRep.doubleValue;
+    }
+    *out = tbc_f32_round(d);
+    return 1;
+}
+/* the four bytes `binary format f` writes for a value that tbc_f32_round gave (native order): a new object, refcount 1 */
+static Tcl_Obj *tbc_f32_bytes(double d) {
+    float f = (float) d;
+    Tcl_Obj *o = Tcl_NewByteArrayObj((const unsigned char *) &f, (int) sizeof f);
+    Tcl_IncrRefCount(o);
+    return o;
+}
+/* `binary format f* $l`: the bytes of every element (the list must be one; an element must be a number, as above); NULL otherwise */
+static Tcl_Obj *tbc_f32_bytes_list(Tcl_Obj *l) {
+    int n, i;
+    Tcl_Obj **el;
+    unsigned char *b;
+    Tcl_Obj *o;
+    if (Tcl_ListObjGetElements(NULL, l, &n, &el) != TCL_OK) return NULL;
+    o = Tcl_NewByteArrayObj(NULL, n * (int) sizeof(float));
+    Tcl_IncrRefCount(o);
+    b = Tcl_SetByteArrayLength(o, n * (int) sizeof(float));
+    for (i = 0; i < n; i++) {
+        double d;
+        float f;
+        if (!tbc_f32_obj(el[i], &d)) { Tcl_DecrRefCount(o); return NULL; }
+        f = (float) d;
+        memcpy(b + (size_t) i * sizeof f, &f, sizeof f);
+    }
+    return o;
 }
 /* `binary scan $data f var` and `binary scan $data f* var` (decision 76): ScanNumber's 'f' (a native float of 4 bytes, widened to a double).  The first form takes the
  * first 4 bytes: 0 when there are fewer (the scan then sets nothing and returns 0: typed code hands over).  The second is the list of every whole float in the data

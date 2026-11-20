@@ -2584,6 +2584,17 @@ proc fs_listloop {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [e
 proc fs_chain {x} { return [fs_f32 [fs_f32a [expr {$x * 1.0000001}]]] }
 proc fs_keep {x} { set r $x; binary scan [binary format f $x] f r; return [list $r $x] }
 proc fs_ret_unset {d} { binary scan $d f r; return $r }
+# decision 79: `binary format f` and `f*` typed (the value is kept as a pending float32 that the scan reads, or is made into its bytes where something else takes it)
+proc f9_bytes {x} { return [binary encode hex [binary format f $x]] }
+proc f9_mix {x} { set b [binary format f $x]; binary scan $b f r; return [list $r [string length $b] [binary encode hex $b]] }
+proc f9_int {x} { binary scan [binary format f $x] c r; return $r }
+proc f9_two {x y} { binary scan [binary format f $x][binary format f $y] f2 r; return $r }
+proc f9_arg {x} { set n [string length [binary format f $x]]; return [list $n [binary scan [binary format f $x] f r] $r] }
+proc f9_pair {x} { binary scan [binary format f $x] f r; binary scan [binary format f [expr {$r * 3}]] f s; return [list $r $s] }
+proc f9_list {l} { set b [binary format f* $l]; return [list [string length $b] [binary encode hex $b]] }
+proc f9_listscan {l} { binary scan [binary format f* $l] f* r; return $r }
+proc f9_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { binary scan [binary format f [expr {$i * 0.3 - 7.0}]] f r; set s [expr {$s + $r}] }; return $s }
+proc f9_loopobj {l} { set s 0.0; foreach e $l { binary scan [binary format f $e] f r; set s [expr {$s + $r}] }; return $s }
 
 # decision 77: `lappend var a b c` typed (lp_*); typed code entered again at a loop head with a table array that is dead or unset and an integer vector read from the frame (rs_*);
 # a proc whose callee links to variables of its caller by `upvar 1` is caller-safe (cs_*)
