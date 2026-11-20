@@ -1841,6 +1841,9 @@ proc stepT0 {key pc in} {
             set parts ""; set rel ""
             # a key that a native array operation (kind R) is about to use is built in a buffer of the slot, as text, without an object (kind K)
             set kc [keyConsumer $P $pc $q]
+            # `lindex $l $i+1`, `$i-$j`: the index word of an integer and an integer or a literal offset, when the next instruction is the lindex that uses it, is the integer it names (decision 81)
+            set fc [foldIndexWord $P $pc $q $d $in]
+            if {$fc ne ""} { return [R fall [list {*}[lrange $in 0 [expr {$q-1}]] I] $fc] }
             # `$i,$j` of two integers: the key is held as the two integers (kind K:2); the text is only made if something needs it (see keyArgs, boxe)
             if {$kc ne "" && [allR $key [lindex $kc 1]] && $n == 3} {
                 set e1 [lindex $in $q]; set e2 [lindex $in [expr {$q+1}]]; set e3 [lindex $in [expr {$q+2}]]
@@ -2886,6 +2889,46 @@ proc fvalue {P p e tmplObj tmplInt} {
         B { return [list "" [string map [list @V@ s$p] $tmplObj] ""] }
     }
     return ""
+}
+
+# The index word `$a+$b`, `$a-$b`, `$a+3` or `$a-3` (a `strcat` of two or three parts: Tcl's `integer?[+-]integer?` index form, TclGetIntForIndex in tclUtil.c) whose only use is the
+# `listIndex` that follows at once: the integer it names, held unboxed (decision 81), so that no string is made and parsed for every `lindex` of a loop.  Returns the C code that
+# leaves the integer in si<q>, or "" when the shape is another one.  The interpreter parses each part as an `int` (32 bits: a part outside the range, or a sum that leaves it, is an
+# error or undefined there), and a part that is an object must be an integer in its canonical text; whatever does not fit these goes to the boxed code at the strcat.
+proc foldIndexWord {P pc q d in} {
+    global PI
+    set n [expr {$d - $q}]
+    if {$n != 2 && $n != 3} { return "" }
+    set nx $PI($P,next,$pc)
+    if {![info exists PI($P,ins,$nx)] || [lindex $PI($P,ins,$nx) 0] ne "listIndex"} { return "" }
+    if {![info exists PI($P,depth,$nx)] || $PI($P,depth,$nx) != $q + 1} { return "" }
+    foreach p $PI($P,reach) { if {$p != $pc && $nx in $PI($P,succ,$p)} { return "" } }
+    set e1 [lindex $in $q]; set e2 [lindex $in [expr {$q+1}]]
+    if {[kd $e1] ni {I B} || ([kd $e1] eq "I" && [lt $e1] ne "")} { return "" }
+    set rel ""; set pre ""
+    switch [kd $e1] {
+        I { append pre " a0_ = si$q;" }
+        B { append pre " if (TBC_UNLIKELY(!tbc_arg_int(s$q, &a0_))) goto D$pc;"; append rel " Tcl_DecrRefCount(s$q);" }
+    }
+    if {$n == 2} {
+        if {[kd $e2] ni {L I} || [lt $e2] eq ""} { return "" }
+        set lit [lindex $PI($P,lits) [lt $e2]]
+        if {![regexp {^([+-])(0|[1-9][0-9]*)$} $lit -> sg dg] || [string length $dg] > 9} { return "" }
+        set comb "a1_ = [expr {$sg eq "-" ? "-$dg" : $dg}];"
+        set sum "r_ = a0_ + a1_;"
+    } else {
+        set e3 [lindex $in [expr {$q+2}]]
+        if {[kd $e2] ne "L" || [lt $e2] eq "" || [lindex $PI($P,lits) [lt $e2]] ni {+ -}} { return "" }
+        set op [lindex $PI($P,lits) [lt $e2]]
+        if {[kd $e3] ni {I B} || ([kd $e3] eq "I" && [lt $e3] ne "")} { return "" }
+        set slot [expr {$q + 2}]
+        switch [kd $e3] {
+            I { set comb "a1_ = si$slot;" }
+            B { set comb "if (TBC_UNLIKELY(!tbc_arg_int(s$slot, &a1_))) goto D$pc;"; append rel " Tcl_DecrRefCount(s$slot);" }
+        }
+        set sum "r_ = a0_ $op a1_;"
+    }
+    return "\{ int64_t a0_, a1_, r_;$pre $comb if (TBC_UNLIKELY(a0_ < -2147483647 - 1 || a0_ > 2147483647 || a1_ < -2147483647 - 1 || a1_ > 2147483647)) goto D$pc; $sum if (TBC_UNLIKELY(r_ < -2147483647 - 1 || r_ > 2147483647)) goto D$pc;$rel si$q = r_; \}"
 }
 
 # The instruction that uses the key that the strcat at pc leaves in slot q: {pc variable} when it is an array element operation of typed code (load, store,

@@ -66,7 +66,7 @@ for rate in 3 17 101; do
 done
 
 echo "== guard, nest cap, capture loop, unmodified Tcl, undefined behaviour"
-for t in guard typed osr hot cmdmap names nestcap capture pristine lite ubsan localvec nv dropin dbltext dblit litecall f32idiom rescall redef vecobj; do
+for t in guard typed osr hot cmdmap names nestcap capture pristine lite ubsan localvec nv dropin dbltext dblit litecall f32idiom rescall redef vecobj indexword; do
   out=$(tests/$t.sh 2>&1) || { printf '%s\n' "$out"; fail "tests/$t.sh"; continue; }
   printf '%s\n' "$out" | grep -E ': ok$'
 done

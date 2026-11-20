@@ -2719,3 +2719,28 @@ proc vb_inplace_dbl_x {l} {
     return [list $l $s $k $b [expr {[lindex $l 0] / 2}] [string is double [lindex $l 1]]]
 }
 proc vb_inplace_dbl_err {l i} { lset l $i [expr {0.5 + 1.0}]; return $l }
+
+# decision 81: the index word `$i+1`, `$i-$j` of lindex (Tcl's integer?[+-]integer? form) is the integer it names, with no string made and parsed (ix_*)
+proc ix_basic {l i j} { return [list [lindex $l $i+1] [lindex $l $i-1] [lindex $l $i+$j] [lindex $l $i-$j] [lindex $l $j+$i] [lindex $l $j-$i] [lindex $l $i+0] [lindex $l $i-12]] }
+proc ix_one {l i j} { return [lindex $l $i-$j] }
+proc ix_lit {l i} { return [list [lindex $l $i+-2] [lindex $l $i--2] [lindex $l $i+2147483647] [lindex $l $i-2147483648] [lindex $l $i+007] [lindex $l $i+1x]] }
+proc ix_loop {l n} {
+    set s {}
+    for {set i 0} {$i < $n} {incr i} { lappend s [lindex $l $i+1] [lindex $l $i-1] [lindex $l $n-$i] [lindex $l $i-$n] [expr {[lindex $l $i+1] eq "" ? 0 : 1}] }
+    return $s
+}
+proc ix_vec {n} {
+    set v {}
+    for {set i 0} {$i < $n} {incr i} { lappend v [expr {$i * 7}] }
+    set s 0
+    for {set i -2} {$i < $n + 2} {incr i} { catch { incr s [lindex $v $i+1] }; catch { incr s [lindex $v $i-2] } }
+    return [list $s $v]
+}
+proc ix_arith {l a b} { set i [expr {$a * 1}]; set j [expr {$b - 0}]; return [list [lindex $l $i+1] [lindex $l $i-$j] [lindex $l $j+$i]] }
+proc ix_wide {l a b} { set i [expr {$a * 1}]; set j [expr {$b - 0}]; return [list [lindex $l $i+$j] [lindex $l $i-$j] [lindex $l $i+1]] }
+proc ix_tag {l a j} { set i [expr {$a + 0}]; if {$j == 7} { set i [expr {$i + 0.5}] }; return [list [lindex $l $i+1] [lindex $l $j-$i]] }
+proc ix_keep {l i} { set k $i+1; return [list $k [lindex $l $k] [lindex $l $i+1]] }
+proc ix_shared {l i} { set m $l; set r [lindex $l $i+1]; lset m 0 X; return [list $r $m $l] }
+proc ix_nested {l i} { return [lindex $l $i+1 0] }
+proc ix_cond {l i j} { return [lindex $l [expr {$j ? "$i+1" : "$i-1"}]] }
+proc ix_obj {l i j} { return [lindex $l $i+$j] }

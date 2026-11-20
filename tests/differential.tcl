@@ -825,6 +825,16 @@ foreach {k n} {0 8 1 8 3 16 2 1 2 2 5 33} { lappend calls [list vb_drive $k $n] 
 foreach n {0 1 2 8 33} { lappend calls [list vb_inplace_dbl $n] }
 foreach l {{1.5 2.5 3.5} {1 2 3} {a b c} {1e3 2e3 3e3} {0x10 007 1_0} {1.5 2.5 3.5 4.5} {{1 2} 3 4} {-0.0 0.0 1.0} {1e308 -1e308 5.5}} { lappend calls [list vb_inplace_dbl_x $l] }
 foreach {l i} {{1.5 2 3} 3 {1.5 2 3} -1 {1.5 2 3} end {1.5 2 3} abc {} 0 {1.5 2 3} 1.5 {1.5 2 3} {0 0}} { lappend calls [list vb_inplace_dbl_err $l $i] }
+# decision 81: index words of lindex folded into the integer they name
+set ixl {{a b c d e f g h} {} {a} {{1 2} {3 4} {5 6}} "a \{b" {1 2 3 4 5 6 7 8 9 10 11 12 13 14 15}}
+set ixv {-9 -3 -2 -1 0 1 2 3 5 6 7 11 12 13 2147483646 2147483647 2147483648 -2147483647 -2147483648 -2147483649 9223372036854775807 007 0x5 5.0 " 5" end abc {} {1 2} 1e1 +3 -0}
+foreach l $ixl { foreach i $ixv { foreach j {0 1 -1 3 12 2147483647 -2147483648 2147483648 abc 007 { 1}} { lappend calls [list ix_basic $l $i $j] [list ix_one $l $i $j] [list ix_obj $l $i $j] } } }
+foreach l $ixl { foreach i $ixv { lappend calls [list ix_lit $l $i] [list ix_keep $l $i] [list ix_shared $l $i] [list ix_nested $l $i] } }
+foreach l $ixl { foreach n {0 1 2 5 9 20} { lappend calls [list ix_loop $l $n] } }
+foreach n {0 1 2 3 9 40} { lappend calls [list ix_vec $n] }
+foreach l $ixl { foreach {a b} {0 0 1 2 3 1 5 -3 -1 -2 2147483647 1 -2147483648 1 2147483647 -2147483648 4000000000 1 1 4000000000 1.5 2 2 1.5 abc 1 1 {} 007 1 08 1 0x3 1} { lappend calls [list ix_arith $l $a $b] [list ix_wide $l $a $b] } }
+foreach l $ixl { foreach a {0 1 3 5 -1 2.5 abc 1e1} { foreach j {0 1 7 -3 2147483647} { lappend calls [list ix_tag $l $a $j] } } }
+foreach l $ixl { foreach {i j} {0 1 1 1 2 -1 5 0} { lappend calls [list ix_cond $l $i $j] } }
 foreach n {0 1 2 5 30} { lappend calls [list rs_main $n] [list rs_mklev $n] [list cs_outer $n] [list cs_outer2 $n] [list cs_outer3 $n] }
 foreach h {{} {rs_adddl} {rs_baddl} {rs_oddl} {rs_adddl; rs_oddl} {set dl {5 6}} {set dl 7} {unset dl} {set dl "1 2 \{"} {set dl {1.5 2}} {set dl { 5 6 }}} { foreach n {0 1 4 12} { lappend calls [list rs_adj $n $h] } }
 lappend calls {rs_main 2.5} {rs_mklev 2.5} {rs_up nosuch} {cs_outer 2.5}
