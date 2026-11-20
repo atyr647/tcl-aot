@@ -2774,3 +2774,12 @@ proc lc_stack {l} { return [list [lmap e $l { expr {$e * 2.0} }] [lmap e $l { ex
 proc lc_pair {l} { return [lmap {a b} $l { expr {$a + $b} }] }
 proc lc_loop {n} { set r {}; for {set i 0} {$i < $n} {incr i} { lappend r [lmap e {1 2 3} { expr {$e * $i + 0.5} }] }; return $r }
 proc lc_big {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 0.25}] }; set m [lmap e $l { expr {$e + 1.0} }]; return [list [llength $m] [lindex $m end]] }
+# decision 82: the index word of lset (`$i+$j`, `$i-1`) is an integer in typed code
+proc ls_one {l i j v} { lset l $i+$j $v; return $l }
+proc ls_lit {l i v} { lset l $i-1 $v; lset l $i+2 $v; return $l }
+proc ls_val {l i j} { lset l $i-$j [expr {[lindex $l $i] * 2.0 + 1}]; return $l }
+proc ls_cond {l i j c} { lset l $i+$j [expr {$c ? 1.5 : 2}]; return $l }
+proc ls_call {l i j} { lset l $i+$j [ws_f32 [expr {$i * 0.1}]]; return $l }
+proc ls_loop {n} { set a [lrepeat $n 0.0]; for {set y 1} {$y < $n - 1} {incr y} { for {set x -1} {$x <= 1} {incr x} { lset a $y+$x [expr {$y * 0.5 + $x}] } }; return $a }
+proc ls_loopi {n} { set a [lrepeat $n 0]; for {set y 1} {$y < $n - 1} {incr y} { lset a $y-1 $y; lset a $y+1 [expr {$y * 3}] }; return $a }
+proc ls_keep {l i j} { set k $i+$j; lset l $k 9; return [list $k $l] }

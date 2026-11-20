@@ -2902,6 +2902,42 @@ proc fvalue {P p e tmplObj tmplInt} {
     return ""
 }
 
+# decision 82: the slot q that the strcat at pc leaves is used by one `lsetList` only, as its index, the deepest of its three operands (the value and the list are computed in between, by code that may branch and call), and
+# nothing enters that code from outside: the index word of `lset A $i+$j $v` is then the integer it names, as for lindex above
+proc lsetIndexOnly {P pc q} {
+    global PI
+    set seen [dict create]; set users {}
+    set todo [list $PI($P,next,$pc)]
+    set steps 0
+    while {[llength $todo]} {
+        set cur [lindex $todo end]; set todo [lrange $todo 0 end-1]
+        if {[dict exists $seen $cur]} continue
+        dict set seen $cur 1
+        if {[incr steps] > 400} { return 0 }
+        if {![info exists PI($P,depth,$cur)]} { return 0 }
+        lassign $PI($P,ins,$cur) op a
+        set d $PI($P,depth,$cur)
+        if {$d <= $q} { return 0 }
+        switch -- $op {
+            expandStart - expandStkTop - invokeExpanded - expandDrop - dup - over - reverse { return 0 }
+        }
+        lassign [effect $op $a $d {}] pops pushes kind
+        if {$d - $pops <= $q} {
+            if {$op ne "lsetList" || $d - 1 - $q != 2} { return 0 }
+            lappend users $cur; continue
+        }
+        if {$kind ni {fall jump cond}} { return 0 }
+        foreach sc $PI($P,succ,$cur) { lappend todo $sc }
+    }
+    if {[llength $users] != 1} { return 0 }
+    # nothing outside the walk jumps into it
+    foreach p $PI($P,reach) {
+        if {$p == $pc || [dict exists $seen $p]} continue
+        foreach sc $PI($P,succ,$p) { if {[dict exists $seen $sc]} { return 0 } }
+    }
+    return 1
+}
+
 # The index word `$a+$b`, `$a-$b`, `$a+3` or `$a-3` (a `strcat` of two or three parts: Tcl's `integer?[+-]integer?` index form, TclGetIntForIndex in tclUtil.c) whose only use is the
 # `listIndex` that follows at once: the integer it names, held unboxed (decision 81), so that no string is made and parsed for every `lindex` of a loop.  Returns the C code that
 # leaves the integer in si<q>, or "" when the shape is another one.  The interpreter parses each part as an `int` (32 bits: a part outside the range, or a sum that leaves it, is an
@@ -2911,9 +2947,10 @@ proc foldIndexWord {P pc q d in} {
     set n [expr {$d - $q}]
     if {$n != 2 && $n != 3} { return "" }
     set nx $PI($P,next,$pc)
-    if {![info exists PI($P,ins,$nx)] || [lindex $PI($P,ins,$nx) 0] ne "listIndex"} { return "" }
-    if {![info exists PI($P,depth,$nx)] || $PI($P,depth,$nx) != $q + 1} { return "" }
-    foreach p $PI($P,reach) { if {$p != $pc && $nx in $PI($P,succ,$p)} { return "" } }
+    if {[info exists PI($P,ins,$nx)] && [lindex $PI($P,ins,$nx) 0] eq "listIndex"} {
+        if {![info exists PI($P,depth,$nx)] || $PI($P,depth,$nx) != $q + 1} { return "" }
+        foreach p $PI($P,reach) { if {$p != $pc && $nx in $PI($P,succ,$p)} { return "" } }
+    } elseif {![lsetIndexOnly $P $pc $q]} { return "" }
     set e1 [lindex $in $q]; set e2 [lindex $in [expr {$q+1}]]
     if {[kd $e1] ni {I B} || ([kd $e1] eq "I" && [lt $e1] ne "")} { return "" }
     set rel ""; set pre ""

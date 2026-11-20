@@ -844,6 +844,11 @@ foreach l {{} {1} {1 2 3} {1.5 2.5 3.5} {1 2.5 3 4.5} {0 -1 -2.5 -0.0} {2 2 2} {
     lappend calls [list lc_d $l] [list lc_i $l] [list lc_b $l] [list lc_lit $l] [list lc_f $l] [list lc_cont $l] [list lc_brk $l] [list lc_mixed $l] [list lc_var $l] [list lc_stack $l] [list lc_pair $l] [list lc_nested [list $l $l]] [list lc_nested [list {} $l]] [list lc_two $l {1 2 3}] [list lc_two {4 5 6} $l]
 }
 foreach n {0 1 2 5 300} { lappend calls [list lc_loop $n] [list lc_big $n] }
+# decision 82: the index word of lset
+foreach l {{} {a} {1 2 3} {1.5 2.5 3.5} {1 2 3 4 5 6} {{1 2} 3 4}} { foreach {i j} {0 0 0 1 1 1 2 -1 1 -1 3 2 5 1 -2 1 0 -3 abc 1 1 abc 007 1 {} 1 2147483647 1 -2147483648 -1 1.5 1 2 0.5} {
+    lappend calls [list ls_one $l $i $j 7] [list ls_one $l $i $j 2.5] [list ls_val $l $i $j] [list ls_cond $l $i $j 1] [list ls_cond $l $i $j 0] [list ls_call $l $i $j] [list ls_keep $l $i $j]
+} ; foreach i {0 1 2 3 5 -1 abc 007 2147483647} { lappend calls [list ls_lit $l $i 4] [list ls_lit $l $i x] } }
+foreach n {0 1 2 3 5 40} { lappend calls [list ls_loop $n] [list ls_loopi $n] }
 foreach n {0 1 2 5 30} { lappend calls [list rs_main $n] [list rs_mklev $n] [list cs_outer $n] [list cs_outer2 $n] [list cs_outer3 $n] }
 foreach h {{} {rs_adddl} {rs_baddl} {rs_oddl} {rs_adddl; rs_oddl} {set dl {5 6}} {set dl 7} {unset dl} {set dl "1 2 \{"} {set dl {1.5 2}} {set dl { 5 6 }}} { foreach n {0 1 4 12} { lappend calls [list rs_adj $n $h] } }
 lappend calls {rs_main 2.5} {rs_mklev 2.5} {rs_up nosuch} {cs_outer 2.5}
