@@ -1338,6 +1338,33 @@ TBC_INLINE Tcl_Obj *tbc_lset_ii(Tcl_Interp *interp, Tcl_Obj *list, int64_t i, in
     }
 }
 
+/* the same for a double (decision 80): the element is written over when it is a double that only the list holds */
+TBC_INLINE Tcl_Obj *tbc_lset_id(Tcl_Interp *interp, Tcl_Obj *list, int64_t i, double d) {
+    if (list->typePtr == tbcList && list->bytes == NULL && !Tcl_IsShared(list)) {
+        int n;
+        Tcl_Obj **v;
+        if (Tcl_ListObjGetElements(interp, list, &n, &v) == TCL_OK && i >= 0 && i < n) {
+            Tcl_Obj *old = v[i];
+            if (old->refCount == 1 && old->typePtr == tbcDouble) {
+                Tcl_SetDoubleObj(old, d);
+            } else {
+                Tcl_Obj *val = Tcl_NewDoubleObj(d);
+                v[i] = val;
+                Tcl_IncrRefCount(val);
+                Tcl_DecrRefCount(old);
+            }
+            Tcl_IncrRefCount(list);
+            return list;
+        }
+    }
+    {
+        Tcl_Obj *io = tbc_newint(i), *vo = tbc_newdbl(d), *r;
+        r = TclLsetList(interp, list, io, vo);
+        Tcl_DecrRefCount(io); Tcl_DecrRefCount(vo);
+        return r;
+    }
+}
+
 /* ---- strings ---- */
 
 TBC_INLINE int tbc_fmt_i64(char *buf, int64_t w) {

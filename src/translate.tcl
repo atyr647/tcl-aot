@@ -2036,6 +2036,10 @@ proc stepT0 {key pc in} {
                 set fl [fl $key [list {*}[lrange $in 0 [expr {$pi-1}]] $ei $ev B]]
                 return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] B] "\{ Tcl_Obj *lst_ = s$pl, *r_; Tcl_DecrRefCount(lst_); r_ = tbc_lset_ii(interp, lst_, si$pi, si$pv); if (!r_) \{ Tcl_IncrRefCount(lst_); goto $fl; \} s$pi = r_; \}"]
             }
+            if {[kd $ei] eq "I" && [kd $ev] eq "D"} {
+                set fl [fl $key [list {*}[lrange $in 0 [expr {$pi-1}]] $ei $ev B]]
+                return [R fall [list {*}[lrange $in 0 [expr {$pi-1}]] B] "\{ Tcl_Obj *lst_ = s$pl, *r_; Tcl_DecrRefCount(lst_); r_ = tbc_lset_id(interp, lst_, si$pi, sd$pv); if (!r_) \{ Tcl_IncrRefCount(lst_); goto $fl; \} s$pi = r_; \}"]
+            }
             set st [list {*}[lrange $in 0 [expr {$pi-1}]] [expr {[kd $ei] eq "I" ? $ei : "B"}] B B]
             set pre "[boxc $P $pv $ev]"
             if {[kd $ei] ne "I"} { append pre " [boxc $P $pi $ei]" }

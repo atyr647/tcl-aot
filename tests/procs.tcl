@@ -2705,3 +2705,17 @@ proc vb_inplace_elem {l} {
 }
 proc vb_inplace_type {l} { for {set r 0} {$r < 2} {incr r} { lset l 0 [expr {$r + 1}]; lset l 1 [expr {$r + 2}] }; return [list $l [string is integer [lindex $l 0]] [expr {[lindex $l 0] + 0.5}] [expr {[lindex $l 1] / 4}]] }
 proc vb_inplace_err {l i} { lset l $i 5; return $l }
+proc vb_inplace_dbl {n} {
+    set a [lrepeat $n 0.0]; set x [lindex $a 0]; set keeps {}
+    for {set r 0} {$r < 3} {incr r} {
+        for {set i 0} {$i < $n} {incr i} { lset a $i [expr {$i * 0.5 + $r}] }
+        set y [lindex $a 1]; lset a 1 -2.5; lappend keeps $y
+    }
+    return [list $a $x $keeps]
+}
+proc vb_inplace_dbl_x {l} {
+    set s [string length $l]; set k [lindex $l 1]; set b $l
+    for {set r 0} {$r < 3} {incr r} { lset l 0 [expr {1.5 * 2.0 + $r}]; lset l 1 [expr {0.1 + 0.2 * $r}]; lset l 2 [expr {-0.0 * $r}] }
+    return [list $l $s $k $b [expr {[lindex $l 0] / 2}] [string is double [lindex $l 1]]]
+}
+proc vb_inplace_dbl_err {l i} { lset l $i [expr {0.5 + 1.0}]; return $l }

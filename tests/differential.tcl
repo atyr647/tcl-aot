@@ -822,6 +822,9 @@ foreach n {0 1 2 8 33} { lappend calls [list vb_inplace $n] [list vb_inplace_sha
 foreach l {{1 2 3} {007 0x10 1e3} {1 2 3.5} {a b c} {{1 2} 3 4} {1 2 3 4 5} {100000000000000000000 2 3} {-1 -2 -3} {5 5 5}} { lappend calls [list vb_inplace_str $l] [list vb_inplace_elem $l] [list vb_inplace_type $l] }
 foreach {l i} {{1 2 3} 3 {1 2 3} -1 {1 2 3} end {1 2 3} abc {} 0 {1 2 3} 1.5 {1 2 3} {0 0}} { lappend calls [list vb_inplace_err $l $i] }
 foreach {k n} {0 8 1 8 3 16 2 1 2 2 5 33} { lappend calls [list vb_drive $k $n] }
+foreach n {0 1 2 8 33} { lappend calls [list vb_inplace_dbl $n] }
+foreach l {{1.5 2.5 3.5} {1 2 3} {a b c} {1e3 2e3 3e3} {0x10 007 1_0} {1.5 2.5 3.5 4.5} {{1 2} 3 4} {-0.0 0.0 1.0} {1e308 -1e308 5.5}} { lappend calls [list vb_inplace_dbl_x $l] }
+foreach {l i} {{1.5 2 3} 3 {1.5 2 3} -1 {1.5 2 3} end {1.5 2 3} abc {} 0 {1.5 2 3} 1.5 {1.5 2 3} {0 0}} { lappend calls [list vb_inplace_dbl_err $l $i] }
 foreach n {0 1 2 5 30} { lappend calls [list rs_main $n] [list rs_mklev $n] [list cs_outer $n] [list cs_outer2 $n] [list cs_outer3 $n] }
 foreach h {{} {rs_adddl} {rs_baddl} {rs_oddl} {rs_adddl; rs_oddl} {set dl {5 6}} {set dl 7} {unset dl} {set dl "1 2 \{"} {set dl {1.5 2}} {set dl { 5 6 }}} { foreach n {0 1 4 12} { lappend calls [list rs_adj $n $h] } }
 lappend calls {rs_main 2.5} {rs_mklev 2.5} {rs_up nosuch} {cs_outer 2.5}
