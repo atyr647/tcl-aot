@@ -2237,6 +2237,17 @@ proc stepT0 {key pc in} {
         }
         foreach_start { return [stepForeachStart $key $pc $in $d $a] }
         foreach_step { return [stepForeachStep $key $pc $in $d $a] }
+        lmap_collect {
+            # decision 82: the body's value is appended to the collecting list, which lies below the loop's state (the nl value lists, the iteration slot and the empty slot);
+            # the next instruction is the loop's step, which carries nl.  Only when the collector is a list object of its own (the `list 0` that begins an lmap)
+            set nl [lindex $PI($P,ins,$PI($P,next,$pc)) 1 1]
+            set ci [expr {$d - 4 - $nl}]
+            if {$ci < 0 || [kd [lindex $in $ci]] ne "B"} { return $dead }
+            set re [lindex $in $top]
+            if {[kd $re] eq "U"} { return [R fall [lrange $in 0 end-1] ""] }
+            if {[kd $re] ni {B I D W L}} { return $dead }
+            return [R fall [lrange $in 0 end-1] "[boxc $P $top $re] Tcl_ListObjAppendElement(NULL, s$ci, s$top); Tcl_DecrRefCount(s$top);"]
+        }
         foreach_end {
             lassign $a n nl
             set rel ""
@@ -3444,6 +3455,53 @@ proc stepInvoke {key pc in d n} {
                 incr pos
             }
             foreach dc $omitted { append csig [lindex $dc 0]; lappend cargs [lindex $dc 1] }
+            # decision 82: exactly one tagged-number argument (kind W: an integer or a double, known only at run time) to a callee whose double variant
+            # returns a double: the call picks the variant by the tag (`sw`): the double variant for a double, the integer variant for an integer (its result
+            # is read as a double, else the instruction hands over: the callee is pure, so it may be run again).  Without this the argument is boxed, the boxed
+            # variant runs and its result is a new object (the f32 calls of the fire step: an object made and released for each).
+            set wsplit ""
+            set wps {}
+            set pos [expr {$q+1}]
+            foreach e $args { if {[kd $e] eq "W"} { lappend wps [expr {$pos - $q - 1}] }; incr pos }
+            if {[llength $wps] == 1} {
+                set wi [lindex $wps 0]
+                set csigD [string replace $csig $wi $wi D]
+                set csigI [string replace $csig $wi $wi I]
+                set ckD [newVariant $nm $csigD]
+                set rkD $VK($ckD,ret)
+                if {$rkD in {- U}} {
+                    return [R fall [list {*}$below U] ""]
+                }
+                if {$rkD eq "D"} {
+                    set ckI [newVariant $nm $csigI]
+                    set rkI $VK($ckI,ret)
+                    if {$rkI in {- U}} { return [R fall [list {*}$below U] ""] }
+                    if {$rkI in {B D}} { set wsplit [list $wi $csigD $csigI $rkI] }
+                }
+            }
+            if {$wsplit ne ""} {
+                lassign $wsplit wi csigD csigI rkI
+                set wp [expr {$q + 1 + $wi}]
+                set cargsD $cargs; set cargsI $cargs
+                lset cargsD $wi sd$wp
+                lset cargsI $wi si$wp
+                set cid [cident $nm]
+                set rel ""
+                set pos [expr {$q+1}]
+                foreach e $args { if {[kd $e] eq "B"} { append rel " Tcl_DecrRefCount(s$pos);" }; incr pos }
+                set callD "V_${cid}_${csigD}(interp, rem - 1, 0[expr {[llength $cargsD] ? ", " : ""}][join $cargsD {, }])"
+                set callI "V_${cid}_${csigI}(interp, rem - 1, 0[expr {[llength $cargsI] ? ", " : ""}][join $cargsI {, }])"
+                if {$rkI eq "D"} {
+                    set elseC "rd_ = $callI; if (TBC_UNLIKELY(tbc_st)) goto C$pc;"
+                } else {
+                    set elseC "\{ Tcl_Obj *ro_ = $callI; if (TBC_UNLIKELY(tbc_st)) goto C$pc; if (TBC_UNLIKELY(!tbc_arg_dbl(ro_, &rd_))) \{ Tcl_DecrRefCount(ro_); goto D$pc; \} Tcl_DecrRefCount(ro_); \}"
+                }
+                set cSplit "if (TBC_UNLIKELY(tbc_valid_$cid != 1[expr {$PI($nm,wadapt) ? " || tbc_wp_$cid" : ""}][aliasCheck $ns $nm0 $nm])) \{ tbc_st = 3; goto C$pc; \} \{ double rd_; if (sw$wp) \{ rd_ = $callD; if (TBC_UNLIKELY(tbc_st)) goto C$pc; \} else \{ $elseC \}$rel sd$q = rd_; \}"
+                set csig $csigD
+                set wsplitDone 1
+            } else {
+                set wsplitDone 0
+            }
             set ckey [newVariant $nm $csig]
             set rk $VK($ckey,ret)
             set rel ""
@@ -3495,7 +3553,10 @@ proc stepInvoke {key pc in d n} {
                 }
             }
             append stub "    \{ Tcl_Obj *r_; if (tbc_st == 3) \{ if (!inframe) \{ rc = TCL_OK; goto [fl $key $in]; \} [closureGuard $nm $ns $nm0 "tbc_st = 0; goto D$pc;"] $ov \} else \{ r_ = tbc_box; \} tbc_st = 0;$rel s$q = r_; $cont [enterG $key $nextpc [list {*}$below B] "" [flushSet $P $nextpc]] \}\n"
-            return [R fall [list {*}$below $outk] $c calls [list [list $nm $csig]] stub $stub]
+            if {$wsplitDone} { set c $cSplit }
+            set callsL [list [list $nm $csig]]
+            if {$wsplitDone} { lappend callsL [list $nm $csigI] }
+            return [R fall [list {*}$below $outk] $c calls $callsL stub $stub]
         }
     }
     # a command that cannot see or change the frame (a built-in that is pure): box the words and let the interpreter dispatch.  Anything else
@@ -4131,6 +4192,17 @@ proc wnorm {P out sop} {
     if {$op in {invokeStk1 invokeStk4}} {
         set ce [lindex $out [expr {$n - [lindex $a 0]}]]
         if {[kd $ce] eq "L" && [lt $ce] ne "" && [regexp {^(?:::)?tcl::mathfunc::(?:double|sqrt|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|log|log10|fmod|hypot|floor|ceil|pow|max|min|abs|int|wide|round)$} [lindex $PI($P,lits) [lt $ce]]]} { return $out }
+        # (decision 82: a call of a pure compiled proc keeps a tagged number as one: stepInvoke picks the callee's variant by the tag, or boxes it as the edge would have)
+        if {[kd $ce] eq "L" && [lt $ce] ne ""} {
+            set nm0 [lindex $PI($P,lits) [lt $ce]]
+            set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+            set nm [resolveProc $ns $nm0]
+            if {$nm ne "" && $nm in $::pureProcs && $PI($nm,argsIdx) < 0 && [lindex $a 0] - 1 == $PI($nm,nargs)} {
+                set hasVec 0
+                foreach e [lrange $out [expr {$n - [lindex $a 0] + 1}] end] { if {[kd $e] in {A N M Q U Y}} { set hasVec 1 } }
+                if {!$hasVec} { return $out }
+            }
+        }
     }
     set pops [lindex [effect $op $a [llength $out] [lindex $PI($P,mk,$sop) end]] 0]
     for {set i [expr {max($n - $pops, 0)}]} {$i < $n} {incr i} { if {[kd [lindex $out $i]] eq "W"} { set out [lreplace $out $i $i B] } }

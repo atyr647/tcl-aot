@@ -2744,3 +2744,33 @@ proc ix_shared {l i} { set m $l; set r [lindex $l $i+1]; lset m 0 X; return [lis
 proc ix_nested {l i} { return [lindex $l $i+1 0] }
 proc ix_cond {l i j} { return [lindex $l [expr {$j ? "$i+1" : "$i-1"}]] }
 proc ix_obj {l i j} { return [lindex $l $i+$j] }
+# decision 82: a tagged-number (integer or double at run time) argument to a callee whose double variant returns a double: the call picks the variant by the tag
+proc ws_f32 {x} { binary scan [binary format f $x] f x; return $x }
+proc ws_sq {x} { expr {$x * 2.0 + 1} }
+proc ws_id {x} { return $x }
+proc ws_str {x} { return "v$x" }
+proc ws_sel {x} { if {$x > 5} { return [expr {$x * 1.5}] }; return 0.25 }
+proc ws_two {x y} { expr {$x * 0.5 + $y} }
+proc ws_dlt {x} { expr {$x / 4.0} }
+proc ws_loop {l} { set s 0.0; foreach e $l { set s [expr {$s + [ws_sq [expr {$e * 3}]]}] }; return $s }
+proc ws_loop32 {l} { set r {}; foreach e $l { lappend r [ws_f32 [expr {$e - 1}]] }; return $r }
+proc ws_loopsel {l} { set r {}; foreach e $l { lappend r [ws_sel [expr {$e + 0}]] [ws_id [expr {$e * 1}]] }; return $r }
+proc ws_looptwo {l} { set r {}; foreach e $l { lappend r [ws_two [expr {$e * 2}] 1.5] [ws_two 2.5 [expr {$e - 1}]] }; return $r }
+proc ws_loopstr {l} { set r {}; foreach e $l { lappend r [ws_str [expr {$e * 1}]] }; return $r }
+proc ws_loopdv {l} { set r {}; foreach e $l { lappend r [expr {[ws_dlt [expr {$e * 3}]] + 1}] }; return $r }
+# decision 82: lmap in typed code (the body's value is appended in C)
+proc lc_d {l} { return [lmap e $l { expr {$e * 0.5} }] }
+proc lc_i {l} { return [lmap e $l { expr {$e + 1} }] }
+proc lc_b {l} { return [lmap e $l { list $e $e }] }
+proc lc_lit {l} { return [lmap e $l { set x 1 }] }
+proc lc_two {a b} { return [lmap p $a q $b { expr {$p - $q} }] }
+proc lc_f {a} { return [lmap p $a { ws_f32 [expr {$p * 0.5}] }] }
+proc lc_nested {m} { return [lmap r $m { lmap e $r { expr {$e * 2} } }] }
+proc lc_cont {l} { return [lmap e $l { if {$e == 2} continue; expr {$e * 3} }] }
+proc lc_brk {l} { return [lmap e $l { if {$e == 2} break; expr {$e * 3} }] }
+proc lc_mixed {l} { return [lmap e $l { if {$e > 1} { expr {$e * 1.5} } else { expr {$e} } }] }
+proc lc_var {l} { set s 0.0; set r [lmap e $l { set s [expr {$s + $e}] }]; return [list $r $s] }
+proc lc_stack {l} { return [list [lmap e $l { expr {$e * 2.0} }] [lmap e $l { expr {$e * 3} }]] }
+proc lc_pair {l} { return [lmap {a b} $l { expr {$a + $b} }] }
+proc lc_loop {n} { set r {}; for {set i 0} {$i < $n} {incr i} { lappend r [lmap e {1 2 3} { expr {$e * $i + 0.5} }] }; return $r }
+proc lc_big {n} { set l {}; for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * 0.25}] }; set m [lmap e $l { expr {$e + 1.0} }]; return [list [llength $m] [lindex $m end]] }

@@ -835,6 +835,15 @@ foreach n {0 1 2 3 9 40} { lappend calls [list ix_vec $n] }
 foreach l $ixl { foreach {a b} {0 0 1 2 3 1 5 -3 -1 -2 2147483647 1 -2147483648 1 2147483647 -2147483648 4000000000 1 1 4000000000 1.5 2 2 1.5 abc 1 1 {} 007 1 08 1 0x3 1} { lappend calls [list ix_arith $l $a $b] [list ix_wide $l $a $b] } }
 foreach l $ixl { foreach a {0 1 3 5 -1 2.5 abc 1e1} { foreach j {0 1 7 -3 2147483647} { lappend calls [list ix_tag $l $a $j] } } }
 foreach l $ixl { foreach {i j} {0 1 1 1 2 -1 5 0} { lappend calls [list ix_cond $l $i $j] } }
+# decision 82: the call of a callee with a tagged-number argument picks the variant by the tag
+foreach l {{} {1.5} {1 2 3} {1.5 2.5 3.5} {1 2.5 3 4.5} {0 -1 -2.5 -0.0} {7 5 6 5.5 5.0 4} {16777217 2.5 1e300 -1e300 1e39} {9223372036854775807 1} {9223372036854775806 2.5} {-9223372036854775808 0.5} {1.5 abc} {abc} {1 0x10 2} {NaN 1} {Inf 1 -Inf} {1e-45 7e-46 3e-39} { 5 6 } {007 1} {1 {} 2} {3000000000 4000000000 2.5}} {
+    lappend calls [list ws_loop $l] [list ws_loop32 $l] [list ws_loopsel $l] [list ws_looptwo $l] [list ws_loopstr $l] [list ws_loopdv $l]
+}
+# decision 82: lmap in typed code
+foreach l {{} {1} {1 2 3} {1.5 2.5 3.5} {1 2.5 3 4.5} {0 -1 -2.5 -0.0} {2 2 2} {1 2 3 2 1} {9223372036854775807 1} {1.5 abc} {abc} {1 0x10 2} {NaN 1} {Inf 1 -Inf} { 5 6 } {1 {} 2} {1 2 3 4 5 6 7 8}} {
+    lappend calls [list lc_d $l] [list lc_i $l] [list lc_b $l] [list lc_lit $l] [list lc_f $l] [list lc_cont $l] [list lc_brk $l] [list lc_mixed $l] [list lc_var $l] [list lc_stack $l] [list lc_pair $l] [list lc_nested [list $l $l]] [list lc_nested [list {} $l]] [list lc_two $l {1 2 3}] [list lc_two {4 5 6} $l]
+}
+foreach n {0 1 2 5 300} { lappend calls [list lc_loop $n] [list lc_big $n] }
 foreach n {0 1 2 5 30} { lappend calls [list rs_main $n] [list rs_mklev $n] [list cs_outer $n] [list cs_outer2 $n] [list cs_outer3 $n] }
 foreach h {{} {rs_adddl} {rs_baddl} {rs_oddl} {rs_adddl; rs_oddl} {set dl {5 6}} {set dl 7} {unset dl} {set dl "1 2 \{"} {set dl {1.5 2}} {set dl { 5 6 }}} { foreach n {0 1 4 12} { lappend calls [list rs_adj $n $h] } }
 lappend calls {rs_main 2.5} {rs_mklev 2.5} {rs_up nosuch} {cs_outer 2.5}
