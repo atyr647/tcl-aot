@@ -3935,7 +3935,7 @@ proc mathFunc {P pc in d n q mf} {
         # a tagged number: the integer or the double it holds, as the typed kinds I and D are done below
         set p0 [expr {$q + 1}]
         switch $mf {
-            int - wide { return [R fall [list {*}$below I] "\{ int64_t r_; ${guard}if (TBC_UNLIKELY(sizeof(long) != 8)) goto D$pc; if (!sw$p0) r_ = si$p0; else if (TBC_UNLIKELY(!tbc_dbl_to_int(sd$p0, &r_))) goto D$pc; si$q = r_; \}"] }
+            int - wide { return [R fall [list {*}$below I] "\{ int64_t r_; ${guard}if (!sw$p0) r_ = [expr {$mf eq "int" ? "tbc_int_wrap(si$p0)" : "si$p0"}]; else if (TBC_UNLIKELY(!tbc_dbl_to_${mf}(sd$p0, &r_))) goto D$pc; si$q = r_; \}"] }
             round { return [R fall [list {*}$below I] "\{ int64_t r_; ${guard}if (!sw$p0) r_ = si$p0; else if (TBC_UNLIKELY(!tbc_dbl_round(sd$p0, &r_))) goto D$pc; si$q = r_; \}"] }
             abs { return [R fall [list {*}$below W] "\{ ${guard}if (!sw$p0) \{ int64_t a_ = si$p0; if (TBC_UNLIKELY(a_ == INT64_MIN)) goto D$pc; sw$q = 0; si$q = a_ < 0 ? -a_ : a_; \} else \{ sw$q = 1; sd$q = fabs(sd$p0); \} \}"] }
         }
@@ -3946,9 +3946,9 @@ proc mathFunc {P pc in d n q mf} {
         }
         int - wide {
             switch [kd $e0] {
-                I { return [R fall [list {*}$below I] "${guard}\{ if (TBC_UNLIKELY(sizeof(long) != 8)) goto D$pc; si$q = si$p0; \}"] }
-                D { return [R fall [list {*}$below I] "\{ int64_t r_; ${guard}if (TBC_UNLIKELY(!tbc_dbl_to_int(sd$p0, &r_))) goto D$pc; si$q = r_; \}"] }
-                B { return [R fall [list {*}$below I] "\{ Tcl_WideInt w_; double d_; int64_t r_; int k_; ${guard}k_ = tbc_num(s$p0, &w_, &d_); if (sizeof(long) != 8) goto D$pc; if (k_ == 1) r_ = w_; else if (!(k_ == 2 && tbc_dbl_to_int(d_, &r_))) goto D$pc; Tcl_DecrRefCount(s$p0); si$q = r_; \}"] }
+                I { return [R fall [list {*}$below I] "${guard}\{ si$q = [expr {$mf eq "int" ? "tbc_int_wrap(si$p0)" : "si$p0"}]; \}"] }
+                D { return [R fall [list {*}$below I] "\{ int64_t r_; ${guard}if (TBC_UNLIKELY(!tbc_dbl_to_${mf}(sd$p0, &r_))) goto D$pc; si$q = r_; \}"] }
+                B { return [R fall [list {*}$below I] "\{ Tcl_WideInt w_; double d_; int64_t r_; int k_; ${guard}k_ = tbc_num(s$p0, &w_, &d_); if (k_ == 1) r_ = [expr {$mf eq "int" ? "tbc_int_wrap(w_)" : "w_"}]; else if (!(k_ == 2 && tbc_dbl_to_${mf}(d_, &r_))) goto D$pc; Tcl_DecrRefCount(s$p0); si$q = r_; \}"] }
             }
             return ""
         }

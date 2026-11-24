@@ -180,22 +180,39 @@ TBC_INLINE int tbc_getdbl_exact(Tcl_Obj *o, double *d) {
 TBC_INLINE double tbc_opaque_dbl(double d) { volatile double v = d; return v; }
 /* the result of a libm function as expr accepts it (CheckDoubleResult in Tcl): not NaN, and either errno is clear or it is ERANGE with a result of 0 or infinity */
 #define TBC_MF_OK(r, e) ((r) == (r) && ((e) == 0 || ((e) == ERANGE && ((r) == 0.0 || isinf(r)))))
-/* int() and wide() of a double, for a result that fits a long; 0 if the boxed code has to do it (Tcl makes a bignum and wraps it; and where long is not 64 bits wide() differs from int()) */
-TBC_INLINE int tbc_dbl_to_int(double d, int64_t *out) {
-    if (sizeof(long) != 8 || !(d < (double) LONG_MAX && d > (double) LONG_MIN)) return 0;
-    *out = (int64_t) (long) d;
+/* int() and wide() as the interpreter does them (ExprEntierFunc, ExprIntFunc, ExprWideFunc in tclBasic.c).  The integer ExprEntierFunc makes of a double is its truncation
+ * when that fits 64 bits (a bignum otherwise: handed over here, and the error for infinity and NaN with it).  wide() keeps it.  int() keeps its low CHAR_BIT * sizeof(long)
+ * bits as a signed long (TclGetLongFromObj of a wide integer, or mp_mod_2d of the bignum): the integer itself where long is 64 bits wide, and where long is 32 bits wide
+ * (the N64) the integer modulo 2^32 as a signed value, so int(3000000000.0) is -1294967296 there.  tbc_int_wrap is that last step for any 64-bit integer.
+ * Where long is narrower than 64 bits the conversion of a double to int64_t is taken to be good below 2^53 only: the N64's VR4300 raises an exception for a larger value (measured
+ * in ares: the interpreter's own wide(9007199254740992.0) stops the CPU there, wide(9007199254740991.0) is fine), and the C code of a 32-bit machine may use a library call that
+ * does the same; the doubles from 2^53 up (which only the interpreter's cast ever sees) go to the interpreter, which does what it does. */
+#define TBC_DBL_I64_LIMIT (sizeof(long) >= 8 ? 9223372036854775808.0 : 9007199254740992.0)
+TBC_INLINE int64_t tbc_int_wrap(int64_t w) {
+    return (int64_t) (long) (unsigned long) (uint64_t) w;	/* (no change where long has 64 bits) */
+}
+TBC_INLINE int tbc_dbl_to_wide(double d, int64_t *out) {
+    if (!(d < TBC_DBL_I64_LIMIT && d > -TBC_DBL_I64_LIMIT)) return 0;
+    *out = (int64_t) d;
     return 1;
 }
-/* round() of a double, as ExprRoundFunc does it; 0 if the result is a bignum */
+TBC_INLINE int tbc_dbl_to_int(double d, int64_t *out) {
+    if (sizeof(long) > 8 || !(d < TBC_DBL_I64_LIMIT && d > -TBC_DBL_I64_LIMIT)) return 0;
+    *out = tbc_int_wrap((int64_t) d);
+    return 1;
+}
+/* round() of a double, as ExprRoundFunc does it, in 64-bit integers (where long is 32 bits wide Tcl takes its bignum branch for the values beyond long, and
+ * Tcl_NewBignumObj gives the same integer back as a wide one); 0 if the result does not fit 64 bits (a bignum: it, and the error for infinity, are the boxed code's),
+ * or where long is narrower than 64 bits if the integer part is 2^53 or more (see above) */
 TBC_INLINE int tbc_dbl_round(double d, int64_t *out) {
     double intPart, fractPart = modf(d, &intPart);
-    long max = LONG_MAX, min = LONG_MIN, result;
-    if (sizeof(long) != 8) return 0;
+    int64_t max = INT64_MAX, min = INT64_MIN, result;
     if (fractPart <= -0.5) min++; else if (fractPart >= 0.5) max--;
     if (intPart >= (double) max || intPart <= (double) min) return 0;
-    result = (long) intPart;
+    if (sizeof(long) < 8 && !(intPart < TBC_DBL_I64_LIMIT && intPart > -TBC_DBL_I64_LIMIT)) return 0;
+    result = (int64_t) intPart;
     if (fractPart <= -0.5) result--; else if (fractPart >= 0.5) result++;
-    *out = (int64_t) result;
+    *out = result;
     return 1;
 }
 
@@ -1134,7 +1151,7 @@ TBC_INLINE void tbc_st_dbl(Tcl_Obj **lp, double d) {
 }
 TBC_INLINE void tbc_st_int(Tcl_Obj **lp, int64_t w) {
     Tcl_Obj *o = *lp;
-    if (o && o->refCount == 1 && o->typePtr == tbcInt && !o->bytes && sizeof(long) == 8) { o->internalRep.longValue = (long) w; return; }
+    if (o && o->refCount == 1 && o->typePtr == tbcInt && !o->bytes && (sizeof(long) == 8 || w == (long) w)) { o->internalRep.longValue = (long) w; return; }
     *lp = tbc_newint(w);
     if (o) Tcl_DecrRefCount(o);
 }
