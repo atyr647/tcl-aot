@@ -2806,3 +2806,23 @@ proc bg_run {s0 s1 s2 s3 n} {
     }
     return [list $acc $s0 $s1 $s2 $s3]
 }
+
+# decision 86: the engine's own maths (games/tclquest/engine/tqmath.tcl: red, atan2's and hypot's first lines, a loop of floors) - math functions typed code computes itself
+# stay in typed code while nothing has redefined them (tests/mfguard.sh counts the hand-overs, and runs them with commands of other namespaces called sin, a library with
+# its comments stripped, and every redefinition of floor, double, sin and max)
+proc mf_red {x} {
+    if {$x < 0.78539816339744830962 && $x > -0.78539816339744830962} { return [list 0 $x 0.0] }
+    set fn [expr {floor($x * 6.36619772367581382433e-01 + 0.5)}]
+    set r [expr {$x - $fn * 1.57079632673412561417e+00}]
+    set w [expr {$fn * 6.07710050630396597660e-11}]
+    set t $r
+    set r [expr {$t - $w}]
+    set w [expr {$fn * 2.02226624879595063154e-21 - (($t - $r) - $w)}]
+    set y0 [expr {$r - $w}]
+    set y1 [expr {($r - $y0) - $w}]
+    return [list [expr {int($fn)}] $y0 $y1]
+}
+proc mf_dbl {y x} { set y [expr {double($y)}]; set x [expr {double($x)}]; return [expr {$y / $x}] }
+proc mf_hyp {x y} { set x [expr {double($x)}]; set y [expr {double($y)}]; return [expr {hypot($x, $y) * 2.0}] }
+proc mf_all {x} { return [list [mf_red $x] [mf_dbl $x 3] [mf_hyp $x 4] [expr {max($x, 2) + min($x, 1)}] [expr {sin($x) + floor($x) + double($x)}]] }
+proc mf_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + floor($i * 0.5) + double($i) + sqrt(abs($s))}] }; return $s }

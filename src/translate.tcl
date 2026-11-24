@@ -98,9 +98,11 @@ set tbcStrOps {strindex ::tcl::string::index strfind ::tcl::string::first strrfi
 set tbcPureArity {scan 3}
 set tbcOwnFrameBuiltins {set unset incr append lappend array puts global variable tcl::binary::scan scan gets}
 # one of Tcl's own math functions: it never uses the caller's variables.  max and min are procs of the Tcl library (init.tcl) and count only while they are the stock ones
-# (the text of their bodies is checked here and, when the module loads, in tbc_mf_setup: a program that defines its own `tcl::mathfunc::max` gets the ordinary calls)
+# (the text of their bodies is checked here and, when the module loads, in tbc_stock_mm, when the guard pins them: a program that defines its own `tcl::mathfunc::max` gets the ordinary calls)
 set tbcStockMM(max) 0x3594bb2113580599
 set tbcStockMM(min) 0x1bccbe3b07a281de
+set tbcStockFp(max) d5c1e6928083e5f5
+set tbcStockFp(min) ab5cd4c94fecc759
 proc fnv64 {s} {
     set h [expr {wide(0xcbf29ce484222325)}]
     foreach b [split [encoding convertto utf-8 $s] ""] {
@@ -112,10 +114,34 @@ proc fnv64 {s} {
 proc stockMM {f} {
     global tbcStockMM tbcStockMMok
     if {![info exists tbcStockMMok($f)]} {
-        set tbcStockMMok($f) [expr {![catch {info args ::tcl::mathfunc::$f} a] && $a eq "args" && [fnv64 [info body ::tcl::mathfunc::$f]] eq $tbcStockMM($f)}]
+        # (the text of Tcl 8.6.14's body, or the fingerprint of its bytecode, the same in 8.6.14 and 8.6.18 and not changed by comments or indentation: decision 86)
+        set tbcStockMMok($f) [expr {![catch {info args ::tcl::mathfunc::$f} a] && $a eq "args" && ([fnv64 [info body ::tcl::mathfunc::$f]] eq $tbcStockMM($f) || (![catch {::tbc::fingerprint ::tcl::mathfunc::$f} fp] && $fp eq $::tbcStockFp($f)))}]
     }
     return $tbcStockMMok($f)
 }
+# decision 86: typed code computes a math function itself only while the name `tcl::mathfunc::<f>`, looked up from the namespace of the proc that calls it, still gives Tcl's own
+# command (as the interpreter looks it up at every call).  The pair {name namespace} is a dependency of the module's guard like `lindex`'s, but checked at the call site only
+# (a call that fails it hands over: boxed code makes the call by name, and the interpreter finds whatever is there).  The stock `max` and `min` are procs that call
+# `double()` from ::tcl::mathfunc, so their site also depends on that lookup.
+proc mdepPairs {nm ns} {
+    set r [list [list $nm $ns]]
+    if {[regexp {^(?:::)?tcl::mathfunc::(max|min)$} $nm]} { lappend r [list tcl::mathfunc::double ::tcl::mathfunc] }
+    return $r
+}
+# the text at the start of a call of math function (the command word at slot q of the stack state `in`) that checks its dependencies and hands over (goto D$pc) when one fails
+proc mfCheck {P pc in q} {
+    global PI initName
+    set nm0 [lindex $PI($P,lits) [lt [lindex $in $q]]]
+    set ns [namespace qualifiers $P]; if {$ns eq ""} { set ns :: }
+    set r ""
+    foreach d [mdepPairs $nm0 $ns] {
+        set di [lsearch -exact [gallOf] $d]
+        if {$di < 0} { return "goto D$pc; " }
+        append r "if (TBC_UNLIKELY(!tbc_depok_${initName}(interp, $di))) goto D$pc; "
+    }
+    return $r
+}
+set tbcMfNames {abs acos asin atan atan2 bool ceil cos cosh double entier exp floor fmod hypot int isqrt log log10 max min pow rand round sin sinh sqrt srand tan tanh wide}
 proc isMathBuiltin {b} {
     if {![regexp {^(?:::)?tcl::mathfunc::(\w+)$} $b -> f]} { return 0 }
     if {$f in {max min}} { return [stockMM $f] }
@@ -595,6 +621,7 @@ proc prepare {P} {
     set hasYield 0
     # the built-in commands whose identity the analysis relies on (that they run no script and leave the caller's variables alone)
     set bins {}
+    set mdeps {}
     array unset scanVar
     array unset scanF
     array unset cmdAt
@@ -697,6 +724,8 @@ proc prepare {P} {
                     lappend callees $callee
                 } else {
                     set bn [string trimleft $nm :]
+                    # (a math function typed code computes itself: the call site looks the name up again from this proc's namespace, decision 86; see mfCheck)
+                    if {[isMathBuiltin $bn]} { lappend mdeps {*}[mdepPairs $nm $ns] }
                     set lsortOK 0
                     if {$bn eq "lsort" && $n >= 2} {
                         set lsortOK [lsortPure [lmap e [lrange $st [expr {$q+1}] end-1] {expr {$e eq "-" ? "-" : [lindex [dict get $bc literals] $e]}}]]
@@ -868,7 +897,7 @@ proc prepare {P} {
     }
     set PI($P,nrd) $nrd
     if {$nrd} { set pure 1 }
-    set PI($P,csafe) $csafe; set PI($P,csafe1) $csafe1; set PI($P,ysafe) [expr {$yres && !$hasYield}]; set PI($P,yres) [expr {$yres && $hasYield}]; set PI($P,hasYield) $hasYield; set PI($P,bins) [lsort -unique $bins]
+    set PI($P,csafe) $csafe; set PI($P,csafe1) $csafe1; set PI($P,ysafe) [expr {$yres && !$hasYield}]; set PI($P,yres) [expr {$yres && $hasYield}]; set PI($P,hasYield) $hasYield; set PI($P,bins) [lsort -unique $bins]; set PI($P,mdeps) [lsort -unique $mdeps]
     foreach {cpc cnm} [array get cmdAt] { set PI($P,cmdAt,$cpc) $cnm }
     set PI($P,callees) [lsort -unique $callees]; set PI($P,pure) $pure; set PI($P,mustBoxNamed) [lsort -unique $mustBoxNamed]
     set PI($P,args) $args; set PI($P,nargs) $nargs; set PI($P,vnames) $vnames; set PI($P,lits) [dict get $bc literals]
@@ -3675,8 +3704,8 @@ proc stepInvoke {key pc in d n} {
         lappend slots s$k; append rel " Tcl_DecrRefCount(s$k);"
     }
     set st [list {*}$below {*}[lrepeat $n B]]
-    # (the math functions are Tcl's own while tbc_mf_ok says so; otherwise the boxed code makes the call)
-    set guard [expr {[isMathBuiltin $nm0] ? "if (TBC_UNLIKELY(!tbc_mf_ok)) goto D$pc; " : ""}]
+    # (the math functions are Tcl's own while their name, looked up from this proc's namespace, still gives Tcl's command: mfCheck; otherwise the boxed code makes the call)
+    set guard [expr {[isMathBuiltin $nm0] ? [mfCheck $P $pc $in $q] : ""}]
     # (a built-in that the module has pinned is called through its C procedure when nothing the interpreter's dispatch would do can matter: tbc_direct)
     set call "Tcl_EvalObjv(interp, $n, ov_, TBC_EV)"
     # (a math function that typed code does not compute, `rand` and `srand`, is called through its pinned command like a pure built-in: calling it by name resolves the
@@ -3885,7 +3914,7 @@ proc mathFunc {P pc in d n q mf} {
         }
         incr k
     }
-    set guard "if (TBC_UNLIKELY(!tbc_mf_ok)) goto D$pc; "
+    set guard [mfCheck $P $pc $in $q]
     set e0 [lindex $args 0]; set p0 [expr {$q + 1}]
     if {[dict exists $unary $mf]} {
         set fn [dict get $unary $mf]
@@ -3967,7 +3996,7 @@ proc mmFunc {key P pc in d n q mf} {
         if {[kd $e] eq "B"} { set allNum 0 }
         if {[kd $e] in {I D} && [lt $e] ne "" && ![litCanon [lindex $PI($P,lits) [lt $e]] [kd $e]]} { set canon 0 }
     }
-    set guard "if (TBC_UNLIKELY(!tbc_mf_ok)) goto D$pc; "
+    set guard [mfCheck $P $pc $in $q]
     set p0 [expr {$q + 1}]
     if {$canon && $allI} {
         set c "${guard}\{ int64_t b_ = si$p0;"
@@ -4101,10 +4130,10 @@ proc needRv {P} { return [expr {[hasEp $P] || [hasDeps $P]}] }
 proc epSave {P} { return [expr {[hasEp $P] ? " tbc_epb = ep_; tbc_nseb = nse_;" : ""}] }
 # the pairs {name namespace} of every dependency of the module: the numbering of the guard's table
 proc gallOf {} {
-    global translatable GALLC
+    global translatable GALLC PI
     if {[info exists GALLC]} { return $GALLC }
     set r {}
-    foreach P $translatable { foreach d [gdeps $P] { if {$d ni $r} { lappend r $d } } }
+    foreach P $translatable { foreach d [concat [gdeps $P] $PI($P,mdeps)] { if {$d ni $r} { lappend r $d } } }
     set GALLC [lsort $r]
     return $GALLC
 }
@@ -5666,7 +5695,7 @@ proc vproto {key} {
 proc gproto {P} { return "int G_[cident $P](Tcl_Interp *, int, Tcl_Obj **, int);\n" }
 foreach key $variants { append out "static [vproto $key]" }
 set modGuard 0
-foreach P $translatable { if {[llength [gdeps $P]]} { set modGuard 1; break } }
+foreach P $translatable { if {[llength [gdeps $P]] || [llength $PI($P,mdeps)]} { set modGuard 1; break } }
 if {$modGuard} { append out "static int tbc_depok_${initName}(Tcl_Interp *, int);\n"; foreach P $translatable { if {[hasDeps $P]} { append out "static int tbc_gok_[cident $P](Tcl_Interp *);\n" } } }
 dict for {P gk} $REKEY { append out "static [rettype [expr {$VK($gk,ret) in {- U} ? "B" : $VK($gk,ret)}]] V_[cident $P]_RE(Tcl_Interp *, int, int, Tcl_Obj **, int);\n" }
 foreach P $translatable { append out "static [gproto $P]" }
@@ -5745,7 +5774,7 @@ proc canonArgs {P} { join $::PI($P,infoArgs) "\002" }
 # each entry lists its pairs (those of the procs it calls included).  The runtime checks them when the proc is entered (see tbc_guard_ok).
 set gnames {}; set gnss {}; set gall {}
 foreach P $translatable {
-    foreach d [gdeps $P] {
+    foreach d [concat [gdeps $P] $PI($P,mdeps)] {
         lassign $d n sp
         if {$n ni $gnames} { lappend gnames $n }
         if {$sp ni $gnss} { lappend gnss $sp }

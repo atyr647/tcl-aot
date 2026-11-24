@@ -1813,10 +1813,6 @@ static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
 }
 
 /* a proc of this name is being (re)defined or removed: no direct call to any compiled definition of the name may go on */
-/* Typed code computes the common math functions itself, which is right only while tcl::mathfunc::* are Tcl's own commands.  tbc_mf_ok says so.  It is
- * cleared when one of them is renamed or deleted (traces set up by tbc_mf_setup), and when a proc is defined under a name that contains
- * ::tcl::mathfunc:: (the compiler emits the relative name tcl::mathfunc::sqrt, so ::ns::tcl::mathfunc::sqrt would be found first). */
-TBC_SHARED int tbc_mf_ok;
 /* Built-in commands the analysis relied on (that they run no script and leave the caller's variables alone).  The module names them, with the namespaces
  * they are looked up from.  Tcl itself keeps a cached command name valid only while the command's epoch, the namespace and the namespace's command epoch are
  * unchanged (Tcl_GetCommandFromObj); the same three tell here that a lookup from the namespace still finds the built-in:
@@ -1848,6 +1844,39 @@ static void tbc_ens_pin_all(Tcl_Interp *interp) {
         tbc_ens_pin[i] = c;
     }
 }
+/* the fingerprint (the bytecode and its literals: not the comments or the indentation of the text) of the body of a proc, 0 when it is none */
+static unsigned long long tbc_proc_fp(Tcl_Interp *interp, const char *full) {
+    Tcl_CmdInfo ci;
+    Proc *p;
+    if (!Tcl_GetCommandInfo(interp, full, &ci) || !TBC_IS_PROC_OBJPROC(ci.objProc)) return 0;
+    p = (Proc *) ci.objClientData;
+    if (TclProcCompileProc(interp, p, p->bodyPtr, p->cmdPtr->nsPtr, "body of proc", full) != TCL_OK) { Tcl_ResetResult(interp); return 0; }
+    if (p->bodyPtr->typePtr != &tclByteCodeType) return 0;
+    return (unsigned long long) tbc_fingerprint((const ByteCode *) p->bodyPtr->internalRep.twoPtrValue.ptr1);
+}
+/* `max` and `min` are procs of the Tcl library (init.tcl), not commands in C.  Typed code computes them itself (translate.tcl, mmFunc), which is right only for the stock procs:
+ * the fingerprint of the bytecode of their bodies is compared with the one of the stock procs of Tcl 8.6.14 and 8.6.18 (the same in both), or the hash of their text with the
+ * one of Tcl 8.6.14's.  The fingerprint does not see comments or indentation: a library with those stripped (the N64's) still has the stock procs (decision 86).
+ * Returns 0 (max) or 1 (min) when `name` is the name of one of them, as the guard's table gives it (`tcl::mathfunc::max`, with or without the leading ::), else -1. */
+static int tbc_mm_index(const char *name) {
+    if (name[0] == ':' && name[1] == ':') name += 2;
+    if (strcmp(name, "tcl::mathfunc::max") == 0) return 0;
+    if (strcmp(name, "tcl::mathfunc::min") == 0) return 1;
+    return -1;
+}
+static int tbc_stock_mm(Tcl_Interp *interp, Command *c, int k) {
+    static const unsigned long long fp[2] = { 0xd5c1e6928083e5f5ULL, 0xab5cd4c94fecc759ULL }, th[2] = { 0x3594bb2113580599ULL, 0x1bccbe3b07a281deULL };
+    static const char *const full[2] = { "::tcl::mathfunc::max", "::tcl::mathfunc::min" };
+    Proc *p;
+    unsigned long long h = 0xcbf29ce484222325ULL;
+    const unsigned char *b;
+    if (!TBC_IS_PROC_OBJPROC(c->objProc)) return 0;
+    p = (Proc *) c->objClientData;
+    if (p->numArgs != 1 || !p->firstLocalPtr || strcmp(p->firstLocalPtr->name, "args") != 0) return 0;
+    b = (const unsigned char *) Tcl_GetString(p->bodyPtr);
+    while (*b) { h ^= *b++; h *= 0x100000001b3ULL; }
+    return h == th[k] || tbc_proc_fp(interp, full[k]) == fp[k];
+}
 static void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
     int i;
     tbc_ens_pin_all(interp);
@@ -1858,7 +1887,11 @@ static void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
     memset(g->bad, 0, (size_t) g->ndeps); memset(g->nsp, 0, (size_t) g->nnss * sizeof(Namespace *));
     for (i = 0; i < g->nnames; i++) {
         Command *c = (Command *) Tcl_FindCommand(interp, g->names[i], NULL, TCL_GLOBAL_ONLY);
-        if (c && TBC_IS_PROC_OBJPROC(c->objProc)) c = NULL;	/* (already a proc of the program: not the built-in) */
+        if (c && TBC_IS_PROC_OBJPROC(c->objProc)) {
+            /* (already a proc of the program: not the built-in; except the stock max and min, which are procs of Tcl's own library) */
+            int mm = tbc_mm_index(g->names[i]);
+            if (mm < 0 || c != (Command *) Tcl_FindCommand(interp, mm ? "::tcl::mathfunc::min" : "::tcl::mathfunc::max", NULL, TCL_GLOBAL_ONLY) || !tbc_stock_mm(interp, c, mm)) c = NULL;
+        }
         if (c) c->refCount++;					/* (kept alive, as Tcl does for the commands it caches) */
         g->exp[i] = c; g->expEp[i] = c ? c->cmdEpoch : 0;
     }
@@ -1956,7 +1989,6 @@ static int tbc_direct(Tcl_Interp *interp, Command *c, Command *ens, int objc, Tc
 static void tbc_invalidate_name(const char *name) {
     Tcl_HashEntry *h;
     TbcEntry *e;
-    if (strstr(name, "::tcl::mathfunc::")) tbc_mf_ok = 0;
     h = Tcl_FindHashEntry(&tbc_by_name, name);
     if (!h) return;
     for (e = (TbcEntry *) Tcl_GetHashValue(h); e; e = e->sameName) if (e->valid) *e->valid = 0;
@@ -2757,60 +2789,6 @@ static int tbc_check_build(Tcl_Interp *interp) {
 }
 
 /* called from a module's Init: the helper commands and the trace that notices new procs (once per interpreter) */
-/* is there a namespace other than the global one with a tcl::mathfunc child that holds commands? */
-static int tbc_mf_shadowed(Namespace *ns, int top) {
-    Tcl_HashSearch search;
-    Tcl_HashEntry *h;
-    if (!top) {
-        Tcl_HashEntry *t = Tcl_FindHashEntry(&ns->childTable, "tcl");
-        if (t) {
-            Tcl_HashEntry *m = Tcl_FindHashEntry(&((Namespace *) Tcl_GetHashValue(t))->childTable, "mathfunc");
-            if (m && ((Namespace *) Tcl_GetHashValue(m))->cmdTable.numEntries > 0) return 1;
-        }
-    }
-    for (h = Tcl_FirstHashEntry(&ns->childTable, &search); h; h = Tcl_NextHashEntry(&search)) {
-        if (tbc_mf_shadowed((Namespace *) Tcl_GetHashValue(h), 0)) return 1;
-    }
-    return 0;
-}
-
-static void tbc_mf_setup(Tcl_Interp *interp) {
-    static const char *const names[] = { "abs", "acos", "asin", "atan", "atan2", "bool", "ceil", "cos", "cosh", "double", "entier", "exp", "floor", "fmod",
-        "hypot", "int", "isqrt", "log", "log10", "pow", "rand", "round", "sin", "sinh", "sqrt", "srand", "tan", "tanh", "wide", NULL };
-    int i, ok = 1;
-    for (i = 0; names[i]; i++) {
-        Tcl_CmdInfo ci;
-        Tcl_Obj *full = Tcl_ObjPrintf("::tcl::mathfunc::%s", names[i]);
-        Tcl_IncrRefCount(full);
-        if (!Tcl_GetCommandInfo(interp, Tcl_GetString(full), &ci) || !ci.isNativeObjectProc || TBC_IS_PROC_OBJPROC(ci.objProc)) ok = 0;
-        else tbc_trace(interp, "add", "command", Tcl_GetString(full), "rename delete", "::tbc::invalidate", 1);
-        Tcl_DecrRefCount(full);
-    }
-    /* max and min are procs of the Tcl library (init.tcl), not commands in C.  Typed code computes them itself (translate.tcl, mmFunc), which is right only while they
-     * are the stock procs: their bodies are compared by hash with the ones of Tcl 8.6.14 (the module is valid for that release only), and renaming or deleting one clears the
-     * flag like the others.  A program that defines its own `tcl::mathfunc::max` goes through tbc_invalidate_name. */
-    {
-        static const struct { const char *name; unsigned long long hash; } mm[] = { { "max", 0x3594bb2113580599ULL }, { "min", 0x1bccbe3b07a281deULL } };
-        for (i = 0; i < 2; i++) {
-            Tcl_CmdInfo ci;
-            Tcl_Obj *full = Tcl_ObjPrintf("::tcl::mathfunc::%s", mm[i].name);
-            Tcl_IncrRefCount(full);
-            if (!Tcl_GetCommandInfo(interp, Tcl_GetString(full), &ci) || !ci.isNativeObjectProc || !TBC_IS_PROC_OBJPROC(ci.objProc)) ok = 0;
-            else {
-                Proc *p = (Proc *) ci.objClientData;
-                unsigned long long h = 0xcbf29ce484222325ULL;
-                const unsigned char *b = (const unsigned char *) Tcl_GetString(p->bodyPtr);
-                while (*b) { h ^= *b++; h *= 0x100000001b3ULL; }
-                if (p->numArgs != 1 || !p->firstLocalPtr || strcmp(p->firstLocalPtr->name, "args") != 0 || h != mm[i].hash) ok = 0;
-                else tbc_trace(interp, "add", "command", Tcl_GetString(full), "rename delete", "::tbc::invalidate", 1);
-            }
-            Tcl_DecrRefCount(full);
-        }
-    }
-    if (ok && tbc_mf_shadowed(((Interp *) interp)->globalNsPtr, 1)) ok = 0;
-    tbc_mf_ok = ok;
-}
-
 /* TBC_CAPTURE=<file> in the environment (tools/tcl-aot, the drop-in build): the capture is on from the start and the definitions are written to <file> when the
  * process exits, however it exits (the program's `exit`, the end of its script, the end of its event loop); TBC_CAPTURE_AFTER=<ms> also ends the process after that
  * long in the event loop (for a program with a window that never ends by itself).  Written with stdio: the interpreter may be gone when the exit handlers run. */
@@ -2858,7 +2836,6 @@ static void tbc_install(Tcl_Interp *interp) {
     Tcl_CreateObjCommand(interp, "::tbc::profile", tbc_profile_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::capture", tbc_capture_cmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::tbc::attach", tbc_attach_cmd, NULL, NULL);
-    tbc_mf_setup(interp);
     if (getenv("TBC_EAGER") && getenv("TBC_EAGER")[0] == '1') tbc_eager = 1;
     tbc_capture_env();
     Tcl_TraceVar2(interp, "tcl_precision", NULL, TCL_GLOBAL_ONLY | TCL_TRACE_WRITES | TCL_TRACE_UNSETS, tbc_prec_trace, NULL);
