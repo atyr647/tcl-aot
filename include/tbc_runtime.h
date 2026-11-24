@@ -1201,7 +1201,11 @@ TBC_INLINE int tbc_arg_int(Tcl_Obj *o, int64_t *w) {
  * doubles differently: a write trace on that variable turns the acceptance off for good (tbc_cc_off), and a text is checked against what Tcl prints now. */
 typedef struct { uint64_t bits; unsigned char len, ok; char text[30]; } TbcCanonSlot;
 TBC_SHARED int tbc_cc_off;
+#ifdef TCL_THREADS
 TBC_SHARED __thread TbcCanonSlot tbc_cc[512];
+#else
+TBC_SHARED TbcCanonSlot tbc_cc[512];	/* no thread-local storage on a build without threads (the N64 has none: rdhwr is a reserved instruction on the VR4300) */
+#endif
 static __attribute__((noinline)) int tbc_dbl_text_canon(Tcl_Obj *o, double d) {
     const char *b = o->bytes;
     int n = o->length, i;

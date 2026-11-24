@@ -105,7 +105,9 @@ static uint64_t tbc_fingerprint(const ByteCode *bc) {
          * process's history.  Such a literal counts with its exact bits: a process whose bytecode holds another value than the one this code
          * was compiled with does not get this code. */
         if (lo->typePtr == tbcDouble) {
-            double d = lo->internalRep.doubleValue, q = strtod(s, NULL);
+            double d = lo->internalRep.doubleValue, q;
+            /* Tcl's own parser, not libc's strtod: the N64's newlib strtod can round a 17-digit literal differently from Tcl (which made the fingerprint of ::tq::math::log differ from the Mac's) */
+            { Tcl_Obj *t = Tcl_NewStringObj(s, len); if (Tcl_GetDoubleFromObj(NULL, t, &q) != TCL_OK) q = strtod(s, NULL); Tcl_DecrRefCount(t); }
             if (memcmp(&d, &q, sizeof d) != 0) {
                 const unsigned char *b = (const unsigned char *) &d;
                 for (k = 0; k < (int) sizeof d; k++) { h ^= b[k]; h *= UINT64_C(1099511628211); }
