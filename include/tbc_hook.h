@@ -1753,6 +1753,18 @@ static void tbc_logerr(Tcl_Interp *interp, int pcoff, int srcOff, int srcLen, Tc
     iPtr->flags &= ~ERR_ALREADY_LOGGED;
 }
 
+/* a command was replaced since the proc was entered: evaluate it from its source, as the interpreter does (boxed code, one function instead of a copy at every command) */
+static __attribute__((noinline)) int tbc_eval_src(Tcl_Interp *interp, const char *txt, int len, int pc) {
+    int rc;
+    Tcl_Obj *sc = Tcl_NewStringObj(txt, len);
+    Tcl_IncrRefCount(sc);
+    tbc_setpc(interp, pc);
+    { NRE_callback *root = TOP_CB(interp); ByteCode *bc = TclCompileObj(interp, sc, NULL, 0); rc = TclNRRunCallbacks(interp, TclNRExecuteByteCode(interp, bc), root); }
+    Tcl_DecrRefCount(sc);
+    ((Interp *) interp)->flags |= ERR_ALREADY_LOGGED;
+    return rc;
+}
+
 /* typed code leaving typed mode: store a local (borrowed reference) into its frame slot */
 static void tbc_flushr(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *val) {
     Var *vp = &loc[idx];

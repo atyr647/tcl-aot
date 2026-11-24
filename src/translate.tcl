@@ -3443,6 +3443,8 @@ proc stepReverse {P in d n} {
 
 # code that leaves typed mode: write the state (locals into the frame, the stack into an array) and continue in G_<proc> at gpc.  `pre` runs
 # first.  A function that was called directly has no frame: it reports tbc_st 3 and the caller makes the call the ordinary way.
+# (TBC_NOSHARE_SRC in the environment gives the old code of startCommand's fallback in boxed code: a copy of the evaluation at every command)
+set ::NOSHARE_SRC [info exists ::env(TBC_NOSHARE_SRC)]
 proc enterG {key gpc slots pre flush} {
     lassign [keysplit $key] P sig
     set c "if (TBC_UNLIKELY(!inframe)) \{ tbc_st = 3; rc = TCL_OK; goto [flAll $key $slots]; \} $pre"
@@ -4520,6 +4522,10 @@ proc genG {key pc d} {
                 # (the command may be, or may call, what yields: the interpreter's trampoline evaluates it, and the boxed code goes on in the resume callback)
                 set below {}; for {set k 0} {$k < $d} {incr k} { lappend below s$k }
                 return [string map [concat $X [list @TXT@ [cstring $text] @LEN@ [cbytes $text] @TGT@ $tgt @BELOW@ [join [concat $below NULL] {, }] @EPC@ [expr {-$pc-1}]]] {if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_))) { Tcl_Obj *sc_ = Tcl_NewStringObj(@TXT@, @LEN@); Tcl_IncrRefCount(sc_); tbc_setpc(interp, @PC@); { Tcl_Obj *bl_[] = { @BELOW@ }; tbc_do_eval(interp, tbc_yres_@P@, @TGT@, @D@, bl_, TclCompileObj(interp, sc_, NULL, 0), ep_, nse_, @EPC@); } Tcl_DecrRefCount(sc_); rcg_ = TCL_OK; goto gexit; }}]
+            }
+            if {!$::NOSHARE_SRC} {
+                # the evaluation of the command from its source is one function of the runtime (tbc_eval_src), not a copy of its body at every command
+                return [string map [concat $X [list @TXT@ [cstring $text] @LEN@ [cbytes $text] @JMP@ [string map $X $jmp]]] {if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_))) { rcg_ = tbc_eval_src(interp, @TXT@, @LEN@, @PC@); if (rcg_ != TCL_OK) goto @X@; @sn@ = tbc_takeres(interp); @JMP@ }}]
             }
             return [string map [concat $X [list @TXT@ [cstring $text] @LEN@ [cbytes $text] @JMP@ [string map $X $jmp]]] {if (TBC_UNLIKELY(TBC_EPCHG(interp, ep_, nse_))) { Tcl_Obj *sc_ = Tcl_NewStringObj(@TXT@, @LEN@); Tcl_IncrRefCount(sc_); tbc_setpc(interp, @PC@); { NRE_callback *root_ = TOP_CB(interp); ByteCode *bc_ = TclCompileObj(interp, sc_, NULL, 0); rcg_ = TclNRRunCallbacks(interp, TclNRExecuteByteCode(interp, bc_), root_); } Tcl_DecrRefCount(sc_); ((Interp *) interp)->flags |= ERR_ALREADY_LOGGED; if (rcg_ != TCL_OK) goto @X@; @sn@ = tbc_takeres(interp); @JMP@ }}]
         }

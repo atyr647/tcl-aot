@@ -1796,7 +1796,9 @@ static int tbc_is_lrepeat(Tcl_Interp *interp) {
 /* Counters (compile with -DTBC_COV): how often each typed variant is entered and each hand-over point is taken.  A hand-over site also carries what the
  * instruction is (TBC_HITI), for tbc::hot.  The table is part of the shared state, so a module split over several files counts in one place. */
 #ifdef TBC_COV
-#define TBC_COV_MAX 131072
+#ifndef TBC_COV_MAX
+#define TBC_COV_MAX 131072	/* (may be set smaller: 131072 x 12 bytes is 1.5 MB of bss, too much for an 8 MB machine) */
+#endif
 typedef struct { const char *name; const char *info; long hits; } TbcCov;
 #if defined(TBC_SPLIT_USER)
 extern TbcCov tbc_cov[TBC_COV_MAX];
@@ -1918,9 +1920,9 @@ static int tbc_hot_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *con
             Tcl_AppendToObj(res, "\n", 1);
             Tcl_ListObjLength(NULL, sites, &ns);
             for (j = 0; j < ns && j < top; j++) {
-                Tcl_Obj *site; int pc; long n; Tcl_ListObjIndex(NULL, sites, j, &site);
+                Tcl_Obj *site; int pc; long n; Tcl_WideInt wn = 0; Tcl_ListObjIndex(NULL, sites, j, &site);
                 { Tcl_Obj *e0, *e1, *e2, *e3, *e4; Tcl_ListObjIndex(NULL, site, 0, &e0); Tcl_ListObjIndex(NULL, site, 1, &e1); Tcl_ListObjIndex(NULL, site, 2, &e2); Tcl_ListObjIndex(NULL, site, 3, &e3); Tcl_ListObjIndex(NULL, site, 4, &e4);
-                  Tcl_GetIntFromObj(NULL, e0, &pc); Tcl_GetWideIntFromObj(NULL, e4, (Tcl_WideInt *) &n);
+                  Tcl_GetIntFromObj(NULL, e0, &pc); Tcl_GetWideIntFromObj(NULL, e4, &wn); n = (long) wn;	/* (`long` is 4 bytes on a 32-bit target, Tcl_WideInt 8: a cast of &n wrote past it) */
                   Tcl_AppendPrintfToObj(res, "    pc %-4d %-16s %-10s %-24s %ld\n", pc, Tcl_GetString(e1), Tcl_GetString(e3), Tcl_GetString(e2), n); }
             }
             if (ns > top) Tcl_AppendPrintfToObj(res, "    (%d more sites)\n", ns - top);
