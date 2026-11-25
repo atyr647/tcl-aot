@@ -3474,18 +3474,65 @@ proc stepReverse {P in d n} {
 # first.  A function that was called directly has no frame: it reports tbc_st 3 and the caller makes the call the ordinary way.
 # (TBC_NOSHARE_SRC in the environment gives the old code of startCommand's fallback in boxed code: a copy of the evaluation at every command)
 set ::NOSHARE_SRC [info exists ::env(TBC_NOSHARE_SRC)]
+# Hand-over blocks (decision 88).  What the translator writes at a hand-over site, in the order of the old code: (1) box the typed locals that the site's flush set names, (2) write the
+# table arrays, (3) write the locals of the flush set into the frame, (4) box the stack slots, (5) call G_<proc> at the instruction.  TBC_HANDOVER in the environment chooses how much of it
+# is shared between the sites of a variant (all are equal in what they do, `all` excepted):
+#   none  the old code, every step at every site
+#   site  step 5 is one block per stack depth at the end of the function (Dg<n>); a site sets hg_ and jumps; steps 1 to 4 stay at the site
+#   set   as site, and step 3 is in the block too: one block per stack depth and flush set (Dg<n>_<k>), writing exactly the locals the site would have written (the default)
+#   all   as site, and step 3 is in the block for all sites of the depth: every local that holds an object (a decision 88 draft: needs the invariant that such a local is in the flush set)
+#   chk   as all, and every site names its flush set in hf_: the block counts, and stops the program at, a local it would write that is not in the site's set (a test build, not for use)
+# (TBC_NOSHARE_BODY: do not make sites with the same code share one block Db<k>)
+set ::HMODE [expr {[info exists ::env(TBC_HANDOVER)] ? $::env(TBC_HANDOVER) : "set"}]
+set ::NOSHARE_BODY [info exists ::env(TBC_NOSHARE_BODY)]
+# TBC_FLUSH_INLINE: in mode set, a block writes a flush set of up to this many locals as plain calls, a larger one from a table (tbc_flushv).  6, not 3: with 3, the
+# shared blocks and the table together made a typed loop of the Mac benchmark (arr_sieve) about 15 % slower, for a reason not found; 6 costs 0.12 % of code on the N64 (decision 88)
+set ::FLUSH_INLINE [expr {[info exists ::env(TBC_FLUSH_INLINE)] ? $::env(TBC_FLUSH_INLINE) : 6}]
+# sites whose code is the same up to the instruction number share one block Db<k>: the site sets hg_ and jumps (the target is part of the key)
+proc shareHand {key eg pc} {
+    if {$::NOSHARE_BODY || ![regexp {^(.*) hg_ = (-?\d+); (/\*[^*]*\*/) goto (Dg[0-9_]+);$} $eg -> body gpc cmt target]} { return $eg }
+    if {[string length $body] < 80} { return $eg }
+    set k "$target $body"
+    if {![info exists ::HBI($key,$k)]} { set ::HBI($key,$k) [expr {[info exists ::HBL($key)] ? [llength $::HBL($key)] : 0}]; lappend ::HBL($key) [list $body $target]; lappend ::HBK($key) $key,$k }
+    return "hg_ = $gpc; $cmt goto Db$::HBI($key,$k);"
+}
 proc enterG {key gpc slots pre flush} {
     lassign [keysplit $key] P sig
+    set mode $::HMODE
     set c "if (TBC_UNLIKELY(!inframe)) \{ tbc_st = 3; rc = TCL_OK; goto [flAll $key $slots]; \} $pre"
     append c [boxLocals $key $flush $slots]
     foreach v $::PI($P,rvars) { append c " tbc_rflush(interp, loc_, $v, &rv$v);" }
     set vs $flush
     foreach e $slots { if {[kd $e] in {A M Z}} { lappend vs [lt $e] } }
-    foreach v [lsort -integer -unique $vs] { append c " if (l$v) tbc_flushr(interp, loc_, $v, l$v);" }
+    set fvs [lsort -integer -unique $vs]
+    if {$mode in {none site}} {
+        foreach v $fvs { append c " if (l$v) tbc_flushr(interp, loc_, $v, l$v);" }
+    }
     set ::boxMode alias
     set n [llength $slots]
     for {set p 0} {$p < $n} {incr p} { append c " [boxc $P $p [lindex $slots $p]]" }
     set ::boxMode copy
+    if {$mode ne "none"} {
+        # (the call of the boxed code is one block per stack depth, and per flush set in mode `set`, at the end of the function; a hand-over only sets the instruction and jumps)
+        set tgt Dg$n; set fs {}
+        switch $mode {
+            set {
+                if {[llength $fvs]} {
+                    if {![info exists ::HGS($key,$fvs)]} { set ::HGS($key,$fvs) [expr {[info exists ::HGSN($key)] ? $::HGSN($key) : 0}]; set ::HGSN($key) [expr {$::HGS($key,$fvs) + 1}]; lappend ::HGSK($key) $key,$fvs }
+                    set tgt Dg${n}_$::HGS($key,$fvs); set fs $fvs
+                }
+            }
+            chk {
+                if {![info exists ::HGS($key,$fvs)]} { set ::HGS($key,$fvs) [expr {[info exists ::HGSN($key)] ? $::HGSN($key) : 0}]; set ::HGSN($key) [expr {$::HGS($key,$fvs) + 1}]; lappend ::HGSL($key) $fvs; lappend ::HGSK($key) $key,$fvs }
+                append c " hf_ = $::HGS($key,$fvs);"
+            }
+        }
+        if {![info exists ::HGT($key,$tgt)]} { set ::HGT($key,$tgt) 1; lappend ::HGN($key) [list $tgt $n $fs] }
+        # (a block that flushes goes on in the block of its depth, which makes the call)
+        if {[llength $fs] && ![info exists ::HGT($key,Dg$n)]} { set ::HGT($key,Dg$n) 1; lappend ::HGN($key) [list Dg$n $n {}] }
+        append c " hg_ = $gpc; /* G_[cident $P](interp, $gpc, */ goto $tgt;"
+        return $c
+    }
     set arr {}; for {set p 0} {$p < $n} {incr p} { lappend arr s$p }
     append c " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] };[epSave $P] int g_ = G_[cident $P](interp, $gpc, stk_, $n);"
     if {$::PI($P,hasYield)} { append c " if (TBC_UNLIKELY(tbc_susp)) \{ tbc_st = 4; rc = TCL_OK; goto ret; \}" }
@@ -5448,6 +5495,7 @@ proc emitVariant {key recursive {resume 0}} {
         append fn [resumePrologue $key]
     } else {
         append fn "    TBC_HIT([cstring "V:$key"]);\n"
+        if {[info exists ::env(TBC_FORCE_DEOPT)]} { append fn "    tbc_force_enter();\n" }
         append fn "    goto [expr {[info exists VK($key,in,0)] && $typedMode && ![string match *w $sig] ? "T0" : "redo_all"}];\n"
         if {$osrHere} {
             append fn "RESUME: ;\n    TBC_HIT([cstring "V:$key/RE"]);\n"
@@ -5514,14 +5562,53 @@ proc emitVariant {key recursive {resume 0}} {
     foreach pc $tpcs {
         if {![dict exists $usedD $pc]} continue
         set in $VK($key,in,$pc)
-        append fn "D$pc: ; TBC_HITI([cstring "D:$key:$pc"], [cstring $DSITE($key,$pc)]); [enterG $key $pc $in "" [flushSet $P $pc]]\n"
+        append fn "D$pc: ; TBC_HITI([cstring "D:$key:$pc"], [cstring $DSITE($key,$pc)]); [shareHand $key [enterG $key $pc $in "" [flushSet $P $pc]] $pc]\n"
     }
     append fn $stubs
     # resume stubs of a proc with variables in the frame (see `fl`)
     foreach fk [lsort [lmap s [expr {[info exists FRMK($key)] ? $FRMK($key) : {}}] {string cat $key , $s}]] {
         lassign [split [string range $fk [string length "$key,"] end] ,] fpc fm
-        append fn "FR${fpc}_$fm: ; TBC_HIT([cstring "R:$key:$fpc"]); [enterG $key $fpc $FRM($fk) "" [flushSet $P $fpc]]\n"
+        append fn "FR${fpc}_$fm: ; TBC_HIT([cstring "R:$key:$fpc"]); [shareHand $key [enterG $key $fpc $FRM($fk) "" [flushSet $P $fpc]] $fpc]\n"
     }
+
+    # the shared blocks of the hand-over sites above (see enterG): flush (modes set, all, chk), call of the boxed code at hg_
+    if {[info exists ::HGN($key)]} {
+        foreach b [lsort -dictionary -index 0 $::HGN($key)] {
+            lassign $b tgt n fs
+            set arr {}; for {set p 0} {$p < $n} {incr p} { lappend arr s$p }
+            append fn "$tgt: ;"
+            if {$::HMODE eq "set" && [llength $fs]} {
+                if {[llength $fs] <= $::FLUSH_INLINE} {
+                    foreach v $fs { append fn " if (l$v) tbc_flushr(interp, loc_, $v, l$v);" }
+                } else {
+                    append fn " \{ static const unsigned short fi_\[\] = { [join $fs {, }] }; Tcl_Obj *fv_\[\] = { l[join $fs {, l}] }; tbc_flushv(interp, loc_, fi_, fv_, [llength $fs]); \}"
+                }
+            } elseif {$::HMODE in {all chk} && $nv > 0} {
+                set all {}; for {set v 0} {$v < $nv} {incr v} { lappend all $v }
+                if {$::HMODE eq "chk"} {
+                    set rows {}
+                    foreach fs1 $::HGSL($key) { set row [lrepeat $nv 0]; foreach v $fs1 { lset row $v 1 }; lappend rows "{ [join $row {, }] }" }
+                    append fn " \{ static const unsigned char hs_\[\]\[$nv\] = { [join $rows {, }] }; Tcl_Obj *fv_\[\] = { l[join $all {, l}] }; tbc_flushchk(interp, loc_, hs_\[hf_\], fv_, $nv); \}"
+                } else {
+                    append fn " \{ static const unsigned short fi_\[\] = { [join $all {, }] }; Tcl_Obj *fv_\[\] = { l[join $all {, l}] }; tbc_flushv(interp, loc_, fi_, fv_, $nv); \}"
+                }
+            }
+            if {$::HMODE eq "set" && [llength $fs]} { append fn " goto Dg$n;\n"; continue }
+            append fn " \{ Tcl_Obj *stk_\[[expr {$n + 1}]\] = { [join [concat $arr NULL] {, }] };[epSave $P] int g_ = G_${cid}(interp, hg_, stk_, $n);"
+            if {$PI($P,hasYield)} { append fn " if (TBC_UNLIKELY(tbc_susp)) \{ tbc_st = 4; rc = TCL_OK; goto ret; \}" }
+            append fn " if (g_ == TCL_OK) \{ tbc_box = tbc_takeres(interp); tbc_st = 1; rc = TCL_OK; \} else \{ rc = g_; \} goto ret; \}\n"
+        }
+        foreach b $::HGN($key) { unset -nocomplain ::HGT($key,[lindex $b 0]) }
+        unset ::HGN($key)
+    }
+    if {[info exists ::HBL($key)]} {
+        set hk 0
+        foreach b $::HBL($key) { lassign $b body target; append fn "Db$hk: ; $body goto $target;\n"; incr hk }
+        foreach i $::HBK($key) { unset ::HBI($i) }
+        unset ::HBL($key) ::HBK($key)
+    }
+    if {[info exists ::HGSK($key)]} { foreach i $::HGSK($key) { unset ::HGS($i) }; unset ::HGSK($key) }
+    unset -nocomplain ::HGSN($key) ::HGSL($key)
 
     # ---- failure chains, exit
     set masks {}
@@ -5554,6 +5641,8 @@ proc emitVariant {key recursive {resume 0}} {
         if {[string first "ka$k" $fn] >= 0} { append decls "    int64_t ka$k = 0, kj$k = 0; (void) ka$k; (void) kj$k;\n" }
     }
     foreach m [lsort -unique [regexp -all -inline {\msvd_\d+\M} $fn]] { append decls "    int $m = 0;\n" }
+    if {[string first "hg_" $fn] >= 0} { append decls "    int hg_ = 0;\n" }
+    if {[string first "hf_" $fn] >= 0} { append decls "    int hf_ = 0;\n" }
     foreach m [lsort -unique [regexp -all -inline {\mty\d+_[IDW]+\M} $fn]] { regexp {ty\d+_([IDW]+)} $m -> yk; append decls "    tbc_Y_$yk $m;\n" }
     set fn [string map [list @@VECDECLS@@ $decls] $fn]
     # a variant that was entered from the boxed code, and every hand-over from it, must not make the boxed code enter typed code again (see osrAttempt)
@@ -5565,6 +5654,7 @@ proc emitVariant {key recursive {resume 0}} {
         # at all)
         set fn [regsub -all "G_${cid}\\(interp, (-?\\d+)," $fn "TBC_GNOF(resumed_, G_${cid}, interp, \\1,"]
         set fn [regsub -all "G_${cid}\\(interp, (rpc)," $fn "TBC_GNOF(-1, G_${cid}, interp, \\1,"]
+        set fn [regsub -all "G_${cid}\\(interp, (hg_)," $fn "TBC_GNOF(resumed_, G_${cid}, interp, \\1,"]
     }
     return $fn
 }

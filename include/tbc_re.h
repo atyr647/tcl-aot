@@ -77,7 +77,9 @@ TBC_SHARED int tbc_re_atoms_init;
  * characters above U+007F that were tried agree (then OTHER is what they say); a class of Unicode does not, and is for subjects of ASCII characters only */
 /* the answer for one atom, found one character at a time (an execution of Tcl's matcher for each of the 128 + 9 characters): what tbc_re_atomprobe must agree with; run only
  * when TBC_RE_VERIFY is set in the environment, which the fuzz test does */
-static int tbc_re_atomset_slow(const char *atom, int len, tbc_reset *out, int *uniform) {
+TBC_XS int tbc_re_atomset_slow(const char *atom, int len, tbc_reset *out, int *uniform);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_atomset_slow(const char *atom, int len, tbc_reset *out, int *uniform) {
     static const int others[] = { 0x80, 0xA0, 0xE9, 0x100, 0x2003, 0x20AC, 0x3042, 0xD83D, 0xFFFF };
     Tcl_Obj *pat; Tcl_RegExp re; int c, first = 1, ov = 0, i, uni = 1;
     char *buf = (char *) malloc((size_t) len + 12);
@@ -110,13 +112,16 @@ static int tbc_re_atomset_slow(const char *atom, int len, tbc_reset *out, int *u
     *uniform = uni;
     return 1;
 }
+#endif
 
 /* The characters that an atom matches, found with a few scans of one string of the probe characters (0 to 127, then nine above U+007F) instead of one execution for each: an
  * atom is of one character, so the matches of the atom itself in the string are its members, and those of (?:(?!atom).) the others.  The scan of the smaller side is made (members
  * first unless the atom is a negation or `.`, with the other as the fallback when more than 40 turn up); each match must be of one character.  hit[c] = 1 for the characters of the
  * scan.  0 when the atom does not compile or does not match single characters; -2 when more than `cap` matches turned up (hit is not complete). */
 #define TBC_RE_NPROBE 137
-static int tbc_re_scan(const char *atom, int len, int complement, int cap, unsigned char *hit) {
+TBC_XS int tbc_re_scan(const char *atom, int len, int complement, int cap, unsigned char *hit);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_scan(const char *atom, int len, int complement, int cap, unsigned char *hit) {
     static const int others[] = { 0x80, 0xA0, 0xE9, 0x100, 0x2003, 0x20AC, 0x3042, 0xD83D, 0xFFFF };
     Tcl_UniChar u[TBC_RE_NPROBE];
     Tcl_Obj *pat, *subj; Tcl_RegExp re; int i, off = 0, n = 0, rc = 1;
@@ -149,13 +154,16 @@ static int tbc_re_scan(const char *atom, int len, int complement, int cap, unsig
     Tcl_DecrRefCount(subj); Tcl_DecrRefCount(pat);
     return rc;
 }
+#endif
 /* The set of an atom of the common forms, worked out here without asking Tcl's matcher (an execution of it costs thousands of instructions, and an atom needs up to 137 of them
  * or a scan of that many characters, which a program that uses its patterns a few times pays back too late): a literal character, an escaped one (\n \t \r \f \v or any ASCII
  * punctuation), the classes \d \s \w \D \S \W, and a bracket expression of literals, escapes, ranges, the classes above and [:alpha:] [:digit:] [:alnum:] [:upper:] [:lower:]
  * [:space:] [:xdigit:] [:blank:], with ^ at the start.  Anything else (collating elements, other classes, a range that is wrong, a backslash before a letter that is not one of
  * these) is not understood and goes to the probe of Tcl's matcher, which also says what is an error.  The result is the same as the probe's, and the fuzz test checks that
  * for every atom it generates (TBC_RE_VERIFY).  *unicls: the atom holds a class of Unicode, which Tcl's tables decide above U+007F (the set then has no OTHER). */
-static int tbc_re_own_class(const char *name, int n, tbc_reset *s, int *uni) {
+TBC_XS int tbc_re_own_class(const char *name, int n, tbc_reset *s, int *uni);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_own_class(const char *name, int n, tbc_reset *s, int *uni) {
     int c, lo = 0, hi = -1, ok = 1;
     if (n == 5 && !strncmp(name, "alpha", 5)) { for (c = 0; c < 128; c++) if (isalpha(c)) tbc_re_put(s, c); *uni = 1; }
     else if (n == 5 && !strncmp(name, "digit", 5)) { for (c = '0'; c <= '9'; c++) tbc_re_put(s, c); *uni = 1; }
@@ -169,8 +177,11 @@ static int tbc_re_own_class(const char *name, int n, tbc_reset *s, int *uni) {
     (void) lo; (void) hi;
     return ok;
 }
+#endif
 /* one character of a bracket expression or an atom: a literal, an escape of one character, or a class escape; *cls: 1 class (put into *s, negated or not), else *ch is the character */
-static int tbc_re_own_item(const char *p, int n, int *i, int *ch, tbc_reset *s, int *uni, int inbracket) {
+TBC_XS int tbc_re_own_item(const char *p, int n, int *i, int *ch, tbc_reset *s, int *uni, int inbracket);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_own_item(const char *p, int n, int *i, int *ch, tbc_reset *s, int *uni, int inbracket) {
     unsigned char c;
     if (*i >= n) return 0;
     c = (unsigned char) p[*i];
@@ -197,7 +208,10 @@ static int tbc_re_own_item(const char *p, int n, int *i, int *ch, tbc_reset *s, 
     }
     *ch = c; *i += 1; return 1;
 }
-static int tbc_re_atomown(const char *atom, int len, tbc_reset *out, int *uniform, int *unicls) {
+#endif
+TBC_XS int tbc_re_atomown(const char *atom, int len, tbc_reset *out, int *uniform, int *unicls);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_atomown(const char *atom, int len, tbc_reset *out, int *uniform, int *unicls) {
     int i = 0, ch = -1, uni = 0, neg = 0;
     tbc_reset s;
     memset(&s, 0, sizeof s);
@@ -243,11 +257,14 @@ static int tbc_re_atomown(const char *atom, int len, tbc_reset *out, int *unifor
     *out = s; *unicls = uni; *uniform = !uni;
     return 1;
 }
+#endif
 
 /* the set and the uniformity of an atom: 1, or 0 when it is not one of one character.  The scan of its members when it has few (up to 60: most atoms); a negation ([^...], \D, \S,
  * \W) is the others of the atom without the negation, which has few members; `.` matches every character (these three identities are checked against the character-at-a-time
  * probe by the fuzz test); an atom with many members goes to the probe of one execution for each character (tbc_re_atomset_slow), 2400 instructions each */
-static int tbc_re_atomprobe(const char *atom, int len, tbc_reset *out, int *uniform) {
+TBC_XS int tbc_re_atomprobe(const char *atom, int len, tbc_reset *out, int *uniform);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_atomprobe(const char *atom, int len, tbc_reset *out, int *uniform) {
     unsigned char hit[TBC_RE_NPROBE];
     char fl[64];
     int i, flip = 0, r, unicls = 0;
@@ -272,10 +289,13 @@ static int tbc_re_atomprobe(const char *atom, int len, tbc_reset *out, int *unif
     }
     return 1;
 }
+#endif
 /* the set of the characters (0..127, and OTHER for the characters above that) that one atom matches: 1, or 0 when the atom is not one of one character.  *uniform tells whether the
  * characters above U+007F that were tried agree (then OTHER is what they say); a class of Unicode does not, and is asked about character by character (tbc_re_xclass).  *patOut:
  * the atom as a pattern that matches that one character and no more, for those questions (compiled when first used; owned by the atom table) */
-static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform, Tcl_Obj **patOut) {
+TBC_XS int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform, Tcl_Obj **patOut);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *uniform, Tcl_Obj **patOut) {
     Tcl_HashEntry *h;
     tbc_reatom *ra;
     char *key;
@@ -318,6 +338,7 @@ static int tbc_re_atomset(const char *atom, int len, tbc_reset *out, int *unifor
     }
     return 1;
 }
+#endif
 
 /* ---- the parser ---- */
 typedef struct {
@@ -359,7 +380,9 @@ static int tbc_re_atomnode(tbc_reparse *ps, const char *atom, int len, int unicl
 }
 static int tbc_re_alt(tbc_reparse *ps, int depth);
 /* one atom followed by its quantifier */
-static int tbc_re_piece(tbc_reparse *ps, int depth) {
+TBC_XS int tbc_re_piece(tbc_reparse *ps, int depth);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_piece(tbc_reparse *ps, int depth) {
     const char *p = ps->p; int n = ps->n, i = ps->i, a = 0, mn = 1, mx = 1;
     unsigned char c;
     if (i >= n) { ps->fail = 1; return 0; }
@@ -452,6 +475,7 @@ static int tbc_re_piece(tbc_reparse *ps, int depth) {
     }
     return a;
 }
+#endif
 static int tbc_re_branch(tbc_reparse *ps, int depth) {
     int first = tbc_re_piece(ps, depth), cur;
     if (ps->fail) return 0;
@@ -491,7 +515,9 @@ static int tbc_re_nn(tbc_renfa *nf, int kind, int o1, int o2, int set) {
     nf->nodes[nf->nn].kind = (unsigned char) kind; nf->nodes[nf->nn].o1 = o1; nf->nodes[nf->nn].o2 = o2; nf->nodes[nf->nn].set = set;
     return nf->nn++;
 }
-static int tbc_re_emit(tbc_renfa *nf, const tbc_rean *an, int ix, int next) {
+TBC_XS int tbc_re_emit(tbc_renfa *nf, const tbc_rean *an, int ix, int next);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_emit(tbc_renfa *nf, const tbc_rean *an, int ix, int next) {
     const tbc_rean *a = &an[ix];
     int t, i;
     if (nf->fail) return 0;
@@ -518,6 +544,7 @@ static int tbc_re_emit(tbc_renfa *nf, const tbc_rean *an, int ix, int next) {
         return t;
     }
 }
+#endif
 
 /* ---- the DFA ---- */
 static void tbc_re_free(tbc_re *re) {
@@ -530,7 +557,9 @@ static void tbc_re_free(tbc_re *re) {
 }
 /* the SET and MATCH nodes that the nodes in `in` lead to without a character, sorted, in out (a buffer of nn entries); the count.  A node is marked when it is put on the
  * stack, so that the stack never holds more than nn of them */
-static int tbc_re_closure(tbc_re *re, const int *in, int nin, int *out) {
+TBC_XS int tbc_re_closure(tbc_re *re, const int *in, int nin, int *out);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_closure(tbc_re *re, const int *in, int nin, int *out) {
     int sp = 0, n = 0, i;
     int *stk = re->stackbuf;
     re->gen++;
@@ -546,7 +575,10 @@ static int tbc_re_closure(tbc_re *re, const int *in, int nin, int *out) {
     for (i = 1; i < n; i++) { int v = out[i], j = i - 1; while (j >= 0 && out[j] > v) { out[j + 1] = out[j]; j--; } out[j + 1] = v; }
     return n;
 }
-static int tbc_re_dfind(tbc_re *re, const int *set, int n) {
+#endif
+TBC_XS int tbc_re_dfind(tbc_re *re, const int *set, int n);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_dfind(tbc_re *re, const int *set, int n) {
     uint32_t h = 2166136261u;
     int i, pos;
     for (i = 0; i < n; i++) h = (h ^ (uint32_t) set[i]) * 16777619u;
@@ -583,8 +615,11 @@ static int tbc_re_dfind(tbc_re *re, const int *set, int n) {
         return d;
     }
 }
+#endif
 /* the state after class k from state d: made and kept; -1 when memory or the limit gives out */
-static int tbc_re_step(tbc_re *re, int d, int k) {
+TBC_XS int tbc_re_step(tbc_re *re, int d, int k);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_step(tbc_re *re, int d, int k) {
     int i, n = 0, r;
     int *tmp = re->tmpbuf, *out = re->tmpbuf + re->nn;
     int sym = re->rep[k];
@@ -602,6 +637,7 @@ static int tbc_re_step(tbc_re *re, int d, int k) {
     re->next[d * re->stride + k] = r;
     return r;
 }
+#endif
 
 /* the classes of symbols: those that no set tells apart are one column of the table */
 static void tbc_re_classes(tbc_re *re) {
@@ -618,7 +654,9 @@ static void tbc_re_classes(tbc_re *re) {
     }
 }
 /* a compiled expression for the pattern, or NULL when it is outside the subset (or its size is) */
-static tbc_re *tbc_re_compile(const char *pat, int len) {
+TBC_XS tbc_re *tbc_re_compile(const char *pat, int len);
+#ifndef TBC_SPLIT_USER
+TBC_XS tbc_re *tbc_re_compile(const char *pat, int len) {
     tbc_reparse ps; tbc_renfa nf; tbc_re *re = NULL;
     int root, anchor_start = 0, anchor_end = 0, i, matchnode, startnode, bodylen;
     const char *body;
@@ -670,11 +708,14 @@ static tbc_re *tbc_re_compile(const char *pat, int len) {
     (void) i;
     return re;
 }
+#endif
 
 /* the class (column of the table) of a character above U+007F, for an expression with classes of Unicode: Tcl's matcher says, for each of those atoms, whether the character is one of
  * its characters (once for each distinct character, then kept in a small direct-mapped table); the characters that the atoms treat alike are one class, a new symbol above OTHER whose
  * place in each set is made here.  -1 when there are more classes than the table has room for (the call is left to Tcl) */
-static int tbc_re_xclass(tbc_re *re, unsigned c) {
+TBC_XS int tbc_re_xclass(tbc_re *re, unsigned c);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_xclass(tbc_re *re, unsigned c) {
     unsigned slot = c & 255, sig = 0; int i, j, k;
     if (re->uc_ch[slot] == c) return re->uc_cls[slot];
     for (i = 0; i < re->nup; i++) {
@@ -702,6 +743,7 @@ static int tbc_re_xclass(tbc_re *re, unsigned c) {
     re->uc_ch[slot] = c; re->uc_cls[slot] = (unsigned char) k;
     return k;
 }
+#endif
 
 /* ---- matching: the leftmost longest match at or after `from`.  1 and [*ms, *me), 0 no match, -1 gave up (state limit or memory; the caller asks Tcl) ---- */
 #define TBC_RE_EXEC(NAME, CHAR) \
@@ -759,7 +801,9 @@ TBC_RE_EXEC(tbc_re_exec16, Tcl_UniChar)
 /* ---- the expressions that were made, by pattern text; a pattern outside the subset is remembered too (a NULL) ---- */
 TBC_SHARED Tcl_HashTable tbc_re_cache;
 TBC_SHARED int tbc_re_cache_init;
-static tbc_re *tbc_re_get(const char *pat, int len) {
+TBC_XS tbc_re *tbc_re_get(const char *pat, int len);
+#ifndef TBC_SPLIT_USER
+TBC_XS tbc_re *tbc_re_get(const char *pat, int len) {
     Tcl_HashEntry *h; int isnew; char *key; tbc_re *re;
     if (!tbc_re_cache_init) { Tcl_InitHashTable(&tbc_re_cache, TCL_STRING_KEYS); tbc_re_cache_init = 1; }
     if (len > 400) return NULL;
@@ -773,6 +817,7 @@ static tbc_re *tbc_re_get(const char *pat, int len) {
     Tcl_SetHashValue(h, re);
     return re;
 }
+#endif
 
 /* ---- the glue ---- */
 #define TBC_RE_PASS (-100)
@@ -796,7 +841,9 @@ static int tbc_re_find(tbc_re *re, const tbc_resubj *sj, int offset, int *ms, in
 }
 /* Does the pattern match the subject from -start on (hasstart: the value in startObj)?  1 with [*ms, *me) in characters, 0, or TBC_RE_PASS for whatever this matcher does not take:
  * the caller then asks Tcl, which has not been touched. */
-static int tbc_re_search(Tcl_Obj *patObj, Tcl_Obj *subj, int hasstart, Tcl_Obj *startObj, int *ms, int *me, int *off) {
+TBC_XS int tbc_re_search(Tcl_Obj *patObj, Tcl_Obj *subj, int hasstart, Tcl_Obj *startObj, int *ms, int *me, int *off);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_re_search(Tcl_Obj *patObj, Tcl_Obj *subj, int hasstart, Tcl_Obj *startObj, int *ms, int *me, int *off) {
     const char *pat; int plen, offset = 0;
     tbc_re *re; tbc_resubj sj;
     pat = Tcl_GetStringFromObj(patObj, &plen);
@@ -810,8 +857,11 @@ static int tbc_re_search(Tcl_Obj *patObj, Tcl_Obj *subj, int hasstart, Tcl_Obj *
     *off = offset;
     return tbc_re_find(re, &sj, offset, ms, me);
 }
+#endif
 /* `regexp ?-all? ?-inline? ?-indices? ?-start n? ?--? exp string ?matchVar?` for what the matcher takes, as Tcl_RegexpObjCmd does it (tclCmdMZ.c), and TBC_RE_PASS for the rest */
-static int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     int i, indices = 0, hasstart = 0, all = 0, doinline = 0, ms = 0, me = 0, offset = 0, rest, plen;
     Tcl_Obj *startObj = NULL, *resultPtr = NULL;
     tbc_re *re; tbc_resubj sj; const char *pat;
@@ -881,6 +931,7 @@ static int tbc_regexp_fast(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj 
     else Tcl_SetObjResult(interp, Tcl_NewIntObj(all ? all - 1 : 1));
     return TCL_OK;
 }
+#endif
 /* tbc::restats -- the calls of regexp made by compiled code: {answered by the native matcher, left to Tcl}; the tests use it to see that the matcher was used */
 static int tbc_restats_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 /* tbc::refast ?switches? exp string ?matchVar ...? -- tbc_regexp_fast itself, for the tests: what `regexp` gives (with the variables set in the caller's frame), or "TBC-PASS" when the
@@ -905,7 +956,9 @@ static int tbc_re_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *cons
  * literal), and if it is Tcl's own `regexp`, with nothing the dispatch would act on (a trace on the command or the interpreter, a limit, a cancel, an async handler, the nesting
  * depth), the native matcher answers, and Tcl's own procedure for what it does not take; the command is counted as the dispatch counts it.  Anything else is the dispatch itself. */
 TBC_SHARED unsigned long tbc_re_nnative, tbc_re_npass;   /* the calls of regexp by compiled code that the matcher answered, and those it left to Tcl (tbc::restats) */
-static int tbc_evre(Tcl_Interp *interp, int objc, Tcl_Obj **ov, int flags) {
+TBC_XS int tbc_evre(Tcl_Interp *interp, int objc, Tcl_Obj **ov, int flags);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_evre(Tcl_Interp *interp, int objc, Tcl_Obj **ov, int flags) {
     Interp *iPtr = (Interp *) interp;
     Command *c = (Command *) Tcl_GetCommandFromObj(interp, ov[0]);
     if (TBC_LIKELY(c && c->objProc == Tcl_RegexpObjCmd && !c->nreProc && !(c->flags & (CMD_IS_DELETED | CMD_HAS_EXEC_TRACES))
@@ -920,6 +973,7 @@ static int tbc_evre(Tcl_Interp *interp, int objc, Tcl_Obj **ov, int flags) {
     }
     return Tcl_EvalObjv(interp, objc, ov, flags);
 }
+#endif
 static int tbc_restats_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Tcl_Obj *two[2];
     (void) cd; (void) objc; (void) objv;

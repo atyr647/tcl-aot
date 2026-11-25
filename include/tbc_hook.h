@@ -88,7 +88,9 @@ static int tbc_lazy_obj(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *co
 static int tbc_lazy_nre(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 #define TBC_IS_PROC_OBJPROC(f) ((f) == TclObjInterpProc || (f) == tbc_lazy_obj)
 
-static uint64_t tbc_fingerprint(const ByteCode *bc) {
+TBC_XS uint64_t tbc_fingerprint(const ByteCode *bc);
+#ifndef TBC_SPLIT_USER
+TBC_XS uint64_t tbc_fingerprint(const ByteCode *bc) {
     uint64_t h = UINT64_C(1469598103934665603);
     int i;
     if (!tbcDouble) tbcDouble = Tcl_GetObjType("double");      /* (the ahead-of-time tool calls this without the runtime having started) */
@@ -116,9 +118,12 @@ static uint64_t tbc_fingerprint(const ByteCode *bc) {
     }
     return h;
 }
+#endif
 
 /* argument list as the Proc holds it: name, or name \003 default, joined by \002 (the translator builds the same string) */
-static char *tbc_canon_args(Proc *p) {
+TBC_XS char *tbc_canon_args(Proc *p);
+#ifndef TBC_SPLIT_USER
+TBC_XS char *tbc_canon_args(Proc *p) {
     Tcl_DString ds;
     CompiledLocal *lp = p->firstLocalPtr;
     int i;
@@ -134,6 +139,7 @@ static char *tbc_canon_args(Proc *p) {
     Tcl_DStringFree(&ds);
     return r;
 }
+#endif
 
 static char *tbc_key(const char *ns, const char *args, const char *body) {
     size_t a = strlen(ns), b = strlen(args), c = strlen(body);
@@ -228,7 +234,9 @@ TBC_INLINE Tcl_Obj *tbc_incrimm(Tcl_Interp *interp, Var *loc, int idx, long imm)
     return r;
 }
 /* unset compiled local idx; flags nonzero reports an error for a variable that is not set (as `unset` without -nocomplain) */
-static int tbc_unsetloc(Tcl_Interp *interp, Var *loc, int idx, int flags) {
+TBC_XS int tbc_unsetloc(Tcl_Interp *interp, Var *loc, int idx, int flags);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_unsetloc(Tcl_Interp *interp, Var *loc, int idx, int flags) {
     Var *vp = &loc[idx];
     int fl = flags ? TCL_LEAVE_ERR_MSG : 0;
     TBC_FOLLOW(vp);
@@ -245,6 +253,7 @@ slow:
     }
     return TCL_OK;
 }
+#endif
 /* ---- typed code on variables that live in the frame (links, namespace variables, array elements) ----
  * Each helper completes the operation in the common case (nothing to follow but links, no trace, the value present and of the type the operation needs)
  * and otherwise reports 0 with nothing changed: the caller then goes on in the boxed code at the same instruction, which does the general thing (traces,
@@ -448,7 +457,9 @@ TBC_INLINE tbc_rent *tbc_rfind(const tbc_rmap *m, const char *s, int len, uint64
         i = (i + 1) & mask;
     }
 }
-static int tbc_rgrow(tbc_rmap *m) {
+TBC_XS int tbc_rgrow(tbc_rmap *m);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_rgrow(tbc_rmap *m) {
     size_t ncap, ntcap, i;
     tbc_rent *ne;
     int32_t *nt;
@@ -480,8 +491,11 @@ static int tbc_rgrow(tbc_rmap *m) {
     m->tab = nt; m->tcap = ntcap;
     return 1;
 }
+#endif
 /* a new element; val is a reference the table then owns.  0 when memory runs out (nothing changed) */
-static int tbc_radd(tbc_rmap *m, const char *s, int len, uint64_t h, Tcl_Obj *val) {
+TBC_XS int tbc_radd(tbc_rmap *m, const char *s, int len, uint64_t h, Tcl_Obj *val);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_radd(tbc_rmap *m, const char *s, int len, uint64_t h, Tcl_Obj *val) {
     tbc_rent *r;
     size_t j;
     if (m->n >= (size_t) INT32_MAX / 2) return 0;
@@ -496,6 +510,7 @@ static int tbc_radd(tbc_rmap *m, const char *s, int len, uint64_t h, Tcl_Obj *va
     m->n++;
     return 1;
 }
+#endif
 /* a key that is a canonical non-negative integer below 2^31 */
 TBC_INLINE int tbc_rkeyint(const char *s, int len, int64_t *k) {
     int64_t v = 0;
@@ -539,7 +554,9 @@ static int tbc_rreserve(tbc_rmap *m, size_t n) {
     return 1;
 }
 /* the elements out of the vector into the table, in the order of the vector (= the order they were made in).  0, changing nothing, when memory runs out */
-static int tbc_rd2c(tbc_rmap *m) {
+TBC_XS int tbc_rd2c(tbc_rmap *m);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_rd2c(tbc_rmap *m) {
     size_t i, dn = m->dn;
     tbc_rslot *d = m->d;
     if (!d) return 1;
@@ -565,6 +582,7 @@ static int tbc_rd2c(tbc_rmap *m) {
     m->d = NULL; m->dn = m->dcap = m->dw = m->dwe = 0; m->dmode = 0; m->dbase = m->dbase2 = 0; m->ord = NULL; m->on = m->ocap = 0;
     return 1;
 }
+#endif
 /* the next element of the vector; o is NULL (the integer i), TBC_RDBL (the double with the bits i) or a reference the vector then owns.  0 when memory runs out */
 static int tbc_rdappend(tbc_rmap *m, int64_t i, Tcl_Obj *o) {
     if (m->dn == m->dcap) {
@@ -611,7 +629,9 @@ static int tbc_rd1to3(tbc_rmap *m) {
     return 1;
 }
 /* make the element k of a vector of one dimension (tbc_rdcreatable said it may be made): in order at its end, else in the unordered vector.  0 when memory runs out */
-static int tbc_rd13add(tbc_rmap *m, int64_t k, int64_t i, Tcl_Obj *o) {
+TBC_XS int tbc_rd13add(tbc_rmap *m, int64_t k, int64_t i, Tcl_Obj *o);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_rd13add(tbc_rmap *m, int64_t k, int64_t i, Tcl_Obj *o) {
     if (m->dmode == 1) {
         if (k == m->dbase + (int64_t) m->dn) return tbc_rdappend(m, i, o);
         if (!tbc_rd1to3(m)) return 0;
@@ -637,6 +657,7 @@ static int tbc_rd13add(tbc_rmap *m, int64_t k, int64_t i, Tcl_Obj *o) {
     m->ord[m->on++] = (int32_t) k;
     return 1;
 }
+#endif
 /* slot := the object val (a reference is taken; an integer in canonical form, or a double with no string form, is held unboxed) */
 static void tbc_rdput(tbc_rslot *sl, Tcl_Obj *val) {
     int64_t i;
@@ -678,7 +699,9 @@ static int tbc_rdaddt(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o
     return tbc_rd13add(m, k, i, o);
 }
 /* element := the unboxed value (i, o): an integer (o NULL) or a double (o TBC_RDBL, bits in i).  0 when memory runs out */
-static int tbc_rsetv(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o) {
+TBC_XS int tbc_rsetv(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_rsetv(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o) {
     uint64_t h;
     tbc_rent *r;
     Tcl_Obj *nv;
@@ -708,12 +731,15 @@ static int tbc_rsetv(tbc_rmap *m, const char *s, int len, int64_t i, Tcl_Obj *o)
     Tcl_DecrRefCount(nv);
     return 0;
 }
+#endif
 TBC_INLINE int tbc_rseti(tbc_rmap *m, const char *s, int len, int64_t w) { return tbc_rsetv(m, s, len, w, NULL); }
 TBC_INLINE int tbc_rsetd(tbc_rmap *m, const char *s, int len, double d) { return tbc_rsetv(m, s, len, tbc_d2i(d), TBC_RDBL); }
 /* a tagged number: the integer iv (tag 0) or the double dv (tag 1) */
 TBC_INLINE int tbc_rsetn(tbc_rmap *m, const char *s, int len, int tag, int64_t iv, double dv) { return tag ? tbc_rsetd(m, s, len, dv) : tbc_rseti(m, s, len, iv); }
 /* element := val (a reference is taken).  0 when memory runs out */
-static int tbc_rset(tbc_rmap *m, const char *s, int len, Tcl_Obj *val) {
+TBC_XS int tbc_rset(tbc_rmap *m, const char *s, int len, Tcl_Obj *val);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_rset(tbc_rmap *m, const char *s, int len, Tcl_Obj *val) {
     uint64_t h;
     tbc_rent *r;
     if (m->d || !m->n) {
@@ -751,6 +777,7 @@ static int tbc_rset(tbc_rmap *m, const char *s, int len, Tcl_Obj *val) {
     Tcl_DecrRefCount(val);
     return 0;
 }
+#endif
 /* the element's value (not referenced), NULL if there is none */
 static Tcl_Obj *tbc_rget(const tbc_rmap *m, const char *s, int len) {
     tbc_rent *r;
@@ -785,7 +812,9 @@ static int tbc_rgetd(const tbc_rmap *m, const char *s, int len, double *d) {
 }
 /* element += imm (an element that is not there yet becomes imm); *out is the new value.  0, changing nothing, when the value is not an integer, the sum
  * overflows or memory runs out: the boxed code then does it, with the interpreter's error */
-static int tbc_rinc(tbc_rmap *m, const char *s, int len, int64_t imm, int64_t *out) {
+TBC_XS int tbc_rinc(tbc_rmap *m, const char *s, int len, int64_t imm, int64_t *out);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_rinc(tbc_rmap *m, const char *s, int len, int64_t imm, int64_t *out) {
     uint64_t h;
     tbc_rent *r;
     int64_t sum = imm;
@@ -832,6 +861,7 @@ static int tbc_rinc(tbc_rmap *m, const char *s, int len, int64_t imm, int64_t *o
     *out = sum;
     return 1;
 }
+#endif
 /* The same by an integer key (one-dimensional: the key's text is its canonical decimal form) or by two (the key "i,j"): the elements of a map in dense mode are reached without the text. */
 static int tbc_rsetv_k_slow(tbc_rmap *m, int64_t key, int64_t i, Tcl_Obj *o) { char kb[24]; int kl = tbc_fmt_i64(kb, key); return tbc_rsetv(m, kb, kl, i, o); }
 TBC_INLINE int tbc_rsetv_k(tbc_rmap *m, int64_t key, int64_t i, Tcl_Obj *o) {
@@ -954,7 +984,9 @@ TBC_INLINE int tbc_rinc_k2(tbc_rmap *m, int64_t i, int64_t j, int64_t imm, int64
     return tbc_rinc_k2_slow(m, i, j, imm, out);
 }
 /* write the elements into the array that is compiled local idx, in the order they were made, and empty the table */
-static void tbc_rflush(Tcl_Interp *interp, Var *loc, int idx, tbc_rmap *m) {
+TBC_XS void tbc_rflush(Tcl_Interp *interp, Var *loc, int idx, tbc_rmap *m);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_rflush(Tcl_Interp *interp, Var *loc, int idx, tbc_rmap *m) {
     size_t i, cnt = m->dmode == 3 ? m->on : m->dn;
     for (i = 0; i < cnt; i++) {
         char kb[48];
@@ -984,6 +1016,7 @@ static void tbc_rflush(Tcl_Interp *interp, Var *loc, int idx, tbc_rmap *m) {
     }
     tbc_rfree(m);
 }
+#endif
 /* ---- array elements and variables named on the stack: the generic paths of INST_LOAD_ARRAY*, INST_STORE_*, INST_INCR_*, INST_EXIST_*,
  * INST_UNSET_*.  idx >= 0: the array is the compiled local idx and key names the element; idx < 0: the variable (or, with a key, the array
  * element) is named by name on the stack.  Results are not referenced. */
@@ -1027,7 +1060,9 @@ static Tcl_Obj *tbc_vincr(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, 
     return TclPtrIncrObjVarIdx(interp, vp, ap, name, key, incr, TCL_LEAVE_ERR_MSG, -1);
 }
 /* lappend with the values given as a list (INST_LAPPEND_LIST*): the variable's new value, NULL on error */
-static Tcl_Obj *tbc_vlappend(Tcl_Interp *interp, Var *loc, int idx, int isElem, Tcl_Obj *name, Tcl_Obj *key, Tcl_Obj *val) {
+TBC_XS Tcl_Obj *tbc_vlappend(Tcl_Interp *interp, Var *loc, int idx, int isElem, Tcl_Obj *name, Tcl_Obj *key, Tcl_Obj *val);
+#ifndef TBC_SPLIT_USER
+TBC_XS Tcl_Obj *tbc_vlappend(Tcl_Interp *interp, Var *loc, int idx, int isElem, Tcl_Obj *name, Tcl_Obj *key, Tcl_Obj *val) {
     Var *vp, *ap = NULL;
     Tcl_Obj **objv, *cur, *assign, *res, *p1 = NULL;
     int objc, len, created = 0;
@@ -1064,9 +1099,12 @@ static Tcl_Obj *tbc_vlappend(Tcl_Interp *interp, Var *loc, int idx, int isElem, 
     TclDecrRefCount(assign);
     return res;
 }
+#endif
 /* the dictionary update instructions (INST_DICT_SET/UNSET/APPEND/LAPPEND): mode 0 set with nk keys, 1 unset with nk keys, 2 append, 3 lappend
  * (one key and a value); the result is the variable's new value, NULL on error */
-static Tcl_Obj *tbc_dictmod(Tcl_Interp *interp, Var *loc, int idx, int mode, int nk, Tcl_Obj **keys, Tcl_Obj *val) {
+TBC_XS Tcl_Obj *tbc_dictmod(Tcl_Interp *interp, Var *loc, int idx, int mode, int nk, Tcl_Obj **keys, Tcl_Obj *val);
+#ifndef TBC_SPLIT_USER
+TBC_XS Tcl_Obj *tbc_dictmod(Tcl_Interp *interp, Var *loc, int idx, int mode, int nk, Tcl_Obj **keys, Tcl_Obj *val) {
     Var *vp = &loc[idx];
     Tcl_Obj *dictPtr, *valuePtr, *res;
     int alloc, result = TCL_OK;
@@ -1111,8 +1149,11 @@ static Tcl_Obj *tbc_dictmod(Tcl_Interp *interp, Var *loc, int idx, int mode, int
     TclDecrRefCount(dictPtr);
     return res;
 }
+#endif
 /* [array set] on a variable that has no value yet: make it an array (INST_ARRAY_MAKE_*); nonzero on error */
-static int tbc_arrmake(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name) {
+TBC_XS int tbc_arrmake(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_arrmake(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name) {
     Var *vp, *ap = NULL;
     Tcl_Obj *p1 = NULL;
     if (idx >= 0) { vp = &loc[idx]; TBC_FOLLOW(vp); }
@@ -1133,8 +1174,11 @@ static int tbc_arrmake(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name) {
     }
     return 0;
 }
+#endif
 /* [string is integer] etc.: the numeric type code of INST_NUM_TYPE */
-static int tbc_numtype(Tcl_Obj *o) {
+TBC_XS int tbc_numtype(Tcl_Obj *o);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_numtype(Tcl_Obj *o) {
     ClientData ptr;
     int type1, i;
     if (TclGetNumberFromObj(NULL, o, &ptr, &type1) != TCL_OK) return 0;
@@ -1148,6 +1192,7 @@ static int tbc_numtype(Tcl_Obj *o) {
     }
     return type1;
 }
+#endif
 static Tcl_WideInt tbc_clock(int which) {
     Tcl_Time now;
     switch (which) {
@@ -1162,7 +1207,9 @@ static Tcl_WideInt tbc_clock(int which) {
     }
 }
 /* dict update: the values of the keys go to the variables (INST_DICT_UPDATE_START), and come back (INST_DICT_UPDATE_END) */
-static int tbc_dupstart(Tcl_Interp *interp, Var *loc, int idx, const int *vi, int nv, Tcl_Obj *keys) {
+TBC_XS int tbc_dupstart(Tcl_Interp *interp, Var *loc, int idx, const int *vi, int nv, Tcl_Obj *keys);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_dupstart(Tcl_Interp *interp, Var *loc, int idx, const int *vi, int nv, Tcl_Obj *keys) {
     Interp *iPtr = (Interp *) interp;
     Var *vp = &loc[idx];
     Tcl_Obj *dictPtr, *valuePtr, **kp;
@@ -1183,7 +1230,10 @@ static int tbc_dupstart(Tcl_Interp *interp, Var *loc, int idx, const int *vi, in
     TclDecrRefCount(dictPtr);
     return 0;
 }
-static int tbc_dupend(Tcl_Interp *interp, Var *loc, int idx, const int *vi, Tcl_Obj *keys) {
+#endif
+TBC_XS int tbc_dupend(Tcl_Interp *interp, Var *loc, int idx, const int *vi, Tcl_Obj *keys);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_dupend(Tcl_Interp *interp, Var *loc, int idx, const int *vi, Tcl_Obj *keys) {
     Var *vp = &loc[idx];
     Tcl_Obj *dictPtr, *valuePtr, *res, **kp;
     int length, i, allocdict;
@@ -1214,10 +1264,13 @@ static int tbc_dupend(Tcl_Interp *interp, Var *loc, int idx, const int *vi, Tcl_
     }
     return 0;
 }
+#endif
 /* dict get / dict exists with a key path (INST_DICT_GET, INST_DICT_EXISTS with more than one key): the keys are keys[0..n-1] and the
  * dictionary is dict; the value (not referenced) or NULL; for exists (exist != 0) nothing is raised and *found tells; for get a missing
  * key or a bad dictionary is an error (NULL with an error message) */
-static Tcl_Obj *tbc_dictpath(Tcl_Interp *interp, Tcl_Obj *dict, int n, Tcl_Obj **keys, int exist, int *found) {
+TBC_XS Tcl_Obj *tbc_dictpath(Tcl_Interp *interp, Tcl_Obj *dict, int n, Tcl_Obj **keys, int exist, int *found);
+#ifndef TBC_SPLIT_USER
+TBC_XS Tcl_Obj *tbc_dictpath(Tcl_Interp *interp, Tcl_Obj *dict, int n, Tcl_Obj **keys, int exist, int *found) {
     Tcl_Interp *i2 = exist ? NULL : interp;
     Tcl_Obj *dp = dict, *res = NULL;
     if (n > 1) {
@@ -1236,8 +1289,11 @@ static Tcl_Obj *tbc_dictpath(Tcl_Interp *interp, Tcl_Obj *dict, int n, Tcl_Obj *
     if (exist) *found = 0;
     return NULL;
 }
+#endif
 /* does the variable exist ([info exists]); idx >= 0 with no key: the compiled local itself */
-static int tbc_vexist(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, Tcl_Obj *key) {
+TBC_XS int tbc_vexist(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, Tcl_Obj *key);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_vexist(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, Tcl_Obj *key) {
     Interp *iPtr = (Interp *) interp;
     Var *vp, *ap = NULL;
     if (idx >= 0 && !key) {
@@ -1268,6 +1324,7 @@ static int tbc_vexist(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, Tcl_
     }
     return vp && !TclIsVarUndefined(vp);
 }
+#endif
 /* unset an array element (idx >= 0, key) or a variable named on the stack; flags as for unset (TCL_LEAVE_ERR_MSG or 0); 0 on success */
 static int tbc_vunset(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name, Tcl_Obj *key, int flags) {
     Var *vp, *ap;
@@ -1293,7 +1350,9 @@ static int tbc_arrexists(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *name) {
  * two literal slots that are set before each run.  The instruction is the interpreter's, so results and error messages are exactly its own. */
 typedef struct { ByteCode *bc; int tried; } TbcMop;
 TBC_SHARED TbcMop tbc_mops[TBC_NOPS];
-static ByteCode *tbc_mop_get(Tcl_Interp *interp, int op) {
+TBC_XS ByteCode *tbc_mop_get(Tcl_Interp *interp, int op);
+#ifndef TBC_SPLIT_USER
+TBC_XS ByteCode *tbc_mop_get(Tcl_Interp *interp, int op) {
     static const char *const ex[TBC_NOPS] = { "$x + $y", "$x - $y", "$x * $y", "$x / $y", "$x % $y", "$x < $y", "$x <= $y", "$x > $y", "$x >= $y",
         "$x == $y", "$x != $y", "$x & $y", "$x | $y", "$x ^ $y", "$x << $y", "$x >> $y", "$x ** $y", "-$x", "+$x", "~$x", "!$x" };
     TbcMop *m = &tbc_mops[op];
@@ -1337,11 +1396,14 @@ static ByteCode *tbc_mop_get(Tcl_Interp *interp, int op) {
     m->bc = bc;
     return bc;
 }
+#endif
 #ifdef __SIZEOF_INT128__
 /* decision 83: integers of up to 126 bits (the generators and hashes of 64-bit unsigned arithmetic: `& 0xFFFFFFFFFFFFFFFF` after `+`, `<<`, `*`) are computed in 128-bit machine
  * arithmetic, with no mp_int copies; the result is the same integer the bignum code gives (two's complement for the bitwise operators on negative operands, floor for >>),
  * and anything that does not fit goes the bignum way.  1 if the number is held in *out. */
-static int tbc_get128(ClientData p, int t, __int128 *out) {
+TBC_XS int tbc_get128(ClientData p, int t, __int128 *out);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_get128(ClientData p, int t, __int128 *out) {
     unsigned __int128 mag = 0;
     const mp_int *m;
     int i;
@@ -1355,8 +1417,11 @@ static int tbc_get128(ClientData p, int t, __int128 *out) {
     *out = m->sign == MP_NEG ? -(__int128) mag : (__int128) mag;
     return 1;
 }
+#endif
 /* the result r in place of *pa (as the interpreter's BIG_RESULT: an operand nobody else holds takes it); b is consumed */
-static void tbc_put128(Tcl_Obj **pa, Tcl_Obj *b, __int128 r) {
+TBC_XS void tbc_put128(Tcl_Obj **pa, Tcl_Obj *b, __int128 r);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_put128(Tcl_Obj **pa, Tcl_Obj *b, __int128 r) {
     Tcl_Obj *a = *pa, *n;
     if (r >= (__int128) INT64_MIN && r <= (__int128) INT64_MAX) {
         if (!Tcl_IsShared(a)) Tcl_SetWideIntObj(a, (Tcl_WideInt) r);
@@ -1375,6 +1440,7 @@ static void tbc_put128(Tcl_Obj **pa, Tcl_Obj *b, __int128 r) {
     }
     Tcl_DecrRefCount(b);
 }
+#endif
 /* 0 if done; -1 if the operands or the result do not fit (nothing is changed) */
 static int tbc_num128(Tcl_Obj *o, __int128 *out) {
     ClientData p;
@@ -1383,7 +1449,9 @@ static int tbc_num128(Tcl_Obj *o, __int128 *out) {
     if (TclGetNumberFromObj(NULL, o, &p, &t) != TCL_OK || (t != TCL_NUMBER_LONG && t != TCL_NUMBER_BIG)) return 0;
     return tbc_get128(p, t, out);
 }
-static int tbc_fast128(int op, Tcl_Obj **pa, Tcl_Obj *b) {
+TBC_XS int tbc_fast128(int op, Tcl_Obj **pa, Tcl_Obj *b);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_fast128(int op, Tcl_Obj **pa, Tcl_Obj *b) {
     __int128 x, y, r;
     if (!tbc_num128(*pa, &x) || !tbc_num128(b, &y)) return -1;
     switch (op) {
@@ -1408,9 +1476,12 @@ static int tbc_fast128(int op, Tcl_Obj **pa, Tcl_Obj *b) {
     return 0;
 }
 #endif
+#endif
 /* The shifts and bitwise operators on integers beyond the machine range, as ExecuteExtendedBinaryMathOp does them (the cases that are not
  * errors; those are left to the interpreter's own instruction).  0 on success (b consumed, *pa replaced), -1 if this is not one of them. */
-static int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b) {
+TBC_XS int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b) {
     Tcl_Obj *a = *pa;
     ClientData p1, p2;
     int t1, t2;
@@ -1461,7 +1532,10 @@ static int tbc_bigop(int op, Tcl_Obj **pa, Tcl_Obj *b) {
     Tcl_DecrRefCount(b);
     return 0;
 }
-static int tbc_tebc(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, Tcl_Obj **res) {
+#endif
+TBC_XS int tbc_tebc(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, Tcl_Obj **res);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_tebc(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, Tcl_Obj **res) {
     Interp *iPtr = (Interp *) interp;
     ByteCode *bc;
     NRE_callback *root;
@@ -1480,6 +1554,7 @@ static int tbc_tebc(Tcl_Interp *interp, int op, Tcl_Obj *a, Tcl_Obj *b, Tcl_Obj 
     *res = tbc_takeres(interp);
     return 0;
 }
+#endif
 
 /* ---- a command the interpreter's own instruction implements (string operations, bitwise operators...), called as a script would call it.
  * The result is referenced; on error nothing is consumed.  A NaN result is an error in an expression operator (nanchk). */
@@ -1496,7 +1571,9 @@ static void tbc_pin_resolve(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm) {
     pin->c = c; pin->epoch = c->cmdEpoch;
     if (c->objProc == Tcl_RegexpObjCmd) pin->fast = tbc_regexp_fast;	/* (stock regexp: the native matcher first, Tcl's command for what it does not take) */
 }
-static int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_Obj **args, int nanchk, Tcl_Obj **out) {
+TBC_XS int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_Obj **args, int nanchk, Tcl_Obj **out);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_Obj **args, int nanchk, Tcl_Obj **out) {
     Tcl_Obj *ov[10], *r;
     Command *c;
     int i, rc;
@@ -1522,11 +1599,14 @@ static int tbc_opcall(Tcl_Interp *interp, TbcPin *pin, Tcl_Obj *nm, int n, Tcl_O
     *out = r;
     return TCL_OK;
 }
+#endif
 #define tbc_cmdcall(interp, nm, n, args, nanchk, out) tbc_opcall(interp, ({ static TbcPin pin_; &pin_; }), nm, n, args, nanchk, out)
 #define TBC_NM(str) ({ static Tcl_Obj *nm_; if (!nm_) { nm_ = Tcl_NewStringObj(str, -1); Tcl_IncrRefCount(nm_); } nm_; })
 
 /* dict incr var key imm, as INST_DICT_INCR_IMM does it; the result is the dict (not referenced), NULL on error */
-static Tcl_Obj *tbc_dictincr_var(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *key, long imm) {
+TBC_XS Tcl_Obj *tbc_dictincr_var(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *key, long imm);
+#ifndef TBC_SPLIT_USER
+TBC_XS Tcl_Obj *tbc_dictincr_var(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *key, long imm) {
     Var *vp = &loc[idx];
     Tcl_Obj *dictPtr, *valuePtr, *value2Ptr, *res;
     int allocateDict, result;
@@ -1562,10 +1642,13 @@ static Tcl_Obj *tbc_dictincr_var(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj 
     TclDecrRefCount(dictPtr);
     return res;
 }
+#endif
 
 /* the part of the interpreter's variable linking (upvar, namespace upvar, variable) that follows once the other variable is found:
  * make compiled local `opnd` a link to otherPtr.  TCL_OK or TCL_ERROR. */
-static int tbc_linkvars(Tcl_Interp *interp, Var *loc, int opnd, Var *otherPtr) {
+TBC_XS int tbc_linkvars(Tcl_Interp *interp, Var *loc, int opnd, Var *otherPtr);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_linkvars(Tcl_Interp *interp, Var *loc, int opnd, Var *otherPtr) {
     Var *varPtr = &loc[opnd];
     if ((varPtr != otherPtr) && !TclIsVarTraced(varPtr) && (TclIsVarUndefined(varPtr) || TclIsVarLink(varPtr))) {
         if (!TclIsVarUndefined(varPtr)) {
@@ -1584,6 +1667,7 @@ static int tbc_linkvars(Tcl_Interp *interp, Var *loc, int opnd, Var *otherPtr) {
     }
     return TCL_OK;
 }
+#endif
 
 /* upvar, namespace upvar and variable for typed code, as the boxed code does them.  0: done; 1: the boxed code has to do it at this instruction (an error, which it
  * then raises with its error info; or an upvar to a variable of this very frame, which typed code may be holding unboxed) */
@@ -1636,13 +1720,15 @@ typedef struct { Var *var; Interp *ip; unsigned epoch; } TbcNvSite;
 #define TBC_NV_NSUPVAR 2    /* `namespace upvar ns target name`, and `global`, which is that with the namespace :: (level is the namespace's name) */
 #define TBC_NV_ABS 3        /* `$::ns::name` (a read: nothing is created) */
 TBC_SHARED unsigned tbc_nv_epoch;
-static Interp *tbc_nv_ip;
+TBC_SHARED Interp *tbc_nv_ip;
 static void tbc_nv_gone(ClientData cd, Tcl_Interp *interp) { (void) cd; (void) interp; tbc_nv_epoch++; tbc_nv_ip = NULL; }
 TBC_INLINE int tbc_nv_noresolvers(Interp *ip, Var *v) {
     Namespace *ns = ((TclVarHashTable *) ((VarInHash *) v)->entry.tablePtr)->nsPtr;
     return !ip->resolverPtr && !ip->globalNsPtr->varResProc && (!ns || !ns->varResProc);
 }
-static Var *tbc_nv_slow(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *nsname, Tcl_Obj *level, Tcl_Obj *name) {
+TBC_XS Var *tbc_nv_slow(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *nsname, Tcl_Obj *level, Tcl_Obj *name);
+#ifndef TBC_SPLIT_USER
+TBC_XS Var *tbc_nv_slow(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *nsname, Tcl_Obj *level, Tcl_Obj *name) {
     Interp *ip = (Interp *) interp;
     Var *o = NULL, *vp;
     Namespace *sv;
@@ -1680,6 +1766,7 @@ static Var *tbc_nv_slow(Tcl_Interp *interp, TbcNvSite *s, int kind, const char *
     s->ip = ip; s->epoch = tbc_nv_epoch;
     return o;
 }
+#endif
 /* A call from typed code to a proc that its caller reaches through `namespace import` (decision 73).  The direct call goes to the origin proc; this record says
  * that the word the caller wrote, looked up from the caller's namespace, still gives the import of that proc.  It holds the import's Command (a reference, so the
  * pointer is never another command's) and the namespace's epochs, the checks Tcl makes for its own cached command names: the import deleted or renamed
@@ -1691,7 +1778,9 @@ typedef struct {
     Namespace *nsp; Command *imp;
     long nsid; int cre, rse, impEp;
 } TbcAlias;
-static int tbc_alias_slow(Tcl_Interp *interp, TbcAlias *a) {
+TBC_XS int tbc_alias_slow(Tcl_Interp *interp, TbcAlias *a);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_alias_slow(Tcl_Interp *interp, TbcAlias *a) {
     Interp *ip = (Interp *) interp;
     Namespace *ns;
     Command *f, *t, *o;
@@ -1717,6 +1806,7 @@ static int tbc_alias_slow(Tcl_Interp *interp, TbcAlias *a) {
     a->nsid = ns->nsId; a->cre = ns->cmdRefEpoch; a->rse = ns->resolverEpoch;
     return 1;
 }
+#endif
 TBC_INLINE int tbc_alias_ok(Tcl_Interp *interp, TbcAlias *a) {
     Namespace *ns = a->nsp;
     Command *c = a->imp;
@@ -1741,7 +1831,9 @@ TBC_INLINE int tbc_nv_link(Tcl_Interp *interp, Var *slot, TbcNvSite *s, int kind
 
 /* an error ended an instruction: add "while executing ... (procedure ...)" lines to the error info exactly as the bytecode executor does
  * (TclLogCommandInfo), from the command's position in the body (srcOff, srcLen; srcOff < 0: none) and the instruction's operands */
-static void tbc_logerr(Tcl_Interp *interp, int pcoff, int srcOff, int srcLen, Tcl_Obj **tos) {
+TBC_XS void tbc_logerr(Tcl_Interp *interp, int pcoff, int srcOff, int srcLen, Tcl_Obj **tos);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_logerr(Tcl_Interp *interp, int pcoff, int srcOff, int srcLen, Tcl_Obj **tos) {
     Interp *iPtr = (Interp *) interp;
     Proc *p = iPtr->varFramePtr->procPtr;
     Tcl_HashEntry *h = p ? Tcl_FindHashEntry(&tbc_recs, (char *) p) : NULL;
@@ -1752,9 +1844,12 @@ static void tbc_logerr(Tcl_Interp *interp, int pcoff, int srcOff, int srcLen, Tc
     }
     iPtr->flags &= ~ERR_ALREADY_LOGGED;
 }
+#endif
 
 /* a command was replaced since the proc was entered: evaluate it from its source, as the interpreter does (boxed code, one function instead of a copy at every command) */
-static __attribute__((noinline)) int tbc_eval_src(Tcl_Interp *interp, const char *txt, int len, int pc) {
+TBC_XS __attribute__((noinline)) int tbc_eval_src(Tcl_Interp *interp, const char *txt, int len, int pc);
+#ifndef TBC_SPLIT_USER
+TBC_XS __attribute__((noinline)) int tbc_eval_src(Tcl_Interp *interp, const char *txt, int len, int pc) {
     int rc;
     Tcl_Obj *sc = Tcl_NewStringObj(txt, len);
     Tcl_IncrRefCount(sc);
@@ -1764,6 +1859,7 @@ static __attribute__((noinline)) int tbc_eval_src(Tcl_Interp *interp, const char
     ((Interp *) interp)->flags |= ERR_ALREADY_LOGGED;
     return rc;
 }
+#endif
 
 /* typed code leaving typed mode: store a local (borrowed reference) into its frame slot */
 static void tbc_flushr(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *val) {
@@ -1772,6 +1868,22 @@ static void tbc_flushr(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *val) {
     /* (a variable with no trace and no link is stored into as the interpreter's own store instruction does it: the same thing, without the general path) */
     if (TclIsVarDirectWritable(vp)) { (void) tbc_storedirect(vp, val); return; }
     (void) TclPtrSetVarIdx(interp, vp, NULL, NULL, NULL, val, 0, idx);
+}
+
+/* decision 88: write a list of typed locals into their frame slots (a hand-over block of the generated code has the indices in a read-only table and the objects in an array); a NULL entry is not written */
+static void tbc_flushv(Tcl_Interp *interp, Var *loc, const unsigned short *idx, Tcl_Obj *const *val, int n) {
+    int i;
+    for (i = 0; i < n; i++) if (val[i]) tbc_flushr(interp, loc, idx[i], val[i]);
+}
+
+/* the test build of the translator's TBC_HANDOVER=chk: the block writes every local that holds an object, and stops the program when one of them is not in the flush set of the site
+ * (the set the old code wrote); `ok` is 1 for the locals of the set */
+static void tbc_flushchk(Tcl_Interp *interp, Var *loc, const unsigned char *ok, Tcl_Obj *const *val, int n) {
+    int i;
+    for (i = 0; i < n; i++) if (val[i]) {
+        if (!ok[i]) { fprintf(stderr, "TBC_FLUSHCHK: local %d holds an object that the hand-over site does not flush\n", i); abort(); }
+        tbc_flushr(interp, loc, i, val[i]);
+    }
 }
 
 /* How many compiled entries may be live on the C stack at once.  Compiled code recurses on the C stack where the interpreter uses its own heap stack; the
@@ -1789,9 +1901,11 @@ static void tbc_flushr(Tcl_Interp *interp, Var *loc, int idx, Tcl_Obj *val) {
 TBC_SHARED int tbc_nest;
 
 static int tbc_enter_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+TBC_XS int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
 
-static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
+TBC_XS void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
     int isNew;
     TBC_BLEN_SET(strlen(e->body));
     char *k = tbc_key(e->ns, e->args, e->body);
@@ -1811,6 +1925,7 @@ static void tbc_register(Tcl_Interp *interp, TbcEntry *e, int id) {
     Tcl_NRCreateCommand(interp, Tcl_GetString(cn), tbc_enter_cmd, tbc_enter_nr, e, NULL);
     Tcl_DecrRefCount(cn);
 }
+#endif
 
 /* a proc of this name is being (re)defined or removed: no direct call to any compiled definition of the name may go on */
 /* Built-in commands the analysis relied on (that they run no script and leave the caller's variables alone).  The module names them, with the namespaces
@@ -1877,7 +1992,9 @@ static int tbc_stock_mm(Tcl_Interp *interp, Command *c, int k) {
     while (*b) { h ^= *b++; h *= 0x100000001b3ULL; }
     return h == th[k] || tbc_proc_fp(interp, full[k]) == fp[k];
 }
-static void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
+TBC_XS void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
     int i;
     tbc_ens_pin_all(interp);
     g->exp = (Command **) ckalloc((size_t) g->nnames * sizeof(Command *)); g->expEp = (int *) ckalloc((size_t) g->nnames * sizeof(int));
@@ -1896,8 +2013,11 @@ static void tbc_guard_register(Tcl_Interp *interp, TbcGuard *g) {
         g->exp[i] = c; g->expEp[i] = c ? c->cmdEpoch : 0;
     }
 }
+#endif
 /* look up every dependency that is looked up from namespace k again; withdraw those that no longer give the built-in */
-static void tbc_guard_verify(Tcl_Interp *interp, TbcGuard *g, int k) {
+TBC_XS void tbc_guard_verify(Tcl_Interp *interp, TbcGuard *g, int k);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_guard_verify(Tcl_Interp *interp, TbcGuard *g, int k) {
     Namespace *ns = g->nsp[k];
     int d;
     if (!ns) {
@@ -1916,6 +2036,7 @@ static void tbc_guard_verify(Tcl_Interp *interp, TbcGuard *g, int k) {
     }
     if (ns) { g->nsid[k] = ns->nsId; g->cre[k] = ns->cmdRefEpoch; g->rse[k] = ns->resolverEpoch; }
 }
+#endif
 static int tbc_guard_slow(Tcl_Interp *interp, const TbcEntry *e) {
     TbcGuard *g = e->guard;
     int k, ok = 1;
@@ -1930,7 +2051,9 @@ static int tbc_guard_slow(Tcl_Interp *interp, const TbcEntry *e) {
     return ok;
 }
 /* do the built-ins this body, and the procs it calls, were analysed against still resolve to themselves?  A few compares when nothing has changed. */
-static int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
+TBC_XS int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
     TbcGuard *g = e->guard;
     int k;
     if (TBC_UNLIKELY(e->ens)) {
@@ -1948,6 +2071,7 @@ static int tbc_guard_ok(Tcl_Interp *interp, const TbcEntry *e) {
     }
     return 1;
 }
+#endif
 
 /* one dependency of the guard (a built-in looked up from a namespace), checked alone: typed code calls it where it uses the built-in through its pinned command, after anything
  * that could have run a script (as the interpreter looks the name up at every call).  A few compares while nothing has changed; otherwise the namespace is looked at again,
@@ -2021,7 +2145,9 @@ TBC_SHARED int tbc_capture_on;
 TBC_SHARED Tcl_Obj *tbc_capture_defs;		/* list of `proc` commands, in the order the definitions were made */
 TBC_SHARED Tcl_HashTable tbc_capture_seen;
 TBC_SHARED int tbc_capture_ready;
-static void tbc_capture_note(const char *fullName, const char *ns, const char *canonArgs, const char *body) {
+TBC_XS void tbc_capture_note(const char *fullName, const char *ns, const char *canonArgs, const char *body);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_capture_note(const char *fullName, const char *ns, const char *canonArgs, const char *body) {
     char *k = tbc_key(ns, canonArgs, body);
     int isNew;
     Tcl_Obj *args, *cmd[4];
@@ -2060,9 +2186,12 @@ static void tbc_capture_note(const char *fullName, const char *ns, const char *c
     }
     Tcl_ListObjAppendElement(NULL, tbc_capture_defs, Tcl_NewListObj(4, cmd));
 }
+#endif
 
 /* record what became of a proc definition */
-static TbcDef *tbc_note_def(Proc *p, const char *fullName, int status, const char *reason) {
+TBC_XS TbcDef *tbc_note_def(Proc *p, const char *fullName, int status, const char *reason);
+#ifndef TBC_SPLIT_USER
+TBC_XS TbcDef *tbc_note_def(Proc *p, const char *fullName, int status, const char *reason) {
     int isNew;
     Tcl_HashEntry *h = Tcl_CreateHashEntry(&tbc_defs_by_name, fullName, &isNew);
     TbcDef *d;
@@ -2077,6 +2206,7 @@ static TbcDef *tbc_note_def(Proc *p, const char *fullName, int status, const cha
     Tcl_SetHashValue(h, d);
     return d;
 }
+#endif
 
 /* the interpreter's compile of a body in the context of a proc, fingerprinted (0 if it cannot be compiled) */
 static uint64_t tbc_probe(Tcl_Interp *interp, Proc *p, const char *body, const char *name) {
@@ -2093,7 +2223,9 @@ static uint64_t tbc_probe(Tcl_Interp *interp, Proc *p, const char *body, const c
 /* replace the proc's compiled code by the stub; returns 1 if done */
 /* 1: patched; 0: cannot be; 2: the interpreter's bytecode now is not the one that was compiled (it may be at the proc's first call); 3: the body is
  * shorter than the entry stub (a few instructions: the interpreter runs it faster than a call into compiled code would) */
-static int tbc_patch(Tcl_Interp *interp, Proc *p, TbcEntry *e, unsigned char **orig, const char **why) {
+TBC_XS int tbc_patch(Tcl_Interp *interp, Proc *p, TbcEntry *e, unsigned char **orig, const char **why);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_patch(Tcl_Interp *interp, Proc *p, TbcEntry *e, unsigned char **orig, const char **why) {
     ByteCode *bc;
     Tcl_Obj *cn;
     *why = "the interpreter cannot compile the body";
@@ -2123,6 +2255,7 @@ static int tbc_patch(Tcl_Interp *interp, Proc *p, TbcEntry *e, unsigned char **o
     bc->flags |= TCL_BYTECODE_PRECOMPILED;
     return 1;
 }
+#endif
 
 TBC_SHARED int tbc_eager;			/* attach compiled bodies when the procs are defined (TBC_EAGER=1, tbc::attach eager) instead of at their first call */
 
@@ -2146,7 +2279,9 @@ static void tbc_trace(Tcl_Interp *interp, const char *action, const char *kind, 
 }
 
 /* patch the proc with the compiled entry and record it; 1 attached, 2 bytecode differs, 0 cannot */
-static int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName) {
+TBC_XS int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName) {
     unsigned char *orig = NULL;
     const char *why = NULL;
     int rc = tbc_patch(interp, p, e, &orig, &why);
@@ -2180,10 +2315,13 @@ static int tbc_attach_entry(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char
     }
     return 1;
 }
+#endif
 
 /* attach at the proc's first call: the interpreter compiles a body then too, so a proc that is never called costs nothing, and the bytecode compared is
  * the one the interpreter has when it runs the proc */
-static void tbc_arm_hook(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName) {
+TBC_XS void tbc_arm_hook(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_arm_hook(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName) {
     TbcDef *d = (TbcDef *) Tcl_GetHashValue(Tcl_FindHashEntry(&tbc_defs_by_name, fullName));
     Command *c = p->cmdPtr;
     if (c && c->objProc == TclObjInterpProc && c->nreProc == TclNRInterpProc) {
@@ -2200,13 +2338,16 @@ static void tbc_arm_hook(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *f
         tbc_attach_entry(interp, p, e, fullName);
     }
 }
+#endif
 static void tbc_arm_lazy(Tcl_Interp *interp, Proc *p, TbcEntry *e, const char *fullName, int status, const char *reason) {
     (void) tbc_note_def(p, fullName, status, reason);
     tbc_arm_hook(interp, p, e, fullName);
 }
 
 /* the proc `fullName` (a command of ours or the program's) has just been defined: attach a compiled body if there is one for it */
-static void tbc_attach(Tcl_Interp *interp, Proc *p, struct Namespace *nsPtr, const char *fullName) {
+TBC_XS void tbc_attach(Tcl_Interp *interp, Proc *p, struct Namespace *nsPtr, const char *fullName);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_attach(Tcl_Interp *interp, Proc *p, struct Namespace *nsPtr, const char *fullName) {
     Tcl_HashEntry *h;
     char *ca, *k;
     if (!tbc_reg_ready) return;
@@ -2259,10 +2400,13 @@ static void tbc_attach(Tcl_Interp *interp, Proc *p, struct Namespace *nsPtr, con
         }
     }
 }
+#endif
 
 /* The first call of an armed proc: put the interpreter's entry points back, attach the compiled body (the interpreter compiles the body now, at the current compile
  * epoch, so the bytecode compared is the one it runs), and let the call go on as it would have.  One-shot. */
-static void tbc_lazy_fire(Tcl_Interp *interp, Proc *p) {
+TBC_XS void tbc_lazy_fire(Tcl_Interp *interp, Proc *p);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_lazy_fire(Tcl_Interp *interp, Proc *p) {
     Command *c = p->cmdPtr;
     Tcl_HashEntry *h;
     TbcDef *d;
@@ -2283,6 +2427,7 @@ static void tbc_lazy_fire(Tcl_Interp *interp, Proc *p) {
         Tcl_DecrRefCount(full);
     }
 }
+#endif
 static int tbc_lazy_obj(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     tbc_lazy_fire(interp, (Proc *) cd);
     return TclObjInterpProc(cd, interp, objc, objv);
@@ -2298,7 +2443,9 @@ static int tbc_lazy_nre(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *co
 TBC_SHARED Tcl_ObjCmdProc *tbc_orig_proc;
 TBC_SHARED ClientData tbc_orig_proc_cd;
 
-static int tbc_proc_wrap(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_proc_wrap(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_proc_wrap(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Namespace *nsPtr, *altPtr, *cxtPtr;
     const char *simple;
     Tcl_Command tok;
@@ -2319,6 +2466,7 @@ static int tbc_proc_wrap(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *c
     Tcl_DecrRefCount(full);
     return rc;
 }
+#endif
 
 /* the interpreter fallback: run the proc's body, as written, in the frame that is already set up */
 /* the interpreter runs the body itself, on its non-recursive stack (so that a coroutine can suspend inside it): when the compiled code has been
@@ -2384,7 +2532,9 @@ static void tbc_do_eval(Tcl_Interp *interp, Tcl_NRPostProc *resume, int nextpc, 
     (void) TclNRExecuteByteCode(interp, bc);
     tbc_susp = 1;
 }
-static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Interp *iPtr = (Interp *) interp;
     Proc *p = iPtr->varFramePtr->procPtr;
     Tcl_HashEntry *h = p ? Tcl_FindHashEntry(&tbc_recs, (char *) p) : NULL;
@@ -2421,6 +2571,7 @@ static int tbc_enter_nr(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *co
         return code;
     }
 }
+#endif
 
 static int tbc_inval_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Tcl_HashEntry *h;
@@ -2445,7 +2596,9 @@ static int tbc_fp_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *cons
 }
 
 /* tbc::attached -- the procs that currently run a compiled body */
-static int tbc_attached_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_attached_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_attached_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Tcl_HashSearch hs;
     Tcl_HashEntry *h;
     Tcl_Obj *r = Tcl_NewListObj(0, NULL);
@@ -2461,6 +2614,7 @@ static int tbc_attached_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj
     Tcl_SetObjResult(interp, r);
     return TCL_OK;
 }
+#endif
 
 /* ---- tbc::profile and tbc::report: what runs compiled and what is left to the interpreter, and why.
  * The report needs nothing at run time beyond the records made when procs are defined.  Calls of the interpreter's procs, and the scripts the
@@ -2489,7 +2643,9 @@ static const char *tbc_def_why(const TbcDef *d) {
     return d->reason ? d->reason : "";
 }
 
-static void tbc_note_script(const char *kind, Tcl_Obj *const *words, int n) {
+TBC_XS void tbc_note_script(const char *kind, Tcl_Obj *const *words, int n);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_note_script(const char *kind, Tcl_Obj *const *words, int n) {
     Tcl_DString ds;
     char key[320];
     int i, len;
@@ -2513,8 +2669,11 @@ static void tbc_note_script(const char *kind, Tcl_Obj *const *words, int n) {
     sc->count++;
     Tcl_DStringFree(&ds);
 }
+#endif
 
-static int tbc_prof_cb(ClientData cd, Tcl_Interp *interp, int level, const char *cmdString, Tcl_Command tok, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_prof_cb(ClientData cd, Tcl_Interp *interp, int level, const char *cmdString, Tcl_Command tok, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_prof_cb(ClientData cd, Tcl_Interp *interp, int level, const char *cmdString, Tcl_Command tok, int objc, Tcl_Obj *const objv[]) {
     Tcl_CmdInfo ci;
     (void) cd; (void) level; (void) cmdString;
     if (!Tcl_GetCommandInfoFromToken(tok, &ci)) return TCL_OK;
@@ -2552,6 +2711,7 @@ static int tbc_prof_cb(ClientData cd, Tcl_Interp *interp, int level, const char 
     }
     return TCL_OK;
 }
+#endif
 
 static void tbc_scripts_reset(void) {
     Tcl_HashSearch hs;
@@ -2568,7 +2728,9 @@ static void tbc_scripts_reset(void) {
 }
 
 /* tbc::capture on|off|clear|count|get|write path -- the definitions of procs without compiled code, made while it is on, as Tcl commands */
-static int tbc_capture_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_capture_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_capture_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     const char *a;
     (void) cd;
     if (objc < 2 || objc > 3) { Tcl_WrongNumArgs(interp, 1, objv, "on|off|clear|count|get|write path"); return TCL_ERROR; }
@@ -2606,6 +2768,7 @@ static int tbc_capture_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj 
     Tcl_SetObjResult(interp, Tcl_NewIntObj(tbc_capture_on));
     return TCL_OK;
 }
+#endif
 
 /* tbc::attach eager|lazy|status -- when compiled bodies are attached: at the proc's first call (the default; a proc that is never called costs nothing),
  * or when it is defined (also TBC_EAGER=1 in the environment) */
@@ -2622,7 +2785,9 @@ static int tbc_attach_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *
 }
 
 /* tbc::profile on|off|reset|status */
-static int tbc_profile_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_profile_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_profile_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     const char *a;
     (void) cd;
     if (objc != 2) { Tcl_WrongNumArgs(interp, 1, objv, "on|off|reset|status"); return TCL_ERROR; }
@@ -2640,6 +2805,7 @@ static int tbc_profile_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj 
     Tcl_SetObjResult(interp, Tcl_NewIntObj(tbc_prof_on));
     return TCL_OK;
 }
+#endif
 
 static int tbc_def_cmp(const void *a, const void *b) {
     const TbcDef *x = *(TbcDef *const *) a, *y = *(TbcDef *const *) b;
@@ -2655,7 +2821,9 @@ static int tbc_script_cmp(const void *a, const void *b) {
 /* tbc::report ?-text?  -- a dict: compiled, compiled_calls, coroutine_calls, interpreted, interpreted_calls (while profiling), profile,
  * procs {{name state reason calls}...} (the interpreted ones, most called first), scripts {{kind count chars head}...} (most evaluated first);
  * with -text the same as a table. */
-static int tbc_report_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
+TBC_XS int tbc_report_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_report_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]) {
     Tcl_HashSearch hs;
     Tcl_HashEntry *h;
     TbcDef **ds = NULL;
@@ -2732,11 +2900,14 @@ static int tbc_report_cmd(ClientData cd, Tcl_Interp *interp, int objc, Tcl_Obj *
     if (ss) ckfree(ss);
     return TCL_OK;
 }
+#endif
 
 /* The generated code uses the headers' own macros and structure layouts (object allocation, variables, frames), so it is only valid in the Tcl it was
  * compiled against: the same version and the same threading and memory-debugging configuration.  A mismatch is refused when the module loads
  * (an inline TclNewObj from a build with another allocator would otherwise take objects from a pool nothing refills). */
-static int tbc_check_build(Tcl_Interp *interp) {
+TBC_XS int tbc_check_build(Tcl_Interp *interp);
+#ifndef TBC_SPLIT_USER
+TBC_XS int tbc_check_build(Tcl_Interp *interp) {
     const char *th = Tcl_GetVar2(interp, "tcl_platform", "threaded", TCL_GLOBAL_ONLY);
     int threaded = th && th[0] == '1', md;
     Tcl_Obj *v;
@@ -2787,6 +2958,7 @@ static int tbc_check_build(Tcl_Interp *interp) {
     }
     return TCL_OK;
 }
+#endif
 
 /* called from a module's Init: the helper commands and the trace that notices new procs (once per interpreter) */
 /* TBC_CAPTURE=<file> in the environment (tools/tcl-aot, the drop-in build): the capture is on from the start and the definitions are written to <file> when the
@@ -2821,7 +2993,9 @@ static char *tbc_prec_trace(ClientData cd, Tcl_Interp *interp, const char *n1, c
     return NULL;
 }
 
-static void tbc_install(Tcl_Interp *interp) {
+TBC_XS void tbc_install(Tcl_Interp *interp);
+#ifndef TBC_SPLIT_USER
+TBC_XS void tbc_install(Tcl_Interp *interp) {
     static int done;
     tbc_reg_init();
     if (done) return;
@@ -2848,5 +3022,6 @@ static void tbc_install(Tcl_Interp *interp) {
         }
     }
 }
+#endif
 
 #endif

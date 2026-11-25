@@ -2826,3 +2826,167 @@ proc mf_dbl {y x} { set y [expr {double($y)}]; set x [expr {double($x)}]; return
 proc mf_hyp {x y} { set x [expr {double($x)}]; set y [expr {double($y)}]; return [expr {hypot($x, $y) * 2.0}] }
 proc mf_all {x} { return [list [mf_red $x] [mf_dbl $x 3] [mf_hyp $x 4] [expr {max($x, 2) + min($x, 1)}] [expr {sin($x) + floor($x) + double($x)}]] }
 proc mf_loop {n} { set s 0.0; for {set i 0} {$i < $n} {incr i} { set s [expr {$s + floor($i * 0.5) + double($i) + sqrt(abs($s))}] }; return $s }
+
+# ---- decision 88: what the frame holds after typed code hands over (the hand-over blocks that sites share: tests/handover.sh forces a hand-over at every instruction of these)
+# a proc that can be asked about its frame (info locals, uplevel, a callee's upvar) must have in it exactly the variables the interpreter would have, with the values it would have
+proc ho_dead {n} {
+    # locals that are assigned and never read again (dead), with typed work around them
+    set a [expr {$n * 2}]; set b [expr {$n + 1}]; set c "x$n"; set d 0.5
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i; set a $i; set b [expr {$b + $i}]; set d [expr {$d * 1.5}] }
+    set c [string length $c]
+    return [list $s [lsort [info locals]] [info exists a] [info exists b] [info exists c] [info exists zz] [uplevel 0 {list $a $b $c $d}]]
+}
+proc ho_dead2 {n} {
+    set u $n; set v [expr {$n + 1}]; set w [list $n]
+    set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s [expr {$i ^ $u}] }
+    set u 0; set v 0
+    foreach x $w { incr s $x }
+    return [list $s [uplevel 0 {list [info exists u] [info exists v] [info exists w] [info exists x]}] [lsort [info locals]]]
+}
+proc ho_unset {n} {
+    set a $n; set b 2; set t 0
+    for {set i 0} {$i < $n} {incr i} { incr t $i }
+    unset a
+    for {set i 0} {$i < $n} {incr i} { incr t $i; if {$i == 2} { set a late } }
+    return [list $t [info exists a] [info exists b] [lsort [info locals]]]
+}
+proc ho_resume {n} {
+    set a 1; set b 2; set c [expr {$n * 3}]; set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    unset a
+    set b [dict get {k 5} k]
+    for {set i 0} {$i < $n} {incr i} { incr s $i; if {$i == 3} { set a late; unset c } }
+    for {set j 0} {$j < $n} {incr j} { incr s [expr {$j & 1}] }
+    return [list $s [info exists a] [info exists b] [info exists c] [lsort [info locals]]]
+}
+proc ho_vec {n} {
+    set l {}; set m {}
+    for {set i 0} {$i < $n} {incr i} { lappend l [expr {$i * $i}] }
+    set t 0
+    foreach x $l { incr t $x }
+    set k [lindex $l 1]
+    return [list $t $k [llength $l] [lsort [info locals]] [uplevel 0 {llength $l}]]
+}
+proc ho_vec_dead {n} {
+    set l {}
+    for {set i 0} {$i < $n} {incr i} { lappend l $i }
+    set t 0
+    foreach x $l { incr t $x }
+    set l {}
+    return [list $t [uplevel 0 {llength $l}] [lsort [info locals]]]
+}
+proc ho_arr {n} {
+    for {set i 0} {$i < $n} {incr i} { set a($i) [expr {$i + 1}]; incr a($i) 2 }
+    set q 0
+    for {set i 0} {$i < $n} {incr i} { incr q $a($i) }
+    return [list $q [lsort [info locals]] [array size a] [uplevel 0 {array size a}]]
+}
+# a callee that reaches the caller's variable with upvar 1 / uplevel, or installs a trace on it
+proc ho_up_leaf {} { upvar 1 x y; set y [expr {$y * 3}]; return 1 }
+proc ho_up_dead {n} {
+    set x [expr {$n + 7}]; set s 0
+    ho_up_leaf
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    return [list $s [uplevel 0 {set x}] [lsort [info locals]]]
+}
+proc ho_up_loop {n} {
+    set x 1; set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i; if {$i % 3 == 0} { ho_up_leaf } }
+    return [list $s [uplevel 0 {set x}]]
+}
+proc ho_upl_leaf {} { uplevel 1 {set x [expr {$x + 100}]; set late 5}; return 1 }
+proc ho_upl {n} {
+    set x $n; set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    ho_upl_leaf
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    return [list $s [uplevel 0 {list $x $late}] [lsort [info locals]]]
+}
+proc ho_up2_leaf {} { upvar 2 x y; set y 99; return 1 }
+proc ho_up2_mid {} { ho_up2_leaf; return 2 }
+proc ho_up2 {n} {
+    set x $n; set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    ho_up2_mid
+    return [list $s [uplevel 0 {set x}]]
+}
+proc ho_tr_log {args} { lappend ::ho_log $args }
+proc ho_tr_on {} { upvar 1 x v; trace add variable v write ho_tr_log; return 1 }
+proc ho_tr {n} {
+    set ::ho_log {}
+    set x 1; set s 0
+    ho_tr_on
+    set x [expr {$n + 1}]
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    set x [expr {$x + $s}]
+    trace remove variable x write ho_tr_log
+    set x 0
+    return [list $x $s $::ho_log]
+}
+proc ho_tr_loop {n} {
+    set ::ho_log {}
+    set x 0; set y 5; set s 0
+    for {set i 0} {$i < $n} {incr i} { incr s $i; if {$i == 2} { ho_tr_on }; set x [expr {$x + $i}]; set y [expr {$y + 1}] }
+    return [list $x $y $s [llength $::ho_log]]
+}
+# a trace on a local that the interpreter fires when the local is written into the frame by the hand-over: none must fire for a variable the interpreter would not write
+proc ho_tr_dead {n} {
+    set ::ho_log {}
+    set x 1; set z 4; set s 0
+    trace add variable x write ho_tr_log
+    for {set i 0} {$i < $n} {incr i} { incr s $i }
+    set z 5
+    return [list $s $z [llength $::ho_log] [lsort [info locals]]]
+}
+# a trace put on an argument that the proc only reads: a hand-over must not write it into the frame again (the interpreter does not write it, so the trace must not fire)
+proc ho_tr_arg {x} {
+    set ::ho_log {}
+    set s 0
+    ho_tr_on
+    for {set i 0} {$i < $x} {incr i} { incr s [expr {$x + $i}] }
+    return [list $s [llength $::ho_log]]
+}
+# an error from a call inside typed work, caught in the proc: the hand-over after the failed call (the call-continuation stub) and the resume after a failed typed step
+proc ho_fail {x} { if {$x > 0} { error "boom $x" }; return $x }
+proc ho_callerr {n} {
+    set s 0; set a [expr {$n * 2}]; set b $n; set c "k$n"
+    for {set i 0} {$i < $n} {incr i} { incr s $i; set b [expr {$b + $i}] }
+    set rc [catch {ho_fail $n} r]
+    set a [expr {$a + 1}]
+    set rc2 [catch {expr {$n + $c}} r2]
+    return [list $s $a $b $rc $r $rc2 $r2 [lsort [info locals]] [uplevel 0 {list $a $b}]]
+}
+proc ho_callerr2 {n} {
+    set s 0; set t $n
+    for {set i 0} {$i < $n} {incr i} { incr s [expr {$i + $t}] }
+    set s [expr {$s + [ho_fail $n]}]
+    return [list $s $t]
+}
+# a command that fails (llength of a bad list) in typed code of a proc that must resume in the boxed code (an impure callee, or a variable in the frame): the resume-after-failure hand-over
+proc ho_divz {n} {
+    set s 0; set a [expr {$n * 2}]; ho_fail 0
+    for {set i 0} {$i < $n} {incr i} { incr s [expr {$i + $a}] }
+    set l "a b"; if {$n == 2} { set l "\{x" }
+    incr s [llength $l]; incr s [string length [lindex $l 1]]
+    return [list $s $a [info exists i]]
+}
+proc ho_divz2 {n} {
+    global ho_g
+    set ho_g $n; set s [expr {$n * 3}]; set d [expr {$n + 1}]
+    set l "a b"; if {$n == 1} { set l "\{x" }
+    incr s [llength $l]
+    return [list $s $d $ho_g]
+}
+# an argument that is handed on dead, a default, and the args of a variadic
+proc ho_args {a {b 5} args} {
+    set s 0
+    for {set i 0} {$i < 3} {incr i} { incr s $i }
+    return [list $s [lsort [info locals]] [uplevel 0 {list $a $b $args}]]
+}
+proc ho_pure_dead {n} {
+    set a [expr {$n * 2}]; set b $n; set s 0
+    for {set i 0} {$i < $n} {incr i} { set a $i; incr s [expr {$b + $i}] }
+    return $s
+}

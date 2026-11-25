@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run the test suite.
 #
-#   tests/run.sh          everything: differential, report, proc wrapper, forced hand-over, guard, typed, osr, hot (reports), cmdmap, names, nest cap, capture loop, pristine Tcl, fuzz seeds, valgrind if installed
+#   tests/run.sh          everything: differential, report, proc wrapper, forced hand-over, shared hand-over blocks (tests/handover.sh), guard, typed, osr, hot (reports), cmdmap, names, nest cap, capture loop, pristine Tcl, fuzz seeds, valgrind if installed
 #   tests/run.sh quick    the differential, report and proc wrapper tests only
 #
 # Needs the Tcl build (`make tcl`) and the translator shell (`make shell`).  Exit status 0 only if every check passed.
@@ -66,7 +66,7 @@ for rate in 3 17 101; do
 done
 
 echo "== guard, nest cap, capture loop, unmodified Tcl, undefined behaviour"
-for t in guard typed osr hot cmdmap names nestcap capture pristine lite ubsan localvec nv dropin dbltext dblit litecall f32idiom rescall redef vecobj indexword wsplit mfguard intfn; do
+for t in guard typed osr hot cmdmap names nestcap capture handover pristine lite ubsan localvec nv dropin dbltext dblit litecall f32idiom rescall redef vecobj indexword wsplit mfguard intfn; do
   out=$(tests/$t.sh 2>&1) || { printf '%s\n' "$out"; fail "tests/$t.sh"; continue; }
   printf '%s\n' "$out" | grep -E ': ok$'
 done

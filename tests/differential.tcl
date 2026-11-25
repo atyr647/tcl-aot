@@ -957,6 +957,14 @@ lappend calls {nv_reset} {nv_all 2} {nv_loop 3}
 lappend calls {mm_redef}
 
 lappend calls {*}$cdprec
+# decision 88: the frame after a hand-over (see tests/handover.sh, which forces a hand-over at every instruction of these)
+foreach n {0 1 2 5 12} {
+    foreach p {ho_dead ho_dead2 ho_unset ho_resume ho_vec ho_vec_dead ho_arr ho_up_dead ho_up_loop ho_upl ho_up2 ho_tr ho_tr_loop ho_tr_dead ho_pure_dead ho_tr_arg ho_callerr ho_callerr2 ho_divz ho_divz2} { lappend calls [list $p $n] }
+}
+lappend calls {ho_dead 1.5} {ho_dead abc} {ho_dead -9223372036854775807} {ho_resume abc} {ho_tr abc} {ho_unset 1.5} {ho_up_dead {}} {ho_pure_dead 2.5} {ho_pure_dead -9223372036854775807}
+lappend calls {ho_args 1} {ho_args 1 2} {ho_args 1 2 3 4} {ho_args} {ho_args 1 2 3 4 5 6 7 8}
+# TBC_ONLY=glob: only the calls whose first word matches (tests/handover.sh)
+if {[info exists ::env(TBC_ONLY)]} { set calls [lmap c $calls { if {[regexp {^\s*(\S+)} $c -> w0] && [string match $::env(TBC_ONLY) $w0]} { set c } else { continue } }] }
 # TBC_SMALL=1: leave out the calls that loop long (for runs under valgrind)
 if {[info exists ::env(TBC_SMALL)]} { set calls [lmap c $calls { if {[regexp {(^|[ \{])(1000|3000|6000|10000|30000|100000|1000000|900|1500)($|[ \}])} $c]} { continue }; set c }] }
 proc runall {} {
@@ -977,9 +985,9 @@ proc covreport {} {
 if {[llength [info commands tbc_coverage]]} {
         array set cov [tbc_coverage]
         set ent [lsort [lmap {k v} [array get cov] {expr {[string match V:* $k] ? "$k=$v" : [continue]}}]]
-        set deopt 0; set dpts 0; set cstub 0
-        foreach {k v} [array get cov] { if {[string match D:* $k]} { incr dpts; incr deopt $v } elseif {[string match C:* $k]} { incr cstub $v } }
-        puts "coverage: [llength $ent] variants entered; $dpts distinct deopt points taken ($deopt deopts in total); $cstub post-call stubs taken"
+        set deopt 0; set dpts 0; set cstub 0; set rstub 0; set rpts 0
+        foreach {k v} [array get cov] { if {[string match D:* $k]} { incr dpts; incr deopt $v } elseif {[string match C:* $k]} { incr cstub $v } elseif {[string match R:* $k]} { incr rstub $v; incr rpts } }
+        puts "coverage: [llength $ent] variants entered; $dpts distinct deopt points taken ($deopt deopts in total); $cstub post-call stubs taken; $rpts resume points taken ($rstub resumes in total)"
         if {[info exists ::env(TBC_COV_DETAIL)]} { puts [join $ent \n]; foreach k [lsort [array names cov]] { if {![string match V:* $k]} { puts "$k=$cov($k)" } } }
     }
 }
@@ -994,7 +1002,9 @@ puts "attached after the calls: [llength [tbc::attached]]"
 # procs that must run compiled (a refused proc would run interpreted and match trivially): the constructs that were once refused
 set mustAttach {::mf_red ::mf_dbl ::mf_hyp ::mf_all ::mf_loop ::nv_k ::nv_up ::nv_glob ::nv_abs ::nv_arr ::nv_absarr ::nv_str ::nv_two ::nv_del ::nv_lit ::nv_all ::nv_loop ::nv_loop2 ::nvns::get ::lx_multi ::lx_three ::lx_const ::lx_end ::lx_loop ::lx_dbl ::la_sum ::la_rest ::la_loop ::la_many ::la_none ::la_ph ::la_shared ::la_catch ::la_used ::la_dist ::la_walls ::mw_funcs ::mw_one ::mm_int ::mm_dbl ::mm_mixed ::mm_args ::mm_one ::mm_lit ::mm_many ::mm_ties ::mm_tag ::mm_loop ::mm_loop_min ::mm_clamp ::mm_call ::mm_helper ::mm_err ::mm_ns_user ::mmns::go ::sd_cat ::sd_for ::sd_while ::sd_append ::sd_nest ::sd_break ::sd_while_break ::sd_for_break ::sd_catch ::sd_two_loops ::sd_global ::tl_lmap1 ::tl_lmap2 ::tl_lmap3 ::tl_lmap4 ::tl_lmap5 ::tl_lmap6 ::tl_lmap7 ::tl_arrset_in_loop ::tl_arrset_odd ::tl_dictfor_in_loop ::ld_if ::ld_noelse ::ld_last ::ld_last1 ::ld_used ::ld_switch ::ld_loop ::ld_break ::ld_continue ::ld_catch ::ld_shared ::ld_mixed ::ld_nested ::ld_while ::ld_rest ::dt_nums ::dt_mix ::dt_noelse ::dt_lit ::dt_sw ::dt_loop ::dt_nested ::dt_catch ::dt_leak ::wl_mul ::wl_expr ::wl_lidx ::wl_cmp ::wl_ns ::wl_dbl ::wl_neg ::lf_var ::lf_app ::lf_glob ::lf_upv ::lf_upa ::lf_call ::lf_val ::lf_shared ::lf_num ::yt_pair ::yt_two ::yt_rec ::yt_use ::yt_use3 ::yt_few ::yt_many ::yt_idx ::yt_idx2 ::yt_len ::yt_pass ::yt_pass2 ::yt_set ::yt_for ::yt_loop ::yt_branch ::yt_dupuse ::yt_rest ::yt_cmp ::yt_lit ::yt_litint ::yt_mixed ::yt_wide ::yt_obj ::yt_lit_use ::yt_w ::yt_obj_use ::yt_mixed_use ::yt_ovf ::yt_ovf_use
     ::tl_dictfor_break ::tl_dictfor_ret ::tl_dictfor_err ::tl_dictfor_catch {::tw_odd?} {::tw_star*} {::tw_br[a]} {::tw with space} {::tw"quote} {::tw\back} {::tw;semi} ::tw_caller ::tb_try1 ::tb_try2 ::tb_try3 ::tb_catch1 ::tb_try4 ::tb_try5}
-foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } }
+if {![info exists ::env(TBC_ONLY)]} { foreach p $mustAttach { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } } }
+# under TBC_ONLY only the called procs must be compiled: the ho_* procs are the ones the filter keeps (tests/handover.sh)
+if {[info exists ::env(TBC_ONLY)] && $::env(TBC_ONLY) eq "ho_*"} { foreach p [info commands ::ho_*] { if {$p ni [tbc::attached]} { puts "NOT COMPILED: $p"; incr ::notCompiled } } }
 if {[info exists ::notCompiled]} { puts "$::notCompiled procs that must run compiled do not" ; exit 1 }
 set bad 0
 foreach a $A b $B {

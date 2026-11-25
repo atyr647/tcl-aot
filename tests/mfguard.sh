@@ -39,6 +39,12 @@ proc ::mf::red {x} {
 TCL
 TBC_NOLITE=1 "$TCLSH" src/translate.tcl "$tmp/mfguard_procs.tcl" "$tmp/m.c" Mf >"$tmp/tr.log" 2>&1 || { tail -5 "$tmp/tr.log"; echo "mfguard: translation failed"; exit 1; }
 "$CC" -O1 -w -DTBC_COV -DMODULE=Mf $TBC_INC tools/module-shell.c "$tmp/m.c" $TBC_LIBS -o "$tmp/shell" || { echo "mfguard: build failed"; exit 1; }
+# decision 88: the same module as a split build (-split 3, the parts linked with `ld -r` as the game's are): the dependency checks of decision 86 are in the
+# parts' code, the guard and its wrapper in the owner part, and the runtime functions they call once in the owner part; both builds must pass every run below
+mkdir "$tmp/split" || exit 1
+TBC_NOLITE=1 "$TCLSH" src/translate.tcl "$tmp/mfguard_procs.tcl" "$tmp/split/m.c" Mf -split 3 >"$tmp/trs.log" 2>&1 || { tail -5 "$tmp/trs.log"; echo "mfguard: split translation failed"; exit 1; }
+CFLAGS_V="-O2 -DTBC_COV" CFLAGS_G="-O1 -DTBC_COV" CFLAGS_I="-O1 -DTBC_COV" tools/build-module.sh "$tmp/split/m.c" "$tmp/split/m.o" >"$tmp/bs.log" 2>&1 || { tail -5 "$tmp/bs.log"; echo "mfguard: split build failed"; exit 1; }
+"$CC" -O1 -w -DTBC_COV -DMODULE=Mf $TBC_INC tools/module-shell.c "$tmp/split/m.o" $TBC_LIBS -o "$tmp/shells" || { echo "mfguard: split link failed"; exit 1; }
 # the library with every comment line and the indentation taken out of init.tcl (what the N64 build does to its scripts)
 cp -R "$TCL_LIBRARY" "$tmp/lib" || exit 1
 sed -e 's/^[[:space:]]*//' -e '/^#/d' "$TCL_LIBRARY/init.tcl" > "$tmp/lib/init.tcl"
@@ -48,28 +54,31 @@ status=0
 run() {
   label=$1; shift
   out=$(env "$@" 2>&1)
-  if [ $? -eq 0 ]; then echo "mfguard: $label: ok"; else printf '%s\n' "$out" | head -8; echo "mfguard: $label: FAILED"; status=1; fi
+  if [ $? -eq 0 ]; then echo "mfguard: $VAR $label: ok"; else printf '%s\n' "$out" | head -8; echo "mfguard: $VAR $label: FAILED"; status=1; fi
 }
+for VAR in single split; do
+if [ $VAR = single ]; then SH="$tmp/shell"; else SH="$tmp/shells"; fi
 ALL="fl db sn hy mx all loop red"
-run "stock library, nothing redefined: no hand-over" "$tmp/shell" tests/mfguard.tcl none before "$ALL"
-run "library with comments and indentation stripped: no hand-over" TCL_LIBRARY="$tmp/lib" "$tmp/shell" tests/mfguard.tcl none before "$ALL"
-run "another namespace has its own sin: floor, double, hypot, max stay typed" "$tmp/shell" tests/mfguard.tcl pre_sin before "fl db hy mx loop red"
-run "a max that is not the stock one: floor, double, hypot, sin stay typed" "$tmp/shell" tests/mfguard.tcl pre_max_other before "fl db hy sn loop red"
+run "stock library, nothing redefined: no hand-over" "$SH" tests/mfguard.tcl none before "$ALL"
+run "library with comments and indentation stripped: no hand-over" TCL_LIBRARY="$tmp/lib" "$SH" tests/mfguard.tcl none before "$ALL"
+run "another namespace has its own sin: floor, double, hypot, max stay typed" "$SH" tests/mfguard.tcl pre_sin before "fl db hy mx loop red"
+run "a max that is not the stock one: floor, double, hypot, sin stay typed" "$SH" tests/mfguard.tcl pre_max_other before "fl db hy sn loop red"
 # decision 86: the engine's pattern and the replacements the flags could not see
-run "engine pattern, install after the procs ran: sin/cos/hypot are the engine's, sn and hy hand over, floor stays typed" "$tmp/shell" tests/mfguard.tcl eng after "fl db mx loop red" "sn hy"
-run "engine pattern, install after the module loaded, before the first call" "$tmp/shell" tests/mfguard.tcl eng before "fl db mx loop red" "sn hy"
-run "engine pattern, install before the module loads" "$tmp/shell" tests/mfguard.tcl pre_eng before "fl db mx loop red" "sn hy"
-run "engine pattern in ::mf2 only, after the procs ran: ::mf procs stay typed (sin too), ::mf2::sn hands over" "$tmp/shell" tests/mfguard.tcl other_eng after "fl db sn hy mx loop red" "::mf2::sn"
-run "engine pattern in ::mf2 only, before the module loads: ::mf procs stay typed (sin too), ::mf2::sn hands over, ::mf2::fl stays typed" "$tmp/shell" tests/mfguard.tcl pre_other_eng before "fl db sn hy mx loop red ::mf2::fl" "::mf2::sn"
+run "engine pattern, install after the procs ran: sin/cos/hypot are the engine's, sn and hy hand over, floor stays typed" "$SH" tests/mfguard.tcl eng after "fl db mx loop red" "sn hy"
+run "engine pattern, install after the module loaded, before the first call" "$SH" tests/mfguard.tcl eng before "fl db mx loop red" "sn hy"
+run "engine pattern, install before the module loads" "$SH" tests/mfguard.tcl pre_eng before "fl db mx loop red" "sn hy"
+run "engine pattern in ::mf2 only, after the procs ran: ::mf procs stay typed (sin too), ::mf2::sn hands over" "$SH" tests/mfguard.tcl other_eng after "fl db sn hy mx loop red" "::mf2::sn"
+run "engine pattern in ::mf2 only, before the module loads: ::mf procs stay typed (sin too), ::mf2::sn hands over, ::mf2::fl stays typed" "$SH" tests/mfguard.tcl pre_other_eng before "fl db sn hy mx loop red ::mf2::fl" "::mf2::sn"
 for s in nsalias_floor nsalias_double nsalias_sin nsalias_max nsimport_floor nsimport_sin glimport_floor path_floor pathalias_floor pathalias_sin trace_floor trace_sin trace_double trace_max trace_hypot eng; do
   for w in before after twice; do
-    run "$s ($w the first call): results and trace logs as the interpreter's" "$tmp/shell" tests/mfguard.tcl $s $w ""
+    run "$s ($w the first call): results and trace logs as the interpreter's" "$SH" tests/mfguard.tcl $s $w ""
   done
 done
 for s in nsproc_floor nsproc_double nsproc_sin nsproc_max glproc_floor glproc_double glproc_max glalias_floor glrename_floor gldelete_double glrename_max glrename_sin none; do
   for w in before after twice; do
-    run "$s ($w the first call): results as the interpreter's" "$tmp/shell" tests/mfguard.tcl $s $w ""
+    run "$s ($w the first call): results as the interpreter's" "$SH" tests/mfguard.tcl $s $w ""
   done
+done
 done
 [ $status = 0 ] && echo "mfguard: ok"
 exit $status
