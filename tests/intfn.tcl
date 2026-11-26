@@ -14,6 +14,18 @@ set fits {0 1 -1 0.5 -0.5 1.5 -1.5 2.5 -2.5 0.49999999999999994 -0.4999999999999
 # these need a bignum or an error (or are not numbers): the interpreter's result is what they must give
 set others {9223372036854775808.0 -9223372036854775808.0 -9223372036854775809.0 1e19 -1e19 1.8446744073709552e19 3e19 1e300 -1e300 Inf -Inf NaN 1e400 -1e400
   9223372036854775808 -9223372036854775809 18446744073709551616 100000000000000000000 abc {} {1 2} 0x {1e} true}
+# finite doubles of 2^63 and more (decision 90): int() and wide() of them are computed in typed code (the integer modulo 2^64, or modulo 2^32 where long is 32 bits wide) and
+# must stay typed in the procs that only convert; round() of them is a bignum and hands over
+set big {}
+for {set e 63} {$e <= 70} {incr e} {
+    set p [expr {2.0 ** $e}]
+    binary scan [binary format Q $p] W bits
+    foreach dl {-1 0 1} { foreach sg {1 -1} {
+        binary scan [binary format W [expr {$bits + $dl}]] Q v
+        lappend big [expr {$sg * $v}]
+    } }
+}
+lappend big 1e19 -1e19 1.8446744073709552e19 3e19 1.5e20 -1.5e20 1e30 1e100 1e300 -1e300 1.7976931348623157e308 -1.7976931348623157e308 "  1e20" 1e+19 1E19
 set bad 0
 set ncomp 0
 proc call {c} { set r [catch {uplevel #0 $c} v o]; list $r $v [expr {$r == 1 ? [dict get $o -errorcode] : {}}] }
@@ -43,7 +55,15 @@ foreach p {b_int b_wide b_round d_int d_wide d_round d_use w_use r_use i_int i_r
     if {![dict exists $d $p]} { puts "FAILED: $p was never entered typed"; incr bad; continue }
     if {[dict get $d $p handovers] != 0} { puts "FAILED: $p handed over [dict get $d $p handovers] times: [tbc::hot -top 3]"; incr bad }
 }
+# int() and wide() of doubles of 2^63 and more: typed, no hand-over, the interpreter's results
+foreach v $big { foreach p {b_int b_wide d_int d_wide} { compare [list ::fn::$p $v] } }
+set d [tbc::hot -dict]
+foreach p {b_int b_wide d_int d_wide} {
+    set p ::fn::$p
+    if {[dict get $d $p handovers] != 0} { puts "FAILED: $p handed over [dict get $d $p handovers] times for a double of 2^63 or more: [tbc::hot -top 3]"; incr bad }
+}
 # then every value, the ones that overflow or need a bignum included
+sweep $big
 sweep $fits
 sweep $others
 # the same values again after the compiled procs have run (the objects have been converted by then: a double that was read as text is now a double object)

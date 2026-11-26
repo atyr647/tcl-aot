@@ -3,13 +3,19 @@
 # the body saves, decision 51) must give the interpreter's results whoever calls them, and a loop, a recursion, or a lot of typed code must still get the stub.
 cd "$(dirname "$0")/.." || exit 1
 . tools/env.sh || exit 1
-unset TBC_NOLITE
+unset TBC_NOLITE TBC_LITE_CALLS
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/p.tcl" <<'TCL'
 proc lt_tiny {x} { expr {$x * 2 + 1} }
 proc lt_str {s} { string length $s }
 proc lt_call {x} { return [expr {[lt_tiny $x] + [lt_str abc]}] }
+# decision 89: a proc that calls a pure proc of the module by a literal name keeps its entry stub (compiled, it makes that call as a C call); one that calls it through a variable,
+# or calls a proc that needs a frame (lt_np reads a variable of its caller: not pure), or calls nothing of the module, is left to the interpreter as before
+proc lt_ind {x} { set c lt_tiny; return [$c $x] }
+proc lt_np {v} { upvar 1 $v y; return $y }
+proc lt_callnp {x} { set q $x; return [lt_np q] }
+proc lt_leaf {x} { expr {$x + 1} }
 proc lt_loop {n} { set s 0; for {set i 0} {$i < $n} {incr i} { incr s $i }; return $s }
 proc lt_rec {n} { if {$n < 2} { return $n }; return [expr {[lt_rec [expr {$n - 1}]] + [lt_rec [expr {$n - 2}]]}] }
 proc lt_cb {l} { lsort -command lt_cmp $l }
@@ -36,20 +42,46 @@ TCL
 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/p.c" Liteprocs >"$tmp/tr.log" 2>&1 || { echo "lite: translation failed"; tail -3 "$tmp/tr.log"; exit 1; }
 # the entry of a proc ends with its yres, ens and lite fields
 lite() { grep -E "^static TbcEntry tbc_e__3a_3a$(printf '%s' "$1" | sed 's/_/_5f/g') " "$tmp/p.c" | sed 's/.*, \([01]\) };$/\1/'; }
-for p in lt_tiny lt_str lt_call lt_cmp lt_cb lt_nine lt_ifs; do [ "$(lite $p)" = 1 ] || { echo "lite: FAILED, $p is not left to the interpreter"; exit 1; }; done
-for p in lt_loop lt_rec lt_fourteen lt_ifheavy; do [ "$(lite $p)" = 0 ] || { echo "lite: FAILED, $p is a loop or a recursion and must get the entry"; exit 1; }; done
-echo "lite: small loop-free procs are left to the interpreter, loops and recursions are not: ok"
+for p in lt_tiny lt_str lt_cmp lt_cb lt_nine lt_ifs lt_ind lt_callnp lt_leaf; do [ "$(lite $p)" = 1 ] || { echo "lite: FAILED, $p is not left to the interpreter"; exit 1; }; done
+for p in lt_call lt_loop lt_rec lt_fourteen lt_ifheavy; do [ "$(lite $p)" = 0 ] || { echo "lite: FAILED, $p is a loop or a recursion and must get the entry"; exit 1; }; done
+echo "lite: small loop-free procs are left to the interpreter, loops, recursions and procs that call compiled procs directly are not: ok"
+# TBC_LITE_CALLS=0 gives the rule of decision 51 back (lt_call is left to the interpreter); TBC_NOLITE=1 turns the rule off altogether
+TBC_LITE_CALLS=0 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/p0.c" Liteprocs >"$tmp/tr0.log" 2>&1 || { echo "lite: translation failed (TBC_LITE_CALLS=0)"; exit 1; }
+TBC_NOLITE=1 "$TCLSH" src/translate.tcl "$tmp/p.tcl" "$tmp/pn.c" Liteprocs >"$tmp/trn.log" 2>&1 || { echo "lite: translation failed (TBC_NOLITE=1)"; exit 1; }
+lite0() { grep -E "^static TbcEntry tbc_e__3a_3a$(printf '%s' "$1" | sed 's/_/_5f/g') " "$tmp/p0.c" | sed 's/.*, \([01]\) };$/\1/'; }
+liten() { grep -E "^static TbcEntry tbc_e__3a_3a$(printf '%s' "$1" | sed 's/_/_5f/g') " "$tmp/pn.c" | sed 's/.*, \([01]\) };$/\1/'; }
+[ "$(lite0 lt_call)" = 1 ] || { echo "lite: FAILED, TBC_LITE_CALLS=0 must leave lt_call to the interpreter"; exit 1; }
+for p in lt_tiny lt_call lt_nine lt_loop; do [ "$(liten $p)" = 0 ] || { echo "lite: FAILED, TBC_NOLITE=1 left $p to the interpreter"; exit 1; }; done
+# the rule is a flag of the table and nothing else: the two modules differ in no other line of C
+sed 's/, [01] };$/ };/' "$tmp/p.c" > "$tmp/a.c"; sed 's/, [01] };$/ };/' "$tmp/p0.c" > "$tmp/b.c"
+diff "$tmp/a.c" "$tmp/b.c" >/dev/null || { echo "lite: FAILED, TBC_LITE_CALLS=0 changes more than the lite flags"; exit 1; }
+echo "lite: TBC_LITE_CALLS=0 gives the old rule (only the flags differ), TBC_NOLITE=1 leaves none to the interpreter: ok"
 "$CC" -O1 -w -DMODULE=Liteprocs $TBC_INC tools/module-shell.c "$tmp/p.c" $TBC_LIBS -o "$tmp/shell" || { echo "lite: build failed"; exit 1; }
 cat > "$tmp/run.tcl" <<'TCL'
 if {[info exists ::env(COMPILED)]} { load {} Liteprocs }
 source $::env(PROCS)
 set r {}
 foreach x {0 1 5 -3} { lappend r [lt_tiny $x] [lt_call $x] }
-lappend r [lt_str hello] [lt_loop 50] [lt_rec 12] [lt_cb {5 3 9 1}] [lt_nine 100] [lt_fourteen 100] [lt_nine -7] [lt_fourteen 9223372036854775807] [lt_ifs 1] [lt_ifs 2] [lt_ifs 3] [lt_ifheavy 1] [lt_ifheavy 2]
+lappend r [lt_ind 4] [lt_callnp 7] [lt_leaf 2] [lt_str hello] [lt_loop 50] [lt_rec 12] [lt_cb {5 3 9 1}] [lt_nine 100] [lt_fourteen 100] [lt_nine -7] [lt_fourteen 9223372036854775807] [lt_ifs 1] [lt_ifs 2] [lt_ifs 3] [lt_ifheavy 1] [lt_ifheavy 2]
 puts $r
 puts [catch {lt_tiny} e]:$e
 puts [catch {lt_tiny 1 2} e]:$e
 puts [catch {lt_tiny abc} e]:$e
+puts [catch {lt_call abc} e]:$e
+puts [catch {lt_call} e]:$e
+# the callee redefined, renamed and deleted while the caller is compiled (the callers' direct call is guarded by the callee's flag, decision 78)
+proc lt_tiny {x} { expr {$x * 3} }
+puts [lt_call 5]
+rename lt_str lt_str0
+proc lt_str {s} { string length $s$s }
+puts [lt_call 5]
+rename lt_str {}
+rename lt_str0 lt_str
+puts [lt_call 5]
+rename lt_tiny lt_tiny0
+puts [catch {lt_call 5} e]:$e
+rename lt_tiny0 lt_tiny
+puts [lt_call 5]
 TCL
 a=$(PROCS="$tmp/p.tcl" "$tmp/shell" "$tmp/run.tcl" 2>&1); b=$(COMPILED=1 PROCS="$tmp/p.tcl" "$tmp/shell" "$tmp/run.tcl" 2>&1)
 [ "$a" = "$b" ] || { echo "lite: FAILED, results differ:"; printf '%s\n' "$a"; printf '%s\n' "$b"; exit 1; }

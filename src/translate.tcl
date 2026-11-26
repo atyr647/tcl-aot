@@ -4210,6 +4210,13 @@ proc liteProc {P} {
     foreach pc $PI($P,reach) { if {[info exists PI($P,cmdAt,$pc)] && [regexp {^(?:::)?regexp$} $PI($P,cmdAt,$pc)]} { return 0 } }
     # (recursive: some typed variant of it reaches itself)
     foreach k $::variants { if {[lindex [keysplit $k] 0] eq $P && [info exists REC($k)] && $REC($k)} { return 0 } }
+    # (decision 89: a proc that calls, by a literal name, a pure proc of this module makes that call as a direct C call when it is compiled, where the interpreter would run the body
+    # and then cross into compiled code through the callee's stub, a second entry; such a proc keeps its entry stub however short it is: aot7, `::tq::math::sin` and `cos` 2.1 times
+    # faster compiled than left to the interpreter.  The callee must be in pureProcs: a call of any other proc goes through the interpreter from compiled code as well, which saves
+    # nothing.  TBC_LITE_CALLS=0 gives the rule of decision 51 back.)
+    if {!([info exists ::env(TBC_LITE_CALLS)] && $::env(TBC_LITE_CALLS) eq "0")} {
+        foreach c $PI($P,callees) { if {$c in $::pureProcs && $c ne $P} { return 0 } }
+    }
     # (the entry costs about 750 instructions, and typed code about 320 more a call, for taking its arguments and making its result: an expression-only proc breaks even at 9 operations, a weight
     # of 1108, m_p2 to m_p9 of bench/entry.sh.  The weight is the heaviest path, and a call may take a lighter one (m_ifs: the first arm of each of its three ifs saves 800 of the 1310, and
     # loses 0.4% with the entry; the weight is also an estimate, good to a sixth): the entry is left out unless the body clearly saves more, 40% above the break-even)
